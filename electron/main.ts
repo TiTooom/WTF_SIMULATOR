@@ -1,5 +1,7 @@
 // Application de bureau : menu (solo / héberger / rejoindre) + serveur intégré + fenêtre de jeu.
+import fs from 'node:fs';
 import path from 'node:path';
+import { sanitizeSettings } from '../shared/settings';
 import { app, BrowserWindow, ipcMain, Menu, type IpcMainInvokeEvent } from 'electron';
 import { startServer, type RunningServer } from '../server/server';
 import { announceGame, listenForGames } from './discovery';
@@ -14,13 +16,20 @@ let stopListen: (() => void) | null = null;
 
 const menuFile = path.join(__dirname, 'menu.html');
 const publicDir = path.join(app.getAppPath(), 'dist', 'public');
-const saveDir = path.join(app.getPath('userData'), 'saves'); // ex : %APPDATA%/Jeu 3D/saves
+const saveDir = path.join(app.getPath('userData'), 'saves'); // ex : %APPDATA%/WTF SIMULATOR/saves
+const settingsFile = path.join(app.getPath('userData'), 'settings.json');
+
+// Le jeu s'appelait « Jeu 3D » : on récupère les anciennes sauvegardes une seule fois.
+try {
+  const oldSaves = path.join(app.getPath('appData'), 'Jeu 3D', 'saves');
+  if (!fs.existsSync(saveDir) && fs.existsSync(oldSaves)) fs.cpSync(oldSaves, saveDir, { recursive: true });
+} catch { /* migration facultative */ }
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1280, height: 720, minWidth: 800, minHeight: 500, backgroundColor: '#9fd3ff', title: 'Jeu 3D',
+    width: 1280, height: 720, minWidth: 800, minHeight: 500, backgroundColor: '#9fd3ff', title: 'WTF SIMULATOR',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
@@ -119,6 +128,22 @@ ipcMain.handle('launcher:back', async (_e, error?: unknown) => {
   await stopEverything();
   showMenu(typeof error === 'string' ? error.slice(0, 200) : undefined);
 });
+// Réglages du joueur (touches, sensibilité, volumes) : un seul fichier pour toutes les parties.
+// Lisibles et modifiables depuis le menu ET depuis une page de jeu, donc toujours validés.
+ipcMain.handle('settings:get', () => {
+  try {
+    return sanitizeSettings(JSON.parse(fs.readFileSync(settingsFile, 'utf8')));
+  } catch {
+    return sanitizeSettings(null);
+  }
+});
+ipcMain.handle('settings:save', (_e, raw: unknown) => {
+  try {
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify(sanitizeSettings(raw)));
+  } catch { /* disque indisponible : les réglages restent valables pour la session */ }
+});
+
 ipcMain.handle('launcher:update-state', (e) =>
   fromMenu(e) ? { ...(updater?.state() ?? { status: 'idle' }), current: app.getVersion() } : { status: 'idle' });
 ipcMain.handle('launcher:install-update', (e) => {

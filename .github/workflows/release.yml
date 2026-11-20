@@ -25,8 +25,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/Jeu3D-Installer-*.exe
-            release/Jeu3D-Installer-*.exe.blockmap
+            release/WTF-SIMULATOR-Setup-*.exe
+            release/WTF-SIMULATOR-Setup-*.exe.blockmap
             release/latest.yml
 
   macos:
@@ -42,4 +42,4 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false' # la signature ad hoc est faite par scripts/adhoc-sign.cjs
       - uses: softprops/action-gh-release@v2
         with:
-          files: release/Jeu3D-*-mac-*.dmg
+          files: release/WTF-SIMULATOR-*-mac-*.dmg

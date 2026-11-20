@@ -1,9 +1,14 @@
 import * as THREE from 'three';
 import { VEHICLE_SPECS, crateLayout } from '../shared/constants';
 import type { Input } from '../shared/protocol';
+import { defaultSettings, type ActionId, type Settings } from '../shared/settings';
+import { GameAudio } from './audio';
+import { createChat } from './chat';
 import { buildAvatar, buildCar, buildCrate, buildExcavator, type VehicleView } from './models';
 import { Net } from './net';
 import { buildEnvironment } from './scene';
+import { launcher, loadSettings, saveSettings } from './settings';
+import { getLayout, keyLabel, openSettings } from './ui/settingsPanel';
 
 // ---------- Rendu ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
@@ -27,10 +32,32 @@ const crateMeshes = crateLayout().map((c) => {
 const vehicleViews: VehicleView[] = [];
 const avatars = new Map<string, THREE.Group>();
 
+// ---------- Réglages, son ----------
+let settings: Settings = defaultSettings();
+let layout: Awaited<ReturnType<typeof getLayout>> = null;
+const audio = new GameAudio();
+const applySettings = (s: Settings) => {
+  settings = s;
+  audio.setVolumes(s.master, s.effects);
+};
+void Promise.all([loadSettings(), getLayout()]).then(([s, l]) => {
+  layout = l;
+  applySettings(s);
+});
+/** Nom de la touche affiché dans l'aide (ex : « Z » en AZERTY). */
+const L = (a: ActionId) => keyLabel(settings.keys[a], layout);
+
+// Les navigateurs n'autorisent le son qu'après un geste du joueur
+for (const ev of ['pointerdown', 'keydown'] as const) addEventListener(ev, () => audio.resume(), { capture: true });
+document.addEventListener('click', (e) => {
+  if ((e.target as HTMLElement).closest?.('button')) audio.play('click');
+});
+
 // ---------- Entrées ----------
 const keys = new Set<string>();
-// event.code = position physique : en AZERTY, Z/Q/S/D = KeyW/KeyA/KeyS/KeyD.
-const axis = (pos: string, neg: string) => (keys.has(pos) ? 1 : 0) - (keys.has(neg) ? 1 : 0);
+/** Les touches sont lues par code physique (event.code) : le même réglage marche en AZERTY et en QWERTY. */
+const isDown = (a: ActionId) => !!settings.keys[a] && keys.has(settings.keys[a]);
+const axis = (pos: ActionId, neg: ActionId) => (isDown(pos) ? 1 : 0) - (isDown(neg) ? 1 : 0);
 let yaw = 0;
 let pitch = 0;
 let lastMouseMove = 0;
@@ -41,8 +68,8 @@ let zoom = 1;
 try {
   zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(localStorage.getItem('zoom')) || 1));
 } catch { /* stockage indisponible : zoom par défaut */ }
-
 addEventListener('wheel', (e) => {
+  if (chat.isOpen() || settingsOpen) return;
   zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom * Math.exp(e.deltaY * 0.001)));
   try { localStorage.setItem('zoom', String(zoom)); } catch { /* ignoré */ }
 }, { passive: true });
@@ -51,26 +78,36 @@ renderer.domElement.addEventListener('click', () => renderer.domElement.requestP
 addEventListener('mousemove', (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
   lastMouseMove = performance.now();
-  yaw -= e.movementX * 0.002;
-  pitch = Math.max(-1.45, Math.min(1.45, pitch - e.movementY * 0.002));
+  yaw -= e.movementX * 0.002 * settings.sensitivity;
+  pitch = Math.max(-1.45, Math.min(1.45, pitch - e.movementY * 0.002 * settings.sensitivity));
 });
+
+let settingsOpen = false;
 addEventListener('keydown', (e) => {
-  if ((e.target as HTMLElement).tagName === 'INPUT') return;
+  if ((e.target as HTMLElement).tagName === 'INPUT' || settingsOpen || !playing) return;
   keys.add(e.code);
-  if (e.code === 'KeyE' && !e.repeat) net.send({ type: 'interact' });
-  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+  if (!e.repeat) {
+    if (e.code === settings.keys.interact) net.send({ type: 'interact' });
+    if (e.code === settings.keys.chat) {
+      e.preventDefault();
+      chat.open();
+    }
+    if (e.code === settings.keys.jump) audio.play('jump');
+  }
+  // Pas de défilement de page ni de focus sur les boutons avec les touches du jeu
+  if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'Tab') e.preventDefault();
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
 
 const readInput = (): Input => ({
-  f: axis('KeyW', 'KeyS'), s: axis('KeyD', 'KeyA'),
-  sw: axis('ArrowLeft', 'ArrowRight'), bm: axis('ArrowUp', 'ArrowDown'),
-  st: axis('KeyR', 'KeyF'), bk: axis('KeyT', 'KeyG'),
-  jump: keys.has('Space') ? 1 : 0, yaw,
+  f: axis('forward', 'back'), s: axis('right', 'left'),
+  sw: axis('swingLeft', 'swingRight'), bm: axis('boomUp', 'boomDown'),
+  st: axis('stickOut', 'stickIn'), bk: axis('bucketCurl', 'bucketDump'),
+  jump: isDown('jump') ? 1 : 0, yaw,
 });
 
-// ---------- Réseau + menu ----------
+// ---------- Réseau, menu, pause, chat ----------
 const net = new Net();
 const $ = (id: string) => document.getElementById(id)!;
 const hud = $('hud');
@@ -80,20 +117,54 @@ const nameInput = $('name') as HTMLInputElement;
 const status = $('status');
 try { nameInput.value = localStorage.getItem('name') ?? ''; } catch { /* ignoré */ }
 
+const chat = createChat({
+  send: (text) => net.send({ type: 'chat', text }),
+  onOpen: () => {
+    keys.clear();
+    document.exitPointerLock();
+    updatePause();
+  },
+  onClose: () => {
+    renderer.domElement.requestPointerLock()?.catch?.(() => {});
+    updatePause();
+  },
+});
+net.onChat = (m) => {
+  chat.add(m);
+  if (!m.sys && m.from !== ownName) audio.play('chat');
+};
+let ownName = '';
+
 // Écran de pause : visible dès que la souris n'est plus capturée (Échap)
 const pauseEl = $('pause');
 const pauseInfo = $('pauseInfo');
 let playing = false;
 const updatePause = () => {
-  pauseEl.style.display = playing && document.pointerLockElement !== renderer.domElement ? 'flex' : 'none';
+  const lost = document.pointerLockElement !== renderer.domElement;
+  pauseEl.style.display = playing && lost && !chat.isOpen() && !settingsOpen ? 'flex' : 'none';
 };
 document.addEventListener('pointerlockchange', updatePause);
 pauseEl.addEventListener('click', () => renderer.domElement.requestPointerLock());
 $('back').addEventListener('click', (e) => {
   e.stopPropagation();
-  const l = (window as unknown as { launcher?: { backToMenu?: () => void } }).launcher;
-  if (l?.backToMenu) l.backToMenu();
+  const l = launcher();
+  if (l?.backToMenu) void l.backToMenu();
   else location.reload(); // navigateur : retour à l'écran du pseudo
+});
+$('options').addEventListener('click', (e) => {
+  e.stopPropagation();
+  settingsOpen = true;
+  keys.clear();
+  updatePause();
+  void openSettings({
+    load: async () => settings,
+    save: saveSettings,
+    onChange: applySettings,
+    onClose: () => {
+      settingsOpen = false;
+      updatePause();
+    },
+  });
 });
 
 /** Copie dans le presse-papiers (l'API moderne exige une page sécurisée ; repli pour http://192.168…). */
@@ -118,11 +189,13 @@ let joined = false;
 function join() {
   if (joined) return;
   joined = true;
+  ownName = nameInput.value.trim();
   try { localStorage.setItem('name', nameInput.value); } catch { /* ignoré */ }
   status.textContent = 'Connexion…';
   net.onWelcome = () => {
     menu.style.display = 'none';
     playing = true;
+    chat.setEnabled(net.mode === 'multi');
     renderer.domElement.requestPointerLock()?.catch?.(() => {});
     updatePause();
     fetch('/info').then((r) => r.json()).then((i: { mode: string; urls: string[] }) => {
@@ -147,13 +220,13 @@ function join() {
         pauseInfo.appendChild(row);
       }
     }).catch(() => {});
-    setInterval(() => net.send({ type: 'input', i: readInput() }), 33);
+    setInterval(() => net.send({ type: 'input', i: chat.isOpen() || settingsOpen ? { ...readInput(), f: 0, s: 0, sw: 0, bm: 0, st: 0, bk: 0, jump: 0 } : readInput() }), 33);
   };
   const fail = (message: string) => {
     playing = false;
     updatePause();
-    const l = (window as unknown as { launcher?: { backToMenu?: (error?: string) => void } }).launcher;
-    if (l?.backToMenu) return l.backToMenu(message); // application : retour au menu avec le message
+    const l = launcher();
+    if (l?.backToMenu) return void l.backToMenu(message); // application : retour au menu avec le message
     menu.style.display = 'flex';
     status.textContent = message + ' Recharge la page pour réessayer.';
   };
@@ -170,6 +243,9 @@ if (quickName) {
   join();
 }
 
+// Accès pour les tests automatisés (CDP) : lecture de l'état du son
+Object.assign(window, { __wtf: { audio } });
+
 // ---------- Boucle de rendu ----------
 const CAMS = {
   car: { height: 1.6, distance: 8.5, pitch: -0.22 },
@@ -179,6 +255,8 @@ const EYE = 0.7;
 let prevVeh = -1;
 let lastVehYaw = 0;
 let last = performance.now();
+let prevPos: [number, number] | null = null;
+let walkSpeed = 0;
 const camTarget = new THREE.Vector3();
 const tmpQ = new THREE.Quaternion();
 
@@ -237,12 +315,15 @@ function frame(now: number) {
   if (veh && prevVeh < 0) {
     yaw = 0;
     pitch = CAMS[veh.type].pitch;
+    audio.play('enter');
   } else if (!veh && prevVeh >= 0) {
     yaw += lastVehYaw;
     pitch = 0;
+    audio.play('exit');
   }
   prevVeh = veh ? me.veh : -1;
 
+  const multi = net.mode === 'multi';
   if (veh) {
     // Caméra de poursuite : derrière et au-dessus, orbite à la souris, recentrage après 1,5 s, zoom à la molette
     const cam = CAMS[veh.type];
@@ -260,19 +341,35 @@ function frame(now: number) {
     camera.position.y = Math.max(camera.position.y, 0.5);
     camera.rotation.copy(eul);
     const kmh = Math.round(Math.abs(veh.sp) * 3.6);
+    const fb = `${L('forward')}/${L('back')}`, lr = `${L('left')}/${L('right')}`;
     hud.textContent = veh.type === 'car'
-      ? `Voiture · ${kmh} km/h\nZ/S : accélérer · Q/D : tourner · Molette : zoom · E : descendre`
-      : 'Pelleteuse · Z/S : avancer · Q/D : tourner · Molette : zoom\n←/→ : pivoter la cabine · ↑/↓ : flèche · R/F : bras · T/G : godet · E : descendre';
+      ? `Voiture · ${kmh} km/h\n${fb} : accélérer · ${lr} : tourner · Molette : zoom · ${L('interact')} : descendre`
+      : `Pelleteuse · ${fb} : avancer · ${lr} : tourner · Molette : zoom · ${L('interact')} : descendre\n`
+        + `${L('swingLeft')}/${L('swingRight')} : cabine · ${L('boomUp')}/${L('boomDown')} : flèche · `
+        + `${L('stickOut')}/${L('stickIn')} : bras · ${L('bucketCurl')}/${L('bucketDump')} : godet`;
   } else {
     camera.position.set(me.p[0], me.p[1] + EYE, me.p[2]);
     camera.rotation.set(pitch, yaw, 0, 'YXZ');
     let hint = '';
     for (const v of s.vehicles) {
       const spec = VEHICLE_SPECS[v.type];
-      if (!v.drv && Math.hypot(me.p[0] - v.p[0], me.p[2] - v.p[2]) < spec.enterRadius) hint = `\nE : monter dans ${spec.name}`;
+      if (!v.drv && Math.hypot(me.p[0] - v.p[0], me.p[2] - v.p[2]) < spec.enterRadius) hint = `\n${L('interact')} : monter dans ${spec.name}`;
     }
-    hud.textContent = 'ZQSD : marcher · Espace : sauter' + hint;
+    hud.textContent = `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : sauter`
+      + (multi ? ` · ${L('chat')} : chat` : '') + hint;
   }
+
+  // Son : moteurs (selon vitesse et distance), pas à pied, vent
+  const dtSafe = Math.max(dt, 0.001);
+  if (prevPos && !veh) walkSpeed += (Math.hypot(me.p[0] - prevPos[0], me.p[2] - prevPos[1]) / dtSafe - walkSpeed) * Math.min(1, dt * 10);
+  else walkSpeed = 0;
+  prevPos = [me.p[0], me.p[2]];
+  audio.update(
+    dt,
+    [camera.position.x, camera.position.y, camera.position.z],
+    s.vehicles.map((v, i) => ({ type: v.type, p: v.p, speed: v.sp, driven: !!v.drv, mine: i === me.veh, arm: v.a })),
+    !veh && walkSpeed > 1.5,
+  );
 
   playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');
   renderer.render(scene, camera);

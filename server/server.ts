@@ -7,7 +7,7 @@ import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { Sim } from '../shared/sim';
 import { DEFAULT_PORT, MAX_PLAYERS, SNAP_HZ, STEP } from '../shared/constants';
-import type { ClientMsg, ServerMsg } from '../shared/protocol';
+import type { ChatMsg, ClientMsg, ServerMsg } from '../shared/protocol';
 
 export interface ServerOptions {
   mode: 'solo' | 'multi';
@@ -108,6 +108,18 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let nextId = 1;
   const send = (ws: WebSocket, msg: ServerMsg) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg));
 
+  // ---------- Chat ----------
+  const chatHistory: ChatMsg[] = []; // derniers messages, renvoyés aux nouveaux arrivants
+  const chatTimes = new WeakMap<WebSocket, number[]>(); // anti-spam : 5 messages max par 5 s et par joueur
+  const say = (m: ChatMsg) => {
+    chatHistory.push(m);
+    if (chatHistory.length > 30) chatHistory.shift();
+    const data = JSON.stringify({ type: 'chat', m } satisfies ServerMsg);
+    for (const ws of sockets.keys()) if (ws.readyState === ws.OPEN) ws.send(data);
+  };
+  const cleanChat = (raw: unknown) =>
+    String(raw ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+
   wss.on('connection', (ws) => {
     ws.on('message', (raw) => {
       let msg: ClientMsg;
@@ -124,19 +136,30 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         sockets.set(ws, pid);
         sim.addPlayer(pid, name);
         send(ws, { type: 'welcome', id: pid, mode });
+        for (const m of chatHistory) send(ws, { type: 'chat', m });
+        if (mode === 'multi') say({ from: '', text: `${name} a rejoint la partie`, sys: true });
         log(`+ ${name} (${sockets.size} joueur(s))`);
       } else if (id && msg.type === 'input') {
         sim.setInput(id, msg.i ?? {});
       } else if (id && msg.type === 'interact') {
         sim.interact(id);
+      } else if (id && msg.type === 'chat') {
+        const text = cleanChat(msg.text);
+        const now = Date.now();
+        const recent = (chatTimes.get(ws) ?? []).filter((t) => now - t < 5000);
+        if (!text || recent.length >= 5) return; // vide ou trop rapide : ignoré
+        chatTimes.set(ws, [...recent, now]);
+        say({ from: sim.players.get(id)?.name ?? '?', text });
       }
     });
     ws.on('close', () => {
       const id = sockets.get(ws);
       if (!id) return;
-      log(`- ${sim.players.get(id)?.name} (${sockets.size - 1} joueur(s))`);
+      const name = sim.players.get(id)?.name;
+      log(`- ${name} (${sockets.size - 1} joueur(s))`);
       sim.removePlayer(id);
       sockets.delete(ws);
+      if (mode === 'multi' && name) say({ from: '', text: `${name} a quitté la partie`, sys: true });
       if (sockets.size === 0) save();
     });
   });

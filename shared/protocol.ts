@@ -36,9 +36,17 @@ export interface Snapshot {
 export type ClientMsg =
   | { type: 'join'; name: string }
   | { type: 'input'; i: Input }
-  | { type: 'interact' }; // monter / descendre
+  | { type: 'interact' } // monter / descendre
+  | { type: 'chat'; text: string };
+
+export interface ChatMsg {
+  from: string; // pseudo (vide pour un message du serveur)
+  text: string;
+  sys?: boolean; // message système (arrivée / départ)
+}
 
 export type ServerMsg =
   | { type: 'welcome'; id: string; mode: 'solo' | 'multi' }
   | { type: 'snap'; s: Snapshot }
+  | { type: 'chat'; m: ChatMsg }
   | { type: 'error'; message: string };

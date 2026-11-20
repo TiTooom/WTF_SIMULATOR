@@ -1,10 +1,10 @@
 {
   "name": "jeu-3d",
-  "productName": "Jeu 3D",
-  "description": "Jeu 3D en monde ouvert, véhicules et multijoueur entre amis",
-  "author": "Jeu 3D",
+  "productName": "WTF SIMULATOR",
+  "description": "WTF SIMULATOR : jeu 3D en monde ouvert, véhicules et multijoueur entre amis",
+  "author": "WTF SIMULATOR",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -17,22 +17,49 @@
     "build": "npm run typecheck && npm run build:app",
     "build:app": "npm run build:client && npm run build:electron",
     "build:client": "vite build",
-    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/menu.html --bundle --platform=node --format=cjs --target=node22 --outdir=dist-electron --out-extension:.js=.cjs --loader:.html=copy --entry-names=[name] --external:electron --external:electron-updater --external:bufferutil --external:utf-8-validate",
+    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/menu.html --bundle --platform=node --format=cjs --target=node22 --outdir=dist-electron --out-extension:.js=.cjs --loader:.html=copy --entry-names=[name] --external:electron --external:electron-updater --external:bufferutil --external:utf-8-validate && esbuild electron/menu.ts --bundle --format=iife --platform=browser --target=chrome120 --outfile=dist-electron/menu.js",
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/server.mjs --external:bufferutil --external:utf-8-validate --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
   },
   "build": {
     "appId": "fr.jeu3d.app",
-    "productName": "Jeu 3D",
-    "directories": { "output": "release" },
-    "files": ["dist-electron/**/*", "dist/public/**/*", "package.json"],
+    "productName": "WTF SIMULATOR",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "dist/public/**/*",
+      "package.json"
+    ],
     "afterPack": "scripts/adhoc-sign.cjs",
-    "publish": { "provider": "github", "owner": "TiTooom", "repo": "WTF_SIMULATOR" },
-    "win": { "target": ["nsis"], "signAndEditExecutable": false },
-    "nsis": { "oneClick": true, "perMachine": false, "artifactName": "Jeu3D-Installer-${version}.${ext}" },
+    "publish": {
+      "provider": "github",
+      "owner": "TiTooom",
+      "repo": "WTF_SIMULATOR"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "WTF-SIMULATOR-Setup-${version}.${ext}"
+    },
     "mac": {
       "category": "public.app-category.games",
-      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
-      "artifactName": "Jeu3D-${version}-mac-${arch}.${ext}"
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "WTF-SIMULATOR-${version}-mac-${arch}.${ext}"
     }
   },
   "dependencies": {

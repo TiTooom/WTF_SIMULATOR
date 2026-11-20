@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { ClientMsg, PlayerSnap, ServerMsg, Snapshot, VehicleSnap } from '../shared/protocol';
+import type { ChatMsg, ClientMsg, PlayerSnap, ServerMsg, Snapshot, VehicleSnap } from '../shared/protocol';
 
 /** Les états sont rendus ~100 ms dans le passé et interpolés : mouvement fluide malgré 30 envois/s. */
 const INTERP_MS = 100;
@@ -24,6 +24,7 @@ export class Net {
   private ws: WebSocket | null = null;
   private snaps: { s: Snapshot; at: number }[] = [];
   onWelcome: () => void = () => {};
+  onChat: (m: ChatMsg) => void = () => {};
   onClose: (reason: string) => void = () => {};
   onError: (message: string) => void = () => {};
 
@@ -41,6 +42,8 @@ export class Net {
       } else if (msg.type === 'snap') {
         this.snaps.push({ s: msg.s, at: performance.now() });
         if (this.snaps.length > 30) this.snaps.shift();
+      } else if (msg.type === 'chat') {
+        this.onChat(msg.m);
       } else if (msg.type === 'error') {
         this.onError(msg.message);
       }
