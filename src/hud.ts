@@ -53,7 +53,7 @@ export function createHud() {
       for (const e of [crosshair, $('vitals'), bar, info]) e.style.display = v ? '' : 'none';
     },
     update(s: HudState) {
-      const key = s.hotbar.join('|') + '#' + s.keyLabels.join('|');
+      const key = s.hotbar.map((id) => id + (ITEM_BY_ID.has(id) ? '+' : '-')).join('|') + '#' + s.keyLabels.join('|');
       if (key !== sig) { sig = key; build(s.hotbar, s.keyLabels); lastSel = -1; }
       if (s.selected !== lastSel) {
         lastSel = s.selected;

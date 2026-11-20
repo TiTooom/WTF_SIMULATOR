@@ -7,8 +7,9 @@ import { pack as build } from './packs/build';
 import { pack as weapons } from './packs/weapons';
 import { pack as wtf } from './packs/wtf';
 import { pack as move } from './packs/move';
+import { pack as world } from './packs/world';
 
-const PACKS: Pack[] = [core, build, weapons, wtf, move];
+const PACKS: Pack[] = [core, build, weapons, wtf, move, world];
 
 export const ITEMS: ItemDef[] = PACKS.flatMap((p) => p.items);
 export const ITEM_BY_ID = new Map(ITEMS.map((i) => [i.id, i]));

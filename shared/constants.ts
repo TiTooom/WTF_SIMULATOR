@@ -50,6 +50,7 @@ export function crateLayout(): CrateDef[] {
  */
 export const PROJECTILE_KINDS = [
   'rocket', 'grenade', 'bullet', 'chicken', 'tomato', 'dart', 'mine', 'watermelon', 'confetti', 'cow', 'missile', 'shell', 'plasma',
+  'cushion', 'cone', 'cannonball', 'sucker',
 ] as const;
 
 export const SPAWNS = {

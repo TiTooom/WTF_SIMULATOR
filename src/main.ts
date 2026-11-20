@@ -56,7 +56,15 @@ void Promise.all([loadSettings(), getLayout()]).then(([s, l]) => {
 const L = (a: ActionId) => keyLabel(settings.keys[a], layout);
 
 /** Barre d'objets effective : celle des réglages, ou celle par défaut du jeu. */
-const hotbar = (): string[] => (settings.hotbar.length === 9 ? settings.hotbar : DEFAULT_HOTBAR);
+const URLP = new URLSearchParams(location.search);
+const forcedItem = URLP.get('item') ?? ''; // ?item=<id> : objet forcé dans l'emplacement actif (tests)
+const hotbar = (): string[] => {
+  const h = settings.hotbar.length === 9 ? settings.hotbar : DEFAULT_HOTBAR;
+  if (!forcedItem) return h;
+  const c = [...h];
+  c[selected] = forcedItem;
+  return c;
+};
 let selected = 0;
 const selectedItem = () => hotbar()[selected] ?? '';
 const slotLabels = () => Array.from({ length: 9 }, (_, i) => {
@@ -77,6 +85,11 @@ const isDown = (a: ActionId) => !!settings.keys[a] && keys.has(settings.keys[a])
 const axis = (pos: ActionId, neg: ActionId) => (isDown(pos) ? 1 : 0) - (isDown(neg) ? 1 : 0);
 let yaw = 0;
 let pitch = 0;
+{
+  // ?aim=<yawDeg>,<pitchDeg> : regard initial (tests)
+  const a = (URLP.get('aim') ?? '').split(',').map(Number);
+  if (a.length === 2 && a.every(Number.isFinite)) { yaw = (a[0] * Math.PI) / 180; pitch = (a[1] * Math.PI) / 180; }
+}
 let lastMouseMove = 0;
 let m1 = 0, m2 = 0;
 let inVehicle = false;
@@ -280,6 +293,11 @@ function join() {
     // ?cmd=/drive%20tank : commande de chat envoyée après la connexion (tests automatisés)
     const cmd = new URLSearchParams(location.search).get('cmd');
     if (cmd) setTimeout(() => net.send({ type: 'chat', text: cmd }), 300);
+    // ?fire=<délai s>[,<durée s>] : appui simulé sur le bouton principal (tests)
+    const fire = (URLP.get('fire') ?? '').split(',').map(Number);
+    if (fire.length && Number.isFinite(fire[0]) && URLP.get('fire')) {
+      setTimeout(() => { m1 = 1; setTimeout(() => { m1 = 0; }, (Number.isFinite(fire[1]) ? fire[1] : 0.3) * 1000); }, fire[0] * 1000);
+    }
     fetch('/info').then((r) => r.json()).then((i: { mode: string; urls: string[] }) => {
       pauseInfo.textContent = '';
       if (i.mode !== 'multi' || !i.urls.length) return;

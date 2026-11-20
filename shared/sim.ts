@@ -9,6 +9,7 @@ import {
   type StepCtx, type VehicleDef,
 } from './api';
 import { wedgeVertices, type PropKind } from './props';
+import { buildWorld, STATICS, type WorldBuilder } from './world';
 import { HANDLERS, ITEM_BY_ID, PROP_INDEX, PROP_TICKS, propKindById } from './registry';
 import { VEHICLES } from './vehicles';
 
@@ -106,15 +107,26 @@ export class Sim implements SimApi {
     return sim;
   }
 
-  /** Point d'extension : `shared/world.ts` (décor, écrit par une autre équipe) peut exporter `buildWorld(sim: Sim)`. Absent = ignoré. */
+  /** Décor : `shared/world.ts` (STATICS → colliders fixes, buildWorld → props de décor). Import statique (compatible avec le paquet esbuild). */
   private async loadWorldExtension() {
-    const spec = './world';
     try {
-      const m = await import(/* @vite-ignore */ spec);
-      if (typeof m?.buildWorld === 'function') m.buildWorld(this);
+      for (const s of STATICS) {
+        if (s.collide === false) continue;
+        const r = s.rotY ?? 0;
+        const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), r);
+        let desc: RAPIER.ColliderDesc | null = null;
+        if (s.shape === 'box') desc = RAPIER.ColliderDesc.cuboid(s.size[0] / 2, s.size[1] / 2, s.size[2] / 2);
+        else if (s.shape === 'cylinder') desc = RAPIER.ColliderDesc.cylinder(s.size[1] / 2, s.size[0] / 2);
+        else if (s.shape === 'sphere') desc = RAPIER.ColliderDesc.ball(s.size[0] / 2);
+        else desc = RAPIER.ColliderDesc.convexHull(new Float32Array(wedgeVertices(s.size[0], s.size[1], s.size[2])));
+        if (!desc) continue;
+        this.world.createCollider(
+          desc.setTranslation(s.pos[0], s.pos[1], s.pos[2]).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.9).setCollisionGroups(grp(G.WORLD)),
+        );
+      }
+      buildWorld(this as unknown as WorldBuilder);
     } catch (e) {
-      const msg = String((e as Error)?.message ?? e);
-      if (!/Cannot find|not found|ERR_MODULE|Failed to (load|resolve)/i.test(msg)) this.log(`[sim] décor (world.ts) ignoré : ${msg}`);
+      this.log(`[sim] décor ignoré : ${String((e as Error)?.message ?? e)}`);
     }
   }
 

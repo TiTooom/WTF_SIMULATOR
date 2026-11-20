@@ -50,6 +50,7 @@ Bac à sable 3D multijoueur entre copains. Serveur **autoritaire** (Node + Rapie
 
 ## Test automatisé
 - URL de jeu : `http://localhost:<port>/?name=Bot&cmd=/drive%20tank` → le client rejoint seul, envoie la commande de chat après la connexion (utile pour les captures d'écran de véhicules).
+- Paramètres d'URL de test du client : `?name=` (rejoint seul), `?cmd=<texte>` (message de chat après connexion), `?item=<id>` (objet forcé dans l'emplacement actif), `?fire=<s>[,<durée>]` (appui simulé sur m1 après `s` secondes, 0.3 s par défaut), `?aim=<yawDeg>,<pitchDeg>` (regard initial). `window.__wtf` expose audio, réglages, barre, compteurs de props/projectiles/fx.
 - Harnais physique sans rendu : `tests/harness.ts` (créé par le cœur serveur) pour piloter un véhicule avec des entrées scriptées et afficher sa télémétrie.
 - Capture : `chrome.exe --headless=new --use-angle=swiftshader --enable-unsafe-swiftshader --virtual-time-budget=9000 --window-size=1000,600 --screenshot=<fichier>.png <url>`.
 

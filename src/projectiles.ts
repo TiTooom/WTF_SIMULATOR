@@ -2,6 +2,7 @@
 // uniquement par convention) ; pour rester indépendant du serveur, on reconnaît aussi le kind par son nom : voir kindName().
 // Ajouter une apparence : ajouter une entrée à LOOKS (nom → fabrique de mesh) et, si besoin, sa traînée dans TRAILS.
 import * as THREE from 'three';
+import { PROJECTILE_KINDS } from '../shared/constants';
 import { PROJ_STRIDE } from '../shared/protocol';
 import { outlined, toon } from './gfx';
 import type { Fx } from './fx';
@@ -55,6 +56,11 @@ export const LOOKS: Record<string, Look> = {
     g.add(outlined(new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.08, 10).rotateX(Math.PI / 2).translate(0, 0, -0.22), toon(0xe63946)), 0.02));
     return g;
   },
+  dart: () => outlined(new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.5, 6).rotateX(Math.PI / 2), toon(0xffd166)), 0.02),
+  cow: () => outlined(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 0.7), toon(0xf5f5f5)), 0.03),
+  missile: () => LOOKS.rocket(),
+  shell: () => outlined(new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.5, 10).rotateX(Math.PI / 2), toon(0xd4a84a)), 0.03),
+  plasma: () => new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 8), basic(0x7dff7d)),
   mine: () => outlined(new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.12, 12), toon(0x555a66)), 0.03),
 };
 const unknown: Look = () => sphere(0.12, 0xffffff, false);
@@ -66,6 +72,8 @@ export const TRAILS: Record<string, Trail> = {
     fx.puff(p, 0.3);
     fx.spawn(p, [0, 0.3, 0], 0.25, 0.25, 0.05, 0xffe27a, 0xff6a1a);
   },
+  missile: (fx, p, v, dt) => TRAILS.rocket(fx, p, v, dt),
+  shell: (fx, p) => fx.puff(p, 0.15),
   chicken: () => {},
   confetti: (fx, p) => fx.spawn(p, [0, 0, 0], 0.5, 0.1, 0.02, 0xffca3a, 0xff8fab, -3),
 };
