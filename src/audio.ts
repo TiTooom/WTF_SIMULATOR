@@ -63,6 +63,17 @@ export const SOUNDS: Record<string, SoundFn> = {
   },
   splat: (a) => { a.burst(0.14, 0.4, 1200, 'lowpass', 300); a.tone(260, 60, 0.16, 0.3, 'sine'); },
   chicken: (a) => { for (let i = 0; i < 4; i++) a.tone(760 - i * 40, 420, 0.07, 0.18, 'square', i * 0.09); a.tone(500, 900, 0.18, 0.15, 'sawtooth', 0.45); },
+  // --- sons ajoutés pour les véhicules et objets WTF ---
+  squeal: (a) => { a.tone(1900, 1500, 0.35, 0.12, 'sawtooth'); a.burst(0.3, 0.1, 3500, 'highpass'); },
+  glou: (a) => { for (let i = 0; i < 3; i++) a.tone(320 - i * 40, 140, 0.1, 0.25, 'sine', i * 0.11); },
+  bip: (a) => { a.tone(1250, 1250, 0.08, 0.2, 'square'); },
+  brrrt: (a) => { for (let i = 0; i < 6; i++) a.tone(95 + (i % 2) * 12, 80, 0.07, 0.25, 'sawtooth', i * 0.06); },
+  pfffff: (a) => { a.burst(1.2, 0.25, 4000, 'highpass'); a.tone(900, 120, 1.1, 0.06, 'sine'); },
+  pschitt: (a) => { a.burst(0.5, 0.3, 5000, 'highpass'); a.tone(2000, 600, 0.15, 0.1, 'sine'); },
+  tole: (a) => { a.burst(0.45, 0.3, 1600, 'bandpass', 2400); a.tone(220, 110, 0.4, 0.12, 'sawtooth'); },
+  moo: (a) => { a.tone(150, 110, 0.7, 0.22, 'sawtooth'); a.tone(300, 220, 0.7, 0.08, 'triangle'); },
+  cluck: (a) => { for (let i = 0; i < 3; i++) a.tone(520 + i * 30, 380, 0.05, 0.18, 'square', i * 0.07); },
+  note: (a) => { const f = [523, 587, 659, 784, 880][Math.floor(Math.random() * 5)]; a.tone(f, f, 0.5, 0.22, 'triangle'); a.tone(f * 2, f * 2, 0.3, 0.06, 'sine'); },
 };
 
 export class GameAudio {

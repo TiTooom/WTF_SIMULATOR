@@ -232,7 +232,9 @@ const pauseEl = $('pause');
 const pauseInfo = $('pauseInfo');
 let playing = false;
 const updatePause = () => {
-  pauseEl.style.display = playing && !locked() && !chat.isOpen() && !settingsOpen && !inventory.isOpen() ? 'flex' : 'none';
+  // ?nopause : cache l'écran de pause (captures et tests automatisés en navigateur sans capture de souris)
+  const noPause = new URLSearchParams(location.search).has('nopause');
+  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !inventory.isOpen() ? 'flex' : 'none';
 };
 document.addEventListener('pointerlockchange', updatePause);
 pauseEl.addEventListener('click', () => renderer.domElement.requestPointerLock());

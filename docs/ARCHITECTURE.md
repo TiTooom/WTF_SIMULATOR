@@ -79,3 +79,5 @@ Bac à sable 3D multijoueur entre copains. Serveur **autoritaire** (Node + Rapie
 - **Sauvegarde v2** : props (id de kind, pose, gelé), véhicules par type + rang (n-ième véhicule de ce type), `state()/restore()`. Les soudures ne sont pas sauvegardées. Une sauvegarde v1 est ignorée.
 - **Décor** : `shared/world.ts` peut exporter `buildWorld(sim: Sim)` (import dynamique, ignoré s'il est absent). Attention : dans le serveur empaqueté par esbuild, l'import dynamique n'est pas inclus : ajouter alors un import statique dans `shared/sim.ts`.
 - **Harnais** : `npx tsx tests/harness.ts <type> [avance|virage|tir|crash] [secondes]` · `npx tsx tests/smoke.ts` (vérifications PASS/FAIL).
+
+- `?nopause` : cache l'écran de pause (captures headless sans capture de souris).

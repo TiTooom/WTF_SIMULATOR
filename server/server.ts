@@ -9,6 +9,7 @@ import { Sim } from '../shared/sim';
 import { DEFAULT_PORT, MAX_PLAYERS, SNAP_HZ, STEP } from '../shared/constants';
 import type { ChatMsg, ClientMsg, ServerMsg } from '../shared/protocol';
 import { runCommand } from './commands';
+import { installExtras } from './extras';
 
 export interface ServerOptions {
   mode: 'solo' | 'multi';
@@ -64,6 +65,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   } catch {
     log('Nouvelle partie (aucune sauvegarde trouvée).');
   }
+  const extras = installExtras(sim, { mode }); // événements chaos, modes, commandes /meteo /party /mode…, trampolines, décor frais
   const save = () => {
     try {
       fs.mkdirSync(saveDir, { recursive: true });
@@ -184,6 +186,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     acc = Math.min(acc + (now - last) / 1000, 0.25);
     last = now;
     while (acc >= STEP) {
+      try { extras.step(); } catch (e) { log(`Erreur des extras (ignorée) : ${e}`); }
       try {
         sim.step();
       } catch (e) {

@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { GROUND, ROAD_X, seeded, treeLayout } from '../shared/constants';
 import { canvasTexture, toon, toonRaw } from './gfx';
+import { wedgeVertices } from '../shared/props';
+import { LABELS, STATICS, treeBlocked, type LabelDef, type StaticDef, type StaticShape } from '../shared/world';
 
 /** Décor statique : ciel, lumière, sol herbeux, route, arbres, nuages. (Les collisions des arbres sont côté serveur.) */
 export function buildEnvironment(scene: THREE.Scene) {
@@ -65,7 +67,7 @@ export function buildEnvironment(scene: THREE.Scene) {
   scene.add(road);
 
   // Arbres instanciés
-  const trees = treeLayout();
+  const trees = treeLayout().filter((t) => !treeBlocked(t)); // les arbres qui gênent un lieu sont retirés
   const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.3, 0.4, 2.4, 6), toon(0x8b5a2b), trees.length);
   const leavesLow = new THREE.InstancedMesh(new THREE.ConeGeometry(2.0, 3.0, 7), toon(0x2fa84f), trees.length);
   const leavesTop = new THREE.InstancedMesh(new THREE.ConeGeometry(1.4, 2.4, 7), toon(0x3cc261), trees.length);
@@ -91,4 +93,94 @@ export function buildEnvironment(scene: THREE.Scene) {
     cloud.position.set((rand() - 0.5) * 500, 70 + rand() * 30, (rand() - 0.5) * 500);
     scene.add(cloud);
   }
+
+  buildWorldDecor(scene);
+}
+
+// ---------- Décor fixe de shared/world.ts : formes instanciées (un draw call par forme) + panneaux de texte ----------
+function unitGeometry(shape: StaticShape): THREE.BufferGeometry {
+  if (shape === 'box') return new THREE.BoxGeometry(1, 1, 1);
+  if (shape === 'cylinder') return new THREE.CylinderGeometry(0.5, 0.5, 1, 18);
+  if (shape === 'sphere') return new THREE.SphereGeometry(0.5, 16, 12);
+  const v = wedgeVertices(1, 1, 1);
+  const P = (i: number) => [v[i * 3], v[i * 3 + 1], v[i * 3 + 2]];
+  const pos: number[] = [];
+  for (const t of [[0, 2, 1], [1, 2, 3], [2, 4, 3], [3, 4, 5], [0, 1, 5], [0, 5, 4], [0, 4, 2], [1, 3, 5]]) for (const i of t) pos.push(...P(i));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+const OUTLINE = new THREE.MeshBasicMaterial({ color: 0x1b1b2b, side: THREE.BackSide });
+
+function buildWorldDecor(scene: THREE.Scene) {
+  const groups = new Map<string, StaticDef[]>();
+  for (const s of STATICS) {
+    const key = `${s.shape}${s.glow ? '+' : ''}`;
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(s);
+  }
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3(), sc = new THREE.Vector3(), col = new THREE.Color();
+  const Y = new THREE.Vector3(0, 1, 0);
+  const scaleOf = (s: StaticDef, grow: number) => {
+    const [a, b, c] = s.size;
+    if (s.shape === 'cylinder') return sc.set(a + grow, b + grow, a + grow);
+    if (s.shape === 'sphere') return sc.set(a + grow, a + grow, a + grow);
+    return sc.set(a + grow, b + grow, c + grow);
+  };
+  for (const [key, list] of groups) {
+    const shape = key.replace('+', '') as StaticShape;
+    const geo = unitGeometry(shape);
+    const mat = key.endsWith('+') ? new THREE.MeshBasicMaterial({ color: 0xffffff }) : toon(0xffffff);
+    const mesh = new THREE.InstancedMesh(geo, mat, list.length);
+    mesh.frustumCulled = false;
+    const outlined = list.filter((s) => s.outline ?? (s.collide !== false && !s.glow));
+    const edge = outlined.length ? new THREE.InstancedMesh(geo, OUTLINE, outlined.length) : null;
+    if (edge) edge.frustumCulled = false;
+    list.forEach((s, i) => {
+      q.setFromAxisAngle(Y, s.rotY ?? 0);
+      pos.set(...s.pos);
+      m4.compose(pos, q, scaleOf(s, 0));
+      mesh.setMatrixAt(i, m4);
+      mesh.setColorAt(i, col.setHex(s.color));
+    });
+    outlined.forEach((s, i) => {
+      q.setFromAxisAngle(Y, s.rotY ?? 0);
+      pos.set(...s.pos);
+      m4.compose(pos, q, scaleOf(s, Math.min(0.16, 0.06 + Math.min(...s.size.filter((n) => n > 0)) * 0.02)));
+      edge!.setMatrixAt(i, m4);
+    });
+    scene.add(mesh);
+    if (edge) scene.add(edge);
+  }
+  for (const l of LABELS) scene.add(makeLabel(l));
+}
+
+function makeLabel(l: LabelDef): THREE.Mesh {
+  const lines = l.text.split('\n');
+  const W = 512, H = Math.max(64, Math.min(512, Math.round((W * l.h) / l.w)));
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const g = c.getContext('2d')!;
+  let size = Math.min((H / lines.length) * 0.82, 120);
+  const font = (n: number) => `bold ${n}px "Segoe UI", "Arial Black", sans-serif`;
+  g.font = font(size);
+  const widest = () => Math.max(...lines.map((t) => g.measureText(t).width));
+  while (widest() > W * 0.94 && size > 10) g.font = font((size -= 4));
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = '#' + (l.color ?? 0x222233).toString(16).padStart(6, '0');
+  lines.forEach((t, i) => g.fillText(t, W / 2, (H / lines.length) * (i + 0.54)));
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(l.w, l.h),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4, depthWrite: false }),
+  );
+  mesh.position.set(...l.pos);
+  if (l.flat) mesh.rotation.set(-Math.PI / 2, l.rotY ?? 0, 0, 'YXZ');
+  else mesh.rotation.y = l.rotY ?? 0;
+  return mesh;
 }
