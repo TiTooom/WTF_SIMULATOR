@@ -96,6 +96,24 @@ $('back').addEventListener('click', (e) => {
   else location.reload(); // navigateur : retour à l'écran du pseudo
 });
 
+/** Copie dans le presse-papiers (l'API moderne exige une page sécurisée ; repli pour http://192.168…). */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+}
+
 let joined = false;
 function join() {
   if (joined) return;
@@ -108,9 +126,26 @@ function join() {
     renderer.domElement.requestPointerLock()?.catch?.(() => {});
     updatePause();
     fetch('/info').then((r) => r.json()).then((i: { mode: string; urls: string[] }) => {
-      pauseInfo.textContent = i.mode === 'multi' && i.urls.length
-        ? `Tes amis (même Wi-Fi) te trouvent automatiquement, ou à l'adresse :\n${i.urls.join('\n')}`
-        : '';
+      pauseInfo.textContent = '';
+      if (i.mode !== 'multi' || !i.urls.length) return;
+      const intro = document.createElement('div');
+      intro.textContent = "Tes amis (même Wi-Fi) te trouvent automatiquement dans l'application, ou avec cette adresse (navigateur) :";
+      pauseInfo.appendChild(intro);
+      for (const url of i.urls) {
+        const row = document.createElement('div');
+        row.className = 'addr';
+        const label = document.createElement('code');
+        label.textContent = url;
+        const btn = document.createElement('button');
+        btn.textContent = "Copier l'adresse";
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation(); // ne pas relancer le jeu
+          btn.textContent = (await copyText(url)) ? 'Copié ✓' : 'Copie impossible';
+          setTimeout(() => (btn.textContent = "Copier l'adresse"), 2000);
+        });
+        row.append(label, btn);
+        pauseInfo.appendChild(row);
+      }
     }).catch(() => {});
     setInterval(() => net.send({ type: 'input', i: readInput() }), 33);
   };

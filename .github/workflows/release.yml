@@ -1,5 +1,7 @@
 # Fabrique les applications (Windows .exe, macOS .dmg Intel + Apple Silicon) et les publie dans les Releases
-# quand on pousse un tag "v*" (ex : git tag v0.1.0 && git push --tags).
+# quand on pousse un tag "v*" (ex : git tag v0.1.1 && git push --tags).
+# Le tag doit correspondre à la version de package.json (ex : version 0.1.1 -> tag v0.1.1).
+# Les fichiers latest.yml / .blockmap permettent la mise à jour automatique de l'application Windows.
 name: Release
 on:
   push:
@@ -14,16 +16,21 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: npm ci
+      - name: Vérifie que le tag correspond à la version
+        shell: bash
+        run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}" || (echo "Le tag ${GITHUB_REF_NAME} ne correspond pas à la version de package.json" && exit 1)
       - run: npm run dist
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false' # pas de signature de code
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/Jeu3D-*-portable.exe
             release/Jeu3D-Installer-*.exe
+            release/Jeu3D-Installer-*.exe.blockmap
+            release/latest.yml
 
   macos:
+    needs: windows # séquentiel : évite que deux jobs créent la Release en même temps
     runs-on: macos-latest # fabrique aussi la version Intel (x64) depuis cette machine
     steps:
       - uses: actions/checkout@v4

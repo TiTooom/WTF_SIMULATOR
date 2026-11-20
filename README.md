@@ -7,7 +7,7 @@ C'est une vraie application : tu la lances, un menu s'ouvre, tu choisis.
 ## Jouer
 
 1. Télécharge ta version dans l'onglet [*Releases*](../../releases) du dépôt :
-   - **Windows** : `Jeu3D-…-portable.exe` (aucune installation, il suffit de le lancer) ou `Jeu3D-Installer-….exe`.
+   - **Windows** : `Jeu3D-Installer-….exe`. Double-clique : l'installation est automatique (sans question) et le jeu se lance. Ensuite, un raccourci *Jeu 3D* apparaît dans le menu Démarrer.
    - **macOS** : `Jeu3D-…-mac-arm64.dmg` pour les Mac Apple Silicon (M1 et suivants) ou `Jeu3D-…-mac-x64.dmg` pour les Mac Intel. Ouvre le `.dmg` et glisse *Jeu 3D* dans *Applications*.
 2. Lance-le, tape ton pseudo, puis :
    - **Jouer en solo** : ta partie, sur ton ordinateur.
@@ -25,6 +25,13 @@ L'application n'est pas signée (une signature officielle est payante), donc le 
   Puis relance l'application normalement.
 
 Tout le monde doit être sur le même Wi-Fi (ou réseau local). Pas de redirection de port, pas de compte.
+
+### Mises à jour (Windows)
+Tu n'as à télécharger le `.exe` **qu'une seule fois**. À chaque lancement (puis toutes les 30 min), le jeu cherche une nouvelle version sur GitHub. S'il en trouve une, un bandeau vert apparaît dans le menu, le téléchargement se fait seul en arrière-plan, puis un bouton **« Redémarrer et mettre à jour »** installe la nouvelle version et relance le jeu. Si tu ne cliques pas, elle s'installe toute seule à la fermeture du jeu. Tes sauvegardes sont conservées.
+
+> Pour jouer ensemble, tout le monde doit avoir la **même version** : l'hôte fournit lui-même le jeu aux navigateurs, mais l'application d'un ami dépend de sa propre version.
+
+Sur macOS, la mise à jour automatique n'existe pas (elle exige une signature Apple payante) : il faut retélécharger le `.dmg`.
 
 ### Sauvegarde
 La partie est stockée **chez l'hôte**, dans `%APPDATA%\Jeu 3D\saves\` sous Windows ou `~/Library/Application Support/Jeu 3D/saves/` sous macOS (`multi.json` pour l'hébergement, `solo.json` en solo) : caisses, véhicules et dernière position de chaque pseudo. Elle est enregistrée toutes les 30 s et quand l'hôte quitte. Supprime le fichier pour repartir de zéro.
@@ -66,10 +73,13 @@ npm run dist       # fabrique les installables de l'OS courant dans release/ (.e
 Le serveur est **autoritaire** : il fait toute la physique et envoie l'état du monde 30 fois par seconde ; les clients dessinent et envoient leurs commandes.
 
 ### Publier une version
+1. Change `"version"` dans `package.json` (ex : `0.1.1`) et fais un commit.
+2. Crée le tag **identique** et pousse-le :
 ```
-git tag v0.1.0
-git push --tags
+git tag v0.1.1
+git push origin main --tags
 ```
+Les joueurs Windows reçoivent la mise à jour automatiquement.
 Le workflow `.github/workflows/release.yml` fabrique les `.exe` (sur un serveur Windows) et les `.dmg` (sur un serveur macOS, car une app macOS ne peut pas être fabriquée depuis Windows) puis les publie dans les Releases.
 
 ## Licence des outils d'assistance

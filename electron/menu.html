@@ -30,6 +30,10 @@
   .game small { color: #667; font-weight: 400; }
   .row { display: flex; gap: 8px; } .row input { margin-bottom: 0; flex: 1; } .row button { width: auto; margin: 0; padding: 10px 16px; }
   #status { min-height: 20px; margin-top: 12px; color: #c0392b; font-size: 14px; text-align: center; }
+  #update { display: none; margin: 0 0 16px; padding: 10px 12px; border-radius: 10px; background: #e8f8ec; border: 2px solid #8fd6a1; font-size: 14px; }
+  #update button { margin: 8px 0 0; padding: 9px; font-size: 15px; background: #27ae60; }
+  #update .bar { height: 6px; background: #cfe9d6; border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  #update .bar i { display: block; height: 100%; background: #27ae60; width: 0; transition: width .3s; }
   .hint { color: #889; font-size: 12px; margin: 10px 0 0; text-align: center; }
 </style>
 </head>
@@ -38,6 +42,12 @@
   <div class="card">
     <h1>Jeu 3D</h1>
     <p class="sub">Monde ouvert · véhicules · entre amis</p>
+
+    <div id="update">
+      <div id="updateText"></div>
+      <div class="bar" id="updateBar"><i></i></div>
+      <button id="updateBtn">Redémarrer et mettre à jour</button>
+    </div>
 
     <label for="name">Ton pseudo</label>
     <input type="text" id="name" maxlength="16" placeholder="Pseudo" autofocus />
@@ -53,7 +63,7 @@
     </div>
 
     <div id="status"></div>
-    <p class="hint">F11 : plein écran · Échap en jeu : pause</p>
+    <p class="hint">F11 : plein écran · Échap en jeu : pause · <span id="version"></span></p>
     <button class="quit" id="quit">Quitter</button>
   </div>
 </main>
@@ -110,6 +120,24 @@
   }
   api.onGames(renderGames);
   api.discover(true);
+
+  // Mise à jour automatique : téléchargement en arrière-plan, puis proposition de redémarrer
+  function renderUpdate(s) {
+    if (s.current) $('version').textContent = 'v' + s.current;
+    const box = $('update');
+    box.style.display = s.status === 'idle' ? 'none' : 'block';
+    $('updateBar').style.display = s.status === 'downloading' ? 'block' : 'none';
+    $('updateBtn').style.display = s.status === 'ready' ? 'block' : 'none';
+    if (s.status === 'downloading') {
+      $('updateText').textContent = 'Nouvelle version ' + s.version + ' : téléchargement… ' + (s.percent || 0) + ' %';
+      $('updateBar').firstElementChild.style.width = (s.percent || 0) + '%';
+    } else if (s.status === 'ready') {
+      $('updateText').textContent = 'La version ' + s.version + ' est prête.';
+    }
+  }
+  $('updateBtn').onclick = () => { busy(true); status.textContent = 'Mise à jour…'; api.installUpdate(); };
+  api.onUpdate((s) => renderUpdate({ ...s, current: undefined }));
+  api.getUpdate().then(renderUpdate);
 </script>
 </body>
 </html>

@@ -12,6 +12,12 @@ if (location.protocol === 'file:') {
       ipcRenderer.removeAllListeners('launcher:games');
       ipcRenderer.on('launcher:games', (_e, games) => cb(games));
     },
+    getUpdate: () => ipcRenderer.invoke('launcher:update-state'),
+    onUpdate: (cb: (state: unknown) => void) => {
+      ipcRenderer.removeAllListeners('launcher:update');
+      ipcRenderer.on('launcher:update', (_e, state) => cb(state));
+    },
+    installUpdate: () => ipcRenderer.invoke('launcher:install-update'),
     quit: () => ipcRenderer.invoke('launcher:quit'),
   });
 } else {

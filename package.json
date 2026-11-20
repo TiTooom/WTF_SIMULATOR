@@ -9,7 +9,7 @@
   "main": "dist-electron/main.cjs",
   "scripts": {
     "app": "npm run build:app && electron .",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run build && electron-builder --publish never",
     "dev": "concurrently -k -n serveur,client \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
@@ -17,7 +17,7 @@
     "build": "npm run typecheck && npm run build:app",
     "build:app": "npm run build:client && npm run build:electron",
     "build:client": "vite build",
-    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/menu.html --bundle --platform=node --format=cjs --target=node22 --outdir=dist-electron --out-extension:.js=.cjs --loader:.html=copy --entry-names=[name] --external:electron --external:bufferutil --external:utf-8-validate",
+    "build:electron": "esbuild electron/main.ts electron/preload.ts electron/menu.html --bundle --platform=node --format=cjs --target=node22 --outdir=dist-electron --out-extension:.js=.cjs --loader:.html=copy --entry-names=[name] --external:electron --external:electron-updater --external:bufferutil --external:utf-8-validate",
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/server.mjs --external:bufferutil --external:utf-8-validate --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
   },
   "build": {
@@ -26,14 +26,17 @@
     "directories": { "output": "release" },
     "files": ["dist-electron/**/*", "dist/public/**/*", "package.json"],
     "afterPack": "scripts/adhoc-sign.cjs",
-    "win": { "target": ["portable", "nsis"], "signAndEditExecutable": false },
+    "publish": { "provider": "github", "owner": "TiTooom", "repo": "WTF_SIMULATOR" },
+    "win": { "target": ["nsis"], "signAndEditExecutable": false },
+    "nsis": { "oneClick": true, "perMachine": false, "artifactName": "Jeu3D-Installer-${version}.${ext}" },
     "mac": {
       "category": "public.app-category.games",
       "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
       "artifactName": "Jeu3D-${version}-mac-${arch}.${ext}"
-    },
-    "portable": { "artifactName": "Jeu3D-${version}-portable.${ext}" },
-    "nsis": { "oneClick": true, "perMachine": false, "artifactName": "Jeu3D-Installer-${version}.${ext}" }
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
   },
   "devDependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

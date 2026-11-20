@@ -3,6 +3,9 @@ import path from 'node:path';
 import { app, BrowserWindow, ipcMain, Menu, type IpcMainInvokeEvent } from 'electron';
 import { startServer, type RunningServer } from '../server/server';
 import { announceGame, listenForGames } from './discovery';
+import { setupUpdater, type Updater } from './updater';
+
+let updater: Updater | null = null;
 
 let win: BrowserWindow | null = null;
 let running: RunningServer | null = null;
@@ -36,6 +39,9 @@ function createWindow() {
   });
   win.on('closed', () => { win = null; });
   showMenu();
+  updater = setupUpdater((s) => {
+    if (win && !win.isDestroyed()) win.webContents.send('launcher:update', s);
+  });
 }
 
 function showMenu(error?: string) {
@@ -112,6 +118,11 @@ ipcMain.handle('launcher:discover', (e, enable: boolean) => {
 ipcMain.handle('launcher:back', async (_e, error?: unknown) => {
   await stopEverything();
   showMenu(typeof error === 'string' ? error.slice(0, 200) : undefined);
+});
+ipcMain.handle('launcher:update-state', (e) =>
+  fromMenu(e) ? { ...(updater?.state() ?? { status: 'idle' }), current: app.getVersion() } : { status: 'idle' });
+ipcMain.handle('launcher:install-update', (e) => {
+  if (fromMenu(e)) updater?.install();
 });
 ipcMain.handle('launcher:quit', (e) => {
   if (fromMenu(e)) app.quit();
