@@ -1,0 +1,9 @@
+import { defineConfig } from 'vite';
+
+// Le client compilé est servi par le serveur du jeu (dist/public). En développement,
+// Vite sert le client et relaie la WebSocket vers le serveur local.
+export default defineConfig({
+  base: './',
+  build: { target: 'es2022', outDir: 'dist/public', emptyOutDir: true },
+  server: { proxy: { '/ws': { target: 'ws://localhost:3000', ws: true } } },
+});

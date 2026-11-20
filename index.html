@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jeu 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3ff; font-family: sans-serif; }
+  #hud, #players { position: fixed; color: #fff; text-shadow: 0 1px 3px #000; pointer-events: none; white-space: pre; }
+  #hud { top: 12px; left: 12px; }
+  #players { top: 12px; right: 12px; text-align: right; }
+  #pause { position: fixed; inset: 0; align-items: center; justify-content: center; background: rgba(20, 40, 70, 0.55); cursor: pointer; }
+  #pause #card { cursor: default; }
+  #pauseInfo { font-size: 14px; color: #2c3e50; margin: 0 0 14px; white-space: pre-line; }
+  #pause #back { background: #7f8c8d; }
+  #menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(40, 90, 140, 0.55); }
+  #card { background: #fff; padding: 28px 32px; border-radius: 14px; text-align: center; width: 300px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+  #card h1 { margin: 0 0 6px; font-size: 26px; color: #2c3e50; }
+  #card p { margin: 0 0 16px; color: #667; font-size: 14px; }
+  #card input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; border: 2px solid #cfd8e3; border-radius: 8px; margin-bottom: 12px; }
+  #card button { width: 100%; padding: 12px; font-size: 17px; font-weight: bold; color: #fff; background: #e74c3c; border: 0; border-radius: 8px; cursor: pointer; }
+  #card button:hover { background: #d63c2c; }
+  #status { margin-top: 10px; min-height: 18px; color: #c0392b; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="players"></div>
+<div id="menu">
+  <div id="card">
+    <h1>Jeu 3D</h1>
+    <p>Monde ouvert · véhicules · entre amis</p>
+    <input id="name" maxlength="16" placeholder="Ton pseudo" autofocus />
+    <button id="play">Jouer</button>
+    <div id="status"></div>
+  </div>
+</div>
+<div id="pause" style="display:none">
+  <div id="card">
+    <h1>Pause</h1>
+    <p>Clique pour reprendre la partie</p>
+    <div id="pauseInfo"></div>
+    <button id="back">Menu principal</button>
+  </div>
+</div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

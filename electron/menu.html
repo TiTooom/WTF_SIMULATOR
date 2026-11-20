@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<title>Jeu 3D</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "Segoe UI", sans-serif; color: #2c3e50;
+    background: linear-gradient(#9fd3ff 0%, #cfeaff 55%, #7ec850 55%, #6fb842 100%); overflow: auto; }
+  main { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .card { background: #fff; border-radius: 16px; padding: 28px 32px; width: 460px; max-width: 100%; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+  h1 { margin: 0; font-size: 34px; text-align: center; letter-spacing: 1px; }
+  .sub { text-align: center; color: #667; margin: 4px 0 20px; }
+  label { font-size: 13px; font-weight: 600; color: #667; }
+  input[type=text] { width: 100%; padding: 10px 12px; font-size: 16px; border: 2px solid #cfd8e3; border-radius: 8px; margin: 4px 0 14px; }
+  input[type=text]:focus { outline: none; border-color: #3498db; }
+  button { width: 100%; padding: 13px; font-size: 17px; font-weight: 700; border: 0; border-radius: 10px; cursor: pointer; color: #fff; margin-bottom: 10px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .solo { background: #e74c3c; } .solo:hover:not(:disabled) { background: #d63c2c; }
+  .host { background: #f39c12; } .host:hover:not(:disabled) { background: #e08e0b; }
+  .join { background: #3498db; } .join:hover:not(:disabled) { background: #2a85c4; }
+  .quit { background: #95a5a6; font-size: 14px; padding: 9px; margin: 14px 0 0; }
+  h2 { font-size: 15px; margin: 18px 0 8px; }
+  #games { min-height: 44px; border: 2px dashed #cfd8e3; border-radius: 10px; padding: 6px; margin-bottom: 10px; }
+  #games .none { color: #889; font-size: 14px; padding: 8px; }
+  .game { display: flex; justify-content: space-between; align-items: center; width: 100%; background: #eaf5ff; color: #2c3e50;
+    border: 2px solid #b6dcff; padding: 9px 12px; font-size: 15px; margin: 0 0 6px; }
+  .game:hover { background: #d6ecff; }
+  .game small { color: #667; font-weight: 400; }
+  .row { display: flex; gap: 8px; } .row input { margin-bottom: 0; flex: 1; } .row button { width: auto; margin: 0; padding: 10px 16px; }
+  #status { min-height: 20px; margin-top: 12px; color: #c0392b; font-size: 14px; text-align: center; }
+  .hint { color: #889; font-size: 12px; margin: 10px 0 0; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Jeu 3D</h1>
+    <p class="sub">Monde ouvert · véhicules · entre amis</p>
+
+    <label for="name">Ton pseudo</label>
+    <input type="text" id="name" maxlength="16" placeholder="Pseudo" autofocus />
+
+    <button class="solo" id="solo">Jouer en solo</button>
+    <button class="host" id="host">Héberger une partie (amis sur le même Wi-Fi)</button>
+
+    <h2>Rejoindre une partie</h2>
+    <div id="games"><div class="none">Recherche de parties sur ton Wi-Fi…</div></div>
+    <div class="row">
+      <input type="text" id="addr" placeholder="ou adresse de l'hôte, ex : 192.168.0.12" />
+      <button class="join" id="join">Rejoindre</button>
+    </div>
+
+    <div id="status"></div>
+    <p class="hint">F11 : plein écran · Échap en jeu : pause</p>
+    <button class="quit" id="quit">Quitter</button>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const status = $('status');
+  const api = window.launcher;
+  const params = new URLSearchParams(location.search);
+  if (params.get('error')) status.textContent = params.get('error');
+
+  const saved = (() => { try { return localStorage.getItem('name') || ''; } catch { return ''; } })();
+  $('name').value = saved;
+  const name = () => {
+    const n = $('name').value.trim();
+    try { localStorage.setItem('name', n); } catch {}
+    return n || 'Joueur';
+  };
+  const busy = (b) => document.querySelectorAll('button').forEach((x) => (x.disabled = b));
+
+  $('solo').onclick = () => { busy(true); status.textContent = 'Démarrage…'; api.solo(name()); };
+  $('host').onclick = () => { busy(true); status.textContent = 'Démarrage du serveur…'; api.host(name()); };
+  $('quit').onclick = () => api.quit();
+
+  async function join(address) {
+    busy(true);
+    status.textContent = 'Connexion…';
+    const r = await api.join(address, name());
+    if (r && !r.ok) { status.textContent = r.error; busy(false); }
+  }
+  $('join').onclick = () => $('addr').value.trim() ? join($('addr').value) : (status.textContent = "Saisis l'adresse de l'hôte ou clique sur une partie détectée.");
+  $('addr').onkeydown = (e) => { if (e.key === 'Enter') $('join').click(); };
+
+  function renderGames(games) {
+    const box = $('games');
+    box.textContent = '';
+    if (!games.length) {
+      const d = document.createElement('div');
+      d.className = 'none';
+      d.textContent = 'Aucune partie détectée. Demande à ton ami de cliquer sur « Héberger ».';
+      box.appendChild(d);
+      return;
+    }
+    for (const g of games) {
+      const b = document.createElement('button');
+      b.className = 'game';
+      const t = document.createElement('span');
+      t.textContent = g.name;
+      const s = document.createElement('small');
+      s.textContent = g.players + ' joueur' + (g.players > 1 ? 's' : '');
+      b.append(t, s);
+      b.onclick = () => join(g.host + ':' + g.port);
+      box.appendChild(b);
+    }
+  }
+  api.onGames(renderGames);
+  api.discover(true);
+</script>
+</body>
+</html>
