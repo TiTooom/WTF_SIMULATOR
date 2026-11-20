@@ -37,11 +37,27 @@ export function runCommand(sim: Sim, player: SimPlayer, line: string, reply: (t:
   try {
     cmd.handler({ sim, player, args, reply, announce: (t) => sim.announce(t) });
   } catch (e) {
+    if (sim.noteError(e)) { reply('Le monde a hoqueté, réessaie dans un instant.'); return true; }
     reply('Aïe, la commande a planté (le serveur va bien).');
     sim.log(`[commands] /${name} : ${(e as Error)?.stack ?? e}`);
   }
   return true;
 }
+
+// ---------- Gouvernance : le chef de la bande (premier joueur du multi) garde les commandes qui touchent tout le monde ----------
+const NOT_HOST = [
+  'Seul le chef de la bande peut faire ça. Demande-lui gentiment (ou apporte des croissants).',
+  'Seul le chef de la bande peut faire ça. Toi, tu as le droit de regarder.',
+  'Seul le chef de la bande peut faire ça. Ton grade : touriste.',
+];
+/** Vrai si le joueur peut lancer une commande réservée à l'hôte ; sinon répond (drôlement) et retourne false. */
+export function requireHost(ctx: { sim: Sim; player: SimPlayer; reply(t: string): void }): boolean {
+  if (ctx.sim.isHost(ctx.player)) return true;
+  ctx.reply(NOT_HOST[Math.floor(Math.random() * NOT_HOST.length)]);
+  return false;
+}
+const MAX_SPAWN_PER_PLAYER = 3;
+const spawnedBy = (sim: Sim, id: string) => sim.vehicles.filter((v) => v.extra && !v.dead && v.owner === id).length;
 
 // ---------- Utilitaires ----------
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -76,8 +92,9 @@ registerCommand('help', ({ reply }) => {
 registerCommand('spawn', ({ sim, player, args, reply, announce }) => {
   const def = findVehicleDef(args[0] ?? '');
   if (!def) return reply(`Usage : /spawn <type>. Types : ${typeList()}`);
+  if (spawnedBy(sim, player.id) >= MAX_SPAWN_PER_PLAYER) return reply(`Tu as déjà invoqué ${MAX_SPAWN_PER_PLAYER} véhicules ! Fais-en exploser un avant d'en demander un autre.`);
   const f = frontOf(player, 8);
-  const v = sim.spawnExtraVehicle(def, f.x, f.z, f.yaw);
+  const v = sim.spawnExtraVehicle(def, f.x, f.z, f.yaw, 1.5, player.id);
   if (!v) return reply('Trop de véhicules en jeu ! Détruis-en un d\'abord (ou fais-le exploser).');
   announce(`${player.name} a invoqué ${def.name} ${def.emoji}`);
 }, '/spawn <type> : crée un véhicule devant toi');
@@ -95,8 +112,9 @@ registerCommand('drive', ({ sim, player, args, reply }) => {
     if (d < bd) { bd = d; best = v; }
   }
   if (!best) {
+    if (spawnedBy(sim, player.id) >= MAX_SPAWN_PER_PLAYER) return reply(`Tu as déjà invoqué ${MAX_SPAWN_PER_PLAYER} véhicules ! Fais-en exploser un avant d'en demander un autre.`);
     const f = frontOf(player, 8);
-    best = sim.spawnExtraVehicle(def, f.x, f.z, f.yaw);
+    best = sim.spawnExtraVehicle(def, f.x, f.z, f.yaw, 1.5, player.id);
     if (!best) return reply('Trop de véhicules en jeu !');
   }
   if (!sim.enterVehicle(player, best, 0)) reply('Impossible de monter dedans.');
@@ -134,19 +152,28 @@ registerCommand('clear', ({ sim, player, reply }) => {
 }, 'supprime tes objets');
 
 registerCommand('gravite', ({ sim, player, args, reply, announce }) => {
+  if (!requireHost({ sim, player, reply })) return;
   const raw = (args[0] ?? '').replace(',', '.');
   if (raw === '' ) return reply('Usage : /gravite <valeur> (normal : -9.81, lune : -1.6, 0 = apesanteur ; « normal » remet tout d\'équerre)');
   const v = raw === 'normal' ? -9.81 : Number(raw);
   if (!Number.isFinite(v)) return reply('Ce n\'est pas un nombre.');
-  const g = v === 0 ? 0 : -Math.abs(v);
+  const g = v === 0 ? 0 : -Math.min(40, Math.abs(v)); // même plafond que le cœur : on annonce la valeur réellement appliquée
   sim.setGravity(g);
   announce(`${player.name} a réglé la gravité à ${Math.abs(g).toFixed(1)} m/s²${g === 0 ? ' (on flotte !)' : ''}`);
 }, '/gravite <valeur>');
 
 registerCommand('taille', ({ sim, player, args, reply, announce }) => {
   const v = Number((args[0] ?? '').replace(',', '.'));
-  if (!Number.isFinite(v)) return reply('Usage : /taille <0.5 à 3>');
+  if (!Number.isFinite(v)) return reply('Usage : /taille <0.5 à 3> [pseudo]');
   const s = Math.max(0.5, Math.min(3, v));
-  sim.applyMod(player, { scale: s }, 120);
-  announce(`${player.name} est maintenant ${s > 1 ? 'géant' : s < 1 ? 'minuscule' : 'normal'} (×${s})`);
-}, '/taille <0.5-3>');
+  let who = player;
+  const other = args.slice(1).join(' ').trim().toLowerCase();
+  if (other && other !== player.name.toLowerCase()) {
+    if (!requireHost({ sim, player, reply })) return; // changer la taille d'un autre : réservé au chef
+    const q = [...sim.players.values()].find((x) => x.name.toLowerCase() === other);
+    if (!q) return reply(`Personne ne s'appelle « ${args.slice(1).join(' ')} ».`);
+    who = q;
+  }
+  sim.applyMod(who, { scale: s }, 120);
+  announce(`${who.name} est maintenant ${s > 1 ? 'géant' : s < 1 ? 'minuscule' : 'normal'} (×${s})`);
+}, '/taille <0.5-3> [pseudo]');

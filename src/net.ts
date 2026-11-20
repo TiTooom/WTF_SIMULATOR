@@ -48,6 +48,10 @@ export class Net {
   private ws: WebSocket | null = null;
   private snaps: Entry[] = [];
   private fxQueue: FxEvent[] = [];
+  // Reconstruction des snapshots différentiels (Snapshot.d) : état complet courant
+  private propState = new Map<number, number[]>();
+  private vehState: VehicleSnap[] = [];
+  private names = new Map<string, string>();
   private wheelAcc = 0;
   /** Compteurs pour les tests. */
   snapCount = 0;
@@ -69,6 +73,7 @@ export class Net {
         this.onWelcome();
       } else if (msg.type === 'snap') {
         this.snapCount++;
+        this.expand(msg.s);
         // Chaque snapshot reçu apporte ses événements une seule fois
         if (msg.s.fx?.length) for (const f of msg.s.fx) this.fxQueue.push(f);
         if (this.fxQueue.length > 200) this.fxQueue.splice(0, this.fxQueue.length - 200);
@@ -82,6 +87,30 @@ export class Net {
     };
     ws.onclose = () => this.onClose('Connexion au serveur perdue.');
     ws.onerror = () => this.onError('Impossible de joindre le serveur.');
+  }
+
+  /** Transforme un snapshot différentiel en snapshot complet (props, véhicules, noms) ; un snapshot complet remet l'état à zéro. */
+  private expand(s: Snapshot) {
+    s.fx ??= [];
+    for (const p of s.players) {
+      if (p.name === undefined) p.name = this.names.get(p.id) ?? '';
+      else this.names.set(p.id, p.name);
+    }
+    if (this.names.size > 64) for (const id of this.names.keys()) if (!s.players.some((p) => p.id === id)) this.names.delete(id);
+    const full = !s.d;
+    if (full) { this.propState.clear(); this.vehState = []; }
+    for (const id of s.rm ?? []) this.propState.delete(id);
+    const pr = s.props;
+    for (let o = 0; o + PROP_STRIDE <= pr.length; o += PROP_STRIDE) this.propState.set(pr[o], pr.slice(o, o + PROP_STRIDE));
+    if (s.d) {
+      const idx = s.vi ?? [];
+      idx.forEach((vi, j) => { this.vehState[vi] = s.vehicles[j]; });
+      this.vehState.length = s.vn ?? this.vehState.length;
+      s.vehicles = this.vehState.slice();
+      const flat: number[] = [];
+      for (const a of this.propState.values()) for (let j = 0; j < PROP_STRIDE; j++) flat.push(a[j]);
+      s.props = flat;
+    } else this.vehState = s.vehicles.slice();
   }
 
   send(msg: ClientMsg) {

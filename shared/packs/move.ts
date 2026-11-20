@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { ItemDef, ItemHandler, Pack, PropTick, SimApi, SimPlayer, SimProp, UseCtx } from '../api';
 import type { PropKind } from '../props';
+import { bodyOk } from '../guard';
 
 const items: ItemDef[] = [
   { id: 'jetpack', name: 'Jetpack', emoji: '🧑‍🚀', cat: 'move', cooldown: 0, hold: true,
@@ -120,7 +121,7 @@ const grappin: ItemHandler = {
     if (!hk) return;
     const t = p.body.translation();
     if (hk.prop) {
-      if (api.props.get(hk.prop.id) !== hk.prop) { hooks.delete(p); return; }
+      if (api.props.get(hk.prop.id) !== hk.prop || !bodyOk(hk.prop.body)) { hooks.delete(p); return; }
       const pt = hk.prop.body.translation();
       hk.point.set(pt.x, pt.y, pt.z);
     }
@@ -215,7 +216,7 @@ const teleporteur: ItemHandler = {
       api.fx({ k: 'text', p: [t.x, t.y + 1.6, t.z], s: `Recharge… ${Math.ceil((((p.scratch.tpReady as number) ?? 0) - now) / 1000)} s`, c: 0xffaa55 });
       return;
     }
-    if (!b || api.props.get(b.prop.id) !== b.prop || now > b.until) {
+    if (!b || api.props.get(b.prop.id) !== b.prop || !bodyOk(b.prop.body) || now > b.until) {
       beacons.delete(p);
       api.fx({ k: 'text', p: [t.x, t.y + 1.6, t.z], s: 'Pas de balise ! (clic gauche pour en poser une)', c: 0xffaa55 });
       return;

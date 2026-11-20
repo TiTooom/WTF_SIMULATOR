@@ -4,6 +4,7 @@
 import type { Sim } from '../shared/sim';
 import type { SimPlayer, SimVehicle, DamageKind } from '../shared/api';
 import { HILL } from '../shared/world';
+import { bodyOk } from '../shared/guard';
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[\s-]+/g, '_');
 const KING_GOAL = 100;
@@ -74,14 +75,14 @@ export function createModes(sim: Sim): ModesCtl {
   /** Derby : intercepte les dégâts subis par les véhicules pour les attribuer à l'adversaire. */
   const patchDamage = () => {
     const orig = sim.damageVehicle.bind(sim);
-    const attacker = (v: SimVehicle, kind: DamageKind, by: SimPlayer | null | undefined): SimPlayer | null => {
+    const attacker = (v: SimVehicle, kind: DamageKind, by: SimPlayer | null | undefined, vpos: { x: number; y: number; z: number }): SimPlayer | null => {
       if (by && by !== v.driver) return by;
       if (kind !== 'impact') return null;
       // choc : l'adversaire est le conducteur le plus proche qui roule vite
-      const vb = v.behavior.body.translation();
+      const vb = vpos; // position lue AVANT les dégâts : si le véhicule vient d'être détruit son corps n'existe plus
       let best: SimPlayer | null = null, bd = 7;
       for (const o of sim.vehicles) {
-        if (o === v || o.dead || !o.driver || o.driver === v.driver || !o.behavior.body) continue;
+        if (o === v || o.dead || !o.driver || o.driver === v.driver || !bodyOk(o.behavior.body)) continue;
         const t = o.behavior.body.translation(), lv = o.behavior.body.linvel();
         const d = Math.hypot(t.x - vb.x, t.y - vb.y, t.z - vb.z);
         if (d < bd && Math.hypot(lv.x, lv.y, lv.z) > 3.5) { bd = d; best = o.driver; }
@@ -90,9 +91,10 @@ export function createModes(sim: Sim): ModesCtl {
     };
     sim.damageVehicle = (v, amount, kind, by) => {
       const before = v.hp, wasDead = v.dead;
+      const vp = !wasDead && bodyOk(v.behavior.body) ? v.behavior.body.translation() : { x: 0, y: 0, z: 0 };
       orig(v, amount, kind, by);
       if (mode !== 'derby' || !v.driver) return;
-      const atk = attacker(v, kind, by);
+      const atk = attacker(v, kind, by, vp);
       if (!atk || atk === v.driver) return;
       const dealt = Math.max(0, before - Math.max(0, v.hp));
       let gain = dealt;
@@ -104,7 +106,7 @@ export function createModes(sim: Sim): ModesCtl {
       const total = add(atk, gain);
       if (gain >= 6 && sim.time - (recentHit.get(v.id) ?? 0) > 400) {
         recentHit.set(v.id, sim.time);
-        const t = v.behavior.body?.translation();
+        const t = !v.dead && bodyOk(v.behavior.body) ? v.behavior.body.translation() : vp;
         if (t) sim.fx({ k: 'text', p: [t.x, t.y + 3, t.z], s: `+${Math.round(gain)}`, c: 0xff7b00 });
       }
       if (total >= DERBY_GOAL) finish(`${atk.name} atteint ${DERBY_GOAL} points de démolition.`);

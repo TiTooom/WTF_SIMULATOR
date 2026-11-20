@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { G, grp, type SimApi, type VehicleDef } from '../api';
 import { STEP } from '../constants';
+import { bodyOk } from '../guard';
 
 const GRAV = 9.81;
 const VC = 34; // vitesse de sustentation (m/s) : portance = poids
@@ -83,13 +84,14 @@ export const def: VehicleDef = {
         best = get;
       };
       for (const v of api.vehicles) {
-        if (v === self || v.dead || !v.behavior.body) continue;
+        if (v === self || v.dead || !bodyOk(v.behavior.body)) continue;
         const b = v.behavior.body;
-        test(V(b.translation()), () => (v.dead || !v.behavior.body ? null : V(v.behavior.body.translation())));
+        // la cible peut mourir / être retirée entre deux ticks : ne lire son corps que s'il existe encore
+        test(V(b.translation()), () => (v.dead || !bodyOk(v.behavior.body) ? null : V(v.behavior.body.translation())));
       }
       for (const p of api.players.values()) {
         if (p.id === driverId || p.vehicle || p.hp <= 0) continue;
-        test(V(p.body.translation()), () => (p.hp <= 0 ? null : V(p.body.translation())));
+        test(V(p.body.translation()), () => (p.hp <= 0 || api.players.get(p.id) !== p || !bodyOk(p.body) ? null : V(p.body.translation())));
       }
       return best;
     };

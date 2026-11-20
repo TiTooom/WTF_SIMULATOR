@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { ItemDef, ItemHandler, Pack, PropTick, SimApi, SimPlayer, SimProp, SimVehicle, UseCtx } from '../api';
 import type { PropKind } from '../props';
+import { bodyOk } from '../guard';
 
 const items: ItemDef[] = [
   { id: 'canon_confettis', name: 'Canon à confettis', emoji: '🎉', cat: 'wtf', cooldown: 3,
@@ -187,9 +188,10 @@ interface Hook { kind: 'prop' | 'player' | 'vehicle'; prop?: SimProp; player?: S
 const hookOf = (p: SimPlayer) => p.scratch.cane as Hook | undefined;
 const hookBody = (h: Hook) => (h.kind === 'prop' ? h.prop!.body : h.kind === 'player' ? h.player!.body : h.veh!.behavior.body);
 function hookValid(h: Hook, api: SimApi): boolean {
+  if (!bodyOk(hookBody(h))) return false; // cible retirée du monde : ne jamais lire son corps
   if (h.kind === 'prop') return api.props.get(h.prop!.id) === h.prop && !h.prop!.frozen;
   if (h.kind === 'player') return api.players.get(h.player!.id) === h.player && !h.player!.vehicle && h.player!.hp > 0;
-  return !h.veh!.dead && !h.veh!.driver && !!h.veh!.behavior.body;
+  return !h.veh!.dead && !h.veh!.driver;
 }
 function dropHook(p: SimPlayer, api: SimApi, cooldown = true) {
   const h = hookOf(p);
@@ -224,11 +226,13 @@ const canne_vaches: ItemHandler = {
         p.cooldowns.canne_vaches = api.time + 600;
         return;
       }
-      h.cow = api.spawnProp('x_vache', pos(hookBody(h)!).add(V(0, 2, 0)), undefined, undefined, null);
+      const at0 = pos(hookBody(h)!); // position capturée AVANT spawnProp : la vache peut évincer (limite de props) la cible accrochée
+      h.cow = api.spawnProp('x_vache', at0.clone().add(V(0, 2, 0)), undefined, undefined, null);
       if (h.cow) h.cow.body.collider(0).setSensor(true);
       p.scratch.cane = h;
+      if (!hookValid(h, api)) { dropHook(p, api); return; } // la cible a été évincée par la vache : on lâche proprement
       sound(api, hand, 'meow');
-      text(api, pos(hookBody(h)!).add(V(0, 2.8, 0)), 'MEUH ?!', 0xffffff);
+      text(api, at0.clone().add(V(0, 2.8, 0)), 'MEUH ?!', 0xffffff);
     }
     if (!hookValid(h, api)) { dropHook(p, api); return; }
     const body = hookBody(h)!;

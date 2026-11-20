@@ -22,6 +22,12 @@ Vrai jeu à télécharger (application Windows Electron, `.exe` portable + insta
 - **Chat** : `chat` dans le protocole, historique/anti-spam/nettoyage dans `server/server.ts`, UI `src/chat.ts` (toujours `textContent`). **Son** : `src/audio.ts`, synthèse Web Audio, aucun fichier audio.
 - `window.__wtf` expose l'audio pour les tests CDP.
 
+## Contenu v2 (voir docs/ARCHITECTURE.md, docs/CONTENT-BRIEF.md, docs/wtf-ideas.md)
+- 12 véhicules : un fichier serveur `shared/vehicles/<type>.ts` (VehicleDef) + un fichier client `src/vehicles/<type>.ts` (VehicleViewDef). 33 objets : paquets `shared/packs/*.ts`. Monde : `shared/world.ts`. Événements/modes/commandes : `server/events.ts`, `modes.ts`, `extras.ts`, `commands.ts`.
+- **Piège Rapier critique** : lire/écrire un corps RETIRÉ du monde empoisonne définitivement Rapier (plus aucun `step`). Toujours valider (`shared/guard.ts` : `bodyOk`) avant de lire une référence conservée entre deux ticks. Un disjoncteur recrée la simulation si cela arrive.
+- Tests : `npx tsx tests/<suite>.ts` (smoke, robustesse, vehicules1/2, aeronefs, aeriens, objets1/2/3, monde). Le serveur se défend du réseau (heartbeat, Origin, limites, hôte) : voir `tests/robustesse.ts`.
+- URL de test client : `?name= &cmd=/drive%20<type> &item=<id> &fire= &aim= &nopause`.
+
 ## Commandes
 - `npm run app` : compile et lance l'application · `npm run dev` : serveur + client dans le navigateur (http://localhost:5173) · `npm run build` : types + client + app · `npm run dist` : `.exe` dans `release/`.
 - Mise à jour auto (Windows seulement, `electron/updater.ts` + `electron-updater`, dépôt public) : le tag `vX.Y.Z` doit égaler `version` de package.json ; la release doit contenir `latest.yml` + `.blockmap` + installateur NSIS. Pas d'auto-update sur macOS (app non signée). Ne pas remettre de cible `portable` (non mise à jour).

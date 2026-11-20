@@ -278,6 +278,9 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+let pendingCmd = '';
+let cmdSentAt = 0;
+let cmdState = 0; // 0 : à envoyer, 1 : envoyée, 2 : renvoyée si besoin
 let joined = false;
 function join() {
   if (joined) return;
@@ -293,8 +296,8 @@ function join() {
     renderer.domElement.requestPointerLock()?.catch?.(() => {});
     updatePause();
     // ?cmd=/drive%20tank : commande de chat envoyée après la connexion (tests automatisés)
-    const cmd = new URLSearchParams(location.search).get('cmd');
-    if (cmd) setTimeout(() => net.send({ type: 'chat', text: cmd }), 300);
+    // (envoyée dans la boucle de rendu dès que le premier snapshot contenant le joueur est reçu)
+    pendingCmd = new URLSearchParams(location.search).get('cmd') ?? '';
     // ?fire=<délai s>[,<durée s>] : appui simulé sur le bouton principal (tests)
     const fire = (URLP.get('fire') ?? '').split(',').map(Number);
     if (fire.length && Number.isFinite(fire[0]) && URLP.get('fire')) {
@@ -347,7 +350,7 @@ if (quickName) {
 
 // Accès pour les tests automatisés (CDP) : état du son, des réglages, de la barre, du rendu
 const stats = {
-  audio, net, fx, hud, inventory, registry: { ITEMS, ITEM_BY_ID, PROP_KINDS },
+  audio, net, fx, hud, renderer, inventory, registry: { ITEMS, ITEM_BY_ID, PROP_KINDS },
   get settings() { return settings; },
   get selected() { return selected; },
   get selectedItem() { return selectedItem(); },
@@ -445,6 +448,15 @@ function frame(now: number) {
   }
   for (const [id, av] of avatars) if (!seen.has(id)) { scene.remove(av); disposeAvatar(av); avatars.delete(id); }
 
+  // ?cmd= : envoyée une fois le joueur présent dans un snapshot ; renvoyée une fois s'il est resté à pied (/drive)
+  if (me && pendingCmd && cmdState === 0) {
+    net.send({ type: 'chat', text: pendingCmd });
+    cmdSentAt = now;
+    cmdState = 1;
+  } else if (me && pendingCmd && cmdState === 1 && now - cmdSentAt > 1000) {
+    cmdState = 2;
+    if (me.veh < 0 && pendingCmd.startsWith('/drive')) net.send({ type: 'chat', text: pendingCmd });
+  }
   if (!me) me = { ...FALLBACK_ME, id: net.id };
   const veh = me.veh >= 0 ? s.vehicles[me.veh] : undefined;
   const vdef = veh ? viewFor(veh.type) : null;

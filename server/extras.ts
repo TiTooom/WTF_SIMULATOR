@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import type { Sim } from '../shared/sim';
 import { crateLayout } from '../shared/constants';
 import { PADS, PLACES, RINGS, spawnDecor } from '../shared/world';
-import { registerCommand } from './commands';
+import { registerCommand, requireHost } from './commands';
 import { createEvents, eventList, type EventsCtl } from './events';
 import { createModes, MODES, type ModesCtl } from './modes';
 
@@ -173,6 +173,7 @@ const honk = (sim: Sim) => {
 let lastHonk = -1e9;
 
 registerCommand('meteo', ({ sim, args, reply, announce, player }) => {
+  if (!requireHost({ sim, player, reply })) return;
   const x = bySim.get(sim);
   if (!x) return reply('Les événements ne sont pas disponibles.');
   const q = args.join(' ').trim();
@@ -217,6 +218,7 @@ registerCommand('annonce', ({ sim, player, args, reply, announce }) => {
 }, '/annonce <texte> : message géant avec fanfare');
 
 registerCommand('reset', ({ sim, player, args, reply, announce }) => {
+  if (!requireHost({ sim, player, reply })) return;
   const x = bySim.get(sim);
   if (!x) return reply('Indisponible.');
   if ((args[0] ?? '').toLowerCase() !== 'oui') return reply('Ça remet tous les objets et véhicules du monde à zéro. Confirme avec : /reset oui');
@@ -248,6 +250,7 @@ registerCommand('lieu', ({ sim, player, args, reply }) => {
 }, '/lieu <nom> : se téléporter à un lieu (piste, heliport, cascade, parcours, ville, arene, parking, chateau, pont)');
 
 registerCommand('mode', ({ sim, args, reply, announce, player }) => {
+  if (!requireHost({ sim, player, reply })) return;
   const x = bySim.get(sim);
   if (!x) return reply('Les modes ne sont pas disponibles.');
   const q = (args[0] ?? '').toLowerCase();

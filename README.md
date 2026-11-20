@@ -1,6 +1,6 @@
 # WTF SIMULATOR
 
-Monde ouvert 3D en vue à la première personne, style cartoon léger. Tu conduis des véhicules (voiture, pelleteuse avec godet, d'autres à venir) et tu joues **entre amis, sur le même Wi-Fi**, avec un chat, du son et des touches que tu règles comme tu veux.
+Monde ouvert 3D en vue à la première personne, style cartoon léger. Tu conduis des véhicules (voiture, pelleteuse avec godet, d'autres à venir) et tu joues **entre amis, sur le même Wi-Fi**, avec 12 véhicules (qui explosent), 33 objets WTF, un pistolet à gravité façon Garry's Mod, un chat, du son et des touches que tu règles comme tu veux.
 
 C'est une vraie application : tu la lances, un menu s'ouvre, tu choisis.
 
@@ -56,16 +56,67 @@ La partie est stockée **chez l'hôte**, dans `%APPDATA%\WTF SIMULATOR\saves\` s
 ### Sans installer : depuis un navigateur
 Un ami peut aussi rejoindre sans l'application, en ouvrant dans son navigateur l'adresse de l'hôte (par exemple `http://192.168.0.101:3000`, affichée dans l'écran de pause de l'hôte). Ses réglages sont alors enregistrés dans ce navigateur.
 
+## Les véhicules (12)
+
+| | Véhicule | Particularité |
+|---|---|---|
+| 🚗 | Voiture (×2) | Pour apprendre. Fragile aux explosions. |
+| 🚜 | Pelleteuse | Bras articulé, godet qui soulève et déplace les caisses. |
+| 🛡️ | **Tank** | Quasi insensible aux roquettes. La tourelle suit la caméra. Clic gauche : obus (qui fait « pschitt »). Clic droit maintenu : mitrailleuse. |
+| 🚚 | **Camion articulé** | Remorque articulée (tête-à-queue possible !). Clic gauche : larguer/rattacher la remorque. Clic droit : benne qui déverse des caisses. |
+| 🛒 | **Caddie turbo** | Léger et nerveux, dérapage, turbo, « bip » à chaque choc. 2 places. |
+| 🍦 | **Camion de glaces** | Musique, lance-cornets qui ralentissent, mode disco qui fait sauter les petits véhicules. |
+| 🚽 | **Toilettes à roulettes** | Ventouse qui attire les objets, chasse d'eau qui propulse… en arrière. |
+| ✈️ | **Avion de chasse** | Piste d'atterrissage, train rentrant, mitrailleuse, missiles. **Explose si tu t'écrases trop vite.** |
+| 🚁 | **Hélicoptère** | Vol stationnaire assisté, treuil qui accroche caisses et véhicules, souffle du rotor. 3 places. |
+| 🛸 | **OVNI** | Rebondit comme une balle, rayon tracteur, éjection radiale. |
+| 🛋️ | **Canapé-fusée** | Propulsé, saut à ressort, lance des coussins, turbo. 2 places. |
+| 🎈 | **Dirigeable à pédales** | Il va aussi vite que tu martèles la touche. Touché, il se dégonfle et plane. |
+
+Les véhicules **peuvent exploser** (chocs trop violents, roquettes, crash) puis réapparaissent après ~12 s. Chaque type a ses points de vie et son blindage.
+
+## Inventaire et objets (33)
+
+**Tab** ouvre l'inventaire : clique un objet pour le mettre dans l'emplacement actif de la barre (chiffres **1 à 9** ou molette pour choisir). **Clic gauche** utilise l'objet, **clic droit** pour son action secondaire.
+
+- **Outils** : 🧲 *Pistolet à gravité* (saisis et déplace presque tout, même un copain ; molette = distance ; clic droit = geler), 🧽 *Gomme*, 🔥 *Soudure* (relie deux objets).
+- **Construction** : planche, bloc, rampe, mur, pilier, ballon flottant (soulève une caisse ou une voiture), trampoline, barrique explosive, roue géante, propulseur.
+- **Armes** : lance-roquettes, grenade, mitraillette, mine collante, fusil à ventouses, lance-tomates.
+- **WTF** : canon à confettis, bombe à poulets, canne à pêche à vaches, chaussures à ressorts, super-aimant, trompette-tornade, champignon rétrécisseur, pastèque-bombe, ventilateur portatif.
+- **Mobilité** : jetpack, grappin, parachute, bottes de gravité réduite, téléporteur.
+
+Les props que tu poses restent dans le monde (sauvegardés), avec une limite par joueur.
+
+## Un monde à explorer
+Piste d'atterrissage et héliport, piste de cascade avec rampes et cerceaux, ville miniature à démolir, arène, parking de supermarché, château de caisses, pont… et quelques **easter eggs** cachés (vache sur le toit, bouton « NE PAS APPUYER », piano-caisse, pilier de 300 m…). Des panneaux près du départ indiquent les directions ; `/lieu <nom>` te téléporte.
+
+## Chat, commandes, événements et modes
+**Entrée** ouvre le chat. Les commandes commencent par `/` : `/help` liste tout.
+
+| Commande | Effet |
+|---|---|
+| `/spawn <véhicule>`, `/drive <véhicule>` | crée un véhicule devant toi / monte dedans (3 par joueur) |
+| `/tp <véhicule ou pseudo>`, `/lieu <nom>` | te téléporte |
+| `/clear` | supprime tes objets posés |
+| `/party`, `/klaxon`, `/miaou` | ambiance |
+| `/gravite <n>`, `/taille <n>`, `/meteo <événement>`, `/mode <mode>`, `/annonce <texte>`, `/reset oui` | **réservé à l'hôte** (le premier joueur de la partie) |
+
+- **Événements chaos** (`/meteo`, ou au hasard toutes les 4 à 8 min à plusieurs) : pluie de caisses, gravité lunaire, klaxons hurlants, sol glissant, gnome géant, tremblement de terre, aimant géant, party générale, touches inversées, vent violent.
+- **Modes** : *roi de la colline* et *démolition derby* (`/mode`), classement dans le chat.
+
 ## Commandes par défaut (modifiables dans Options)
 
 | Action | Touches |
 |---|---|
 | Marcher / sauter | Z Q S D / Espace |
 | Regarder | Souris |
+| Utiliser l'objet / action secondaire | Clic gauche / clic droit |
+| Choisir un objet, inventaire | 1-9 ou molette, Tab |
 | Monter / descendre d'un véhicule | E (à proximité) |
 | Chat | Entrée |
 | **Zoom caméra en véhicule** | **Molette** |
-| Voiture | Z/S accélérer, Q/D tourner |
+| Véhicules au sol | Z/S accélérer, Q/D tourner, Espace frein à main, H klaxon, clics = armes |
+| Aéronefs | Z/S piquer-cabrer, Q/D roulis, Maj/Ctrl gaz ou altitude, lacet sur les touches Z/C physiques, H action spéciale (train…) |
 | Pelleteuse | Z/S avancer, Q/D tourner · ←/→ pivoter la cabine · ↑/↓ flèche · R/F bras · T/G godet |
 | Pause / options / menu principal | Échap |
 | Plein écran | F11 (Windows) · Ctrl+Cmd+F (macOS) |

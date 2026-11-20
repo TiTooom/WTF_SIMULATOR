@@ -4,7 +4,7 @@
   "description": "WTF SIMULATOR : jeu 3D en monde ouvert, véhicules et multijoueur entre amis",
   "author": "WTF SIMULATOR",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {

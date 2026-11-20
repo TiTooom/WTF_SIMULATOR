@@ -1,6 +1,7 @@
 // Paquet « core » : outils de base (pistolet à gravité, gomme, soudure). Écrit par le cœur du serveur.
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
+import { bodyOk } from '../guard';
 import type { ItemDef, ItemHandler, Pack, SimApi, SimPlayer, SimProp, SimVehicle, UseCtx } from '../api';
 
 const items: ItemDef[] = [
@@ -29,7 +30,10 @@ function release(p: SimPlayer, api: SimApi) {
   if (!g) return;
   s.grab = null;
   const b = bodyOf(g);
-  if (b) {
+  if (g.kind === 'prop') g.prop.held = false;
+  // Cible gommée / détruite / déconnectée / expirée : son corps n'existe plus et y toucher EMPOISONNE le monde. On ne fait que vider l'état.
+  if (b && !valid(g, api)) { heldBy.delete(b); return; }
+  if (b && bodyOk(b)) {
     if (heldBy.get(b) === p.id) heldBy.delete(b);
     try {
       b.wakeUp();
@@ -40,13 +44,12 @@ function release(p: SimPlayer, api: SimApi) {
       } else if (g.kind === 'vehicle') g.veh.noImpactUntil = api.time + 100;
     } catch { /* corps déjà retiré */ }
   }
-  if (g.kind === 'prop') g.prop.held = false;
 }
 
 function valid(g: Grab, api: SimApi): boolean {
-  if (g.kind === 'prop') return api.props.get(g.prop.id) === g.prop;
-  if (g.kind === 'vehicle') return !g.veh.dead && !g.veh.driver && !!g.veh.behavior.body;
-  return api.players.get(g.player.id) === g.player && !g.player.vehicle && g.player.hp > 0;
+  if (g.kind === 'prop') return api.props.get(g.prop.id) === g.prop && bodyOk(g.prop.body);
+  if (g.kind === 'vehicle') return !g.veh.dead && !g.veh.driver && bodyOk(g.veh.behavior.body);
+  return api.players.get(g.player.id) === g.player && !g.player.vehicle && g.player.hp > 0 && bodyOk(g.player.body);
 }
 
 const physgun: ItemHandler = {

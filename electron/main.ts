@@ -1,11 +1,16 @@
 // Application de bureau : menu (solo / héberger / rejoindre) + serveur intégré + fenêtre de jeu.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { sanitizeSettings } from '../shared/settings';
-import { app, BrowserWindow, ipcMain, Menu, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, session, type IpcMainInvokeEvent } from 'electron';
 import { startServer, type RunningServer } from '../server/server';
 import { announceGame, listenForGames } from './discovery';
 import { setupUpdater, type Updater } from './updater';
+
+// Filet de sécurité : le serveur de jeu tourne dans ce processus, une exception oubliée ne doit pas fermer l'application.
+process.on('uncaughtException', (e) => console.error('[uncaughtException ignorée]', e));
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection ignorée]', e));
 
 let updater: Updater | null = null;
 
@@ -42,6 +47,23 @@ function createWindow() {
       : null,
   );
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // Navigation : seulement le menu (fichier local) ou la même origine que la page courante (jeu local, ou hôte rejoint).
+  // Une page de jeu distante ne peut donc pas emmener la fenêtre ailleurs (ni vers un faux menu `file:`).
+  const menuPath = path.resolve(menuFile).toLowerCase();
+  const allowNav = (e: { preventDefault(): void }, target: string) => {
+    try {
+      const to = new URL(target);
+      if (to.protocol === 'file:') {
+        if (path.resolve(fileURLToPath(to)).toLowerCase() === menuPath) return;
+      } else {
+        const cur = new URL(win?.webContents.getURL() || 'about:blank');
+        if ((to.protocol === 'http:' || to.protocol === 'https:') && to.origin === cur.origin) return;
+      }
+    } catch { /* URL invalide : refusée */ }
+    e.preventDefault();
+  };
+  win.webContents.on('will-navigate', (e, url) => allowNav(e, url));
+  win.webContents.on('will-redirect', (e, url) => allowNav(e, url));
   // F11 : plein écran
   win.webContents.on('before-input-event', (_e, input) => {
     if (input.type === 'keyDown' && input.key === 'F11') win?.setFullScreen(!win.isFullScreen());
@@ -165,4 +187,10 @@ app.on('before-quit', (e) => {
   void stopEverything().then(() => app.quit());
 });
 app.on('window-all-closed', () => app.quit());
-void app.whenReady().then(createWindow);
+// Permissions du navigateur intégré : tout est refusé sauf copier-coller, plein écran et verrouillage du pointeur (nécessaires au jeu).
+const ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write', 'fullscreen', 'pointerLock']);
+void app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => callback(ALLOWED_PERMISSIONS.has(permission)));
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED_PERMISSIONS.has(permission));
+  createWindow();
+});

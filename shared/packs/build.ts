@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
 import type { ItemDef, ItemHandler, Pack, PropTick, SimApi, SimPlayer, SimProp, SimVehicle, UseCtx } from '../api';
 import type { PropKind } from '../props';
+import { bodyOk } from '../guard';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const RANGE = 14; // portée de pose (m)
@@ -256,8 +257,8 @@ const balloonTick: PropTick = (prop, api, dt) => {
   const tg = st.target;
   let tb: RAPIER.RigidBody | null = null;
   if (tg) {
-    if (tg.kind === 'prop') tb = api.props.get(tg.prop.id) === tg.prop ? tg.prop.body : null;
-    else tb = !tg.veh.dead && tg.veh.behavior.body ? tg.veh.behavior.body : null;
+    if (tg.kind === 'prop') tb = api.props.get(tg.prop.id) === tg.prop && bodyOk(tg.prop.body) ? tg.prop.body : null;
+    else tb = !tg.veh.dead && bodyOk(tg.veh.behavior.body) ? tg.veh.behavior.body : null;
     if (!tb) { st.target = null; st.since = api.time; }
   }
   if (tb && tg) {

@@ -5,6 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startServer, lanAddresses } from './server';
 
+// Filet de sécurité : une exception oubliée ne doit jamais arrêter la partie des copains (on journalise et on continue).
+process.on('uncaughtException', (e) => console.error('[uncaughtException ignorée]', e));
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection ignorée]', e));
+
 const solo = process.argv.includes('--solo');
 const here = path.dirname(fileURLToPath(import.meta.url));
 const server = await startServer({
@@ -14,6 +18,7 @@ const server = await startServer({
   publicDir: path.join(here, 'public'),
   hostName: process.env.HOST_NAME,
   log: console.log,
+  onFatal: () => process.exit(1), // le serveur s'est arrêté seul (la partie a été sauvegardée)
 });
 console.log(`Jeu : http://localhost:${server.port}`);
 if (!solo) for (const ip of lanAddresses()) console.log(`Amis (même Wi-Fi) : http://${ip}:${server.port}`);

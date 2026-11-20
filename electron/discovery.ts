@@ -50,7 +50,7 @@ export function listenForGames(onChange: (games: FoundGame[]) => void): () => vo
   sock.on('message', (buf, rinfo) => {
     try {
       const m = JSON.parse(buf.toString());
-      if (m.magic !== MAGIC || typeof m.port !== 'number') return;
+      if (!m || m.magic !== MAGIC || !Number.isInteger(m.port) || m.port <= 0 || m.port >= 65536) return;
       const key = `${rinfo.address}:${m.port}`;
       const game = { host: rinfo.address, port: m.port, name: String(m.name ?? 'Partie').slice(0, 32), players: Number(m.players) || 0, at: Date.now() };
       const prev = seen.get(key);

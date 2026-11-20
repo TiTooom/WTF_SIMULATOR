@@ -71,7 +71,17 @@ export interface Snapshot {
   props: number[];
   /** Projectiles à plat, 8 nombres chacun : id, kind, x, y, z, vx, vy, vz. */
   proj: number[];
-  fx: FxEvent[];
+  fx: FxEvent[]; // peut être absent du JSON réseau quand il est vide (le client lit `fx?.`)
+  // --- Mode différentiel (additif, rétrocompatible : un snapshot sans `d` est complet) ---
+  /** 1 = delta : `props` ne contient que les props modifiés, `vehicles` que ceux listés dans `vi` ; le client fusionne avec l'état précédent (voir src/net.ts). */
+  d?: 1;
+  /** Delta : ids des props supprimés depuis le dernier snapshot. */
+  rm?: number[];
+  /** Delta : indices (dans la liste complète) des véhicules présents dans `vehicles`. */
+  vi?: number[];
+  /** Delta : nombre total de véhicules. */
+  vn?: number;
+  // Delta : `players[i].name` est omis quand le client le connaît déjà (mémorisé par id).
 }
 export const PROP_STRIDE = 10;
 export const PROJ_STRIDE = 8;

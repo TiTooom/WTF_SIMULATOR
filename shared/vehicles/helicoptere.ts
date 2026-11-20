@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { G, grp, type SimProp, type SimVehicle, type VehicleDef } from '../api';
 import { STEP } from '../constants';
+import { bodyOk } from '../guard';
 
 const GRAV = 9.81;
 const WINCH_RANGE = 25;
@@ -57,7 +58,7 @@ export const def: VehicleDef = {
 
     const cargoBody = (c: Cargo) => (c.kind === 'prop' ? c.prop.body : c.veh.behavior.body);
     const cargoValid = (c: Cargo) =>
-      c.kind === 'prop' ? api.props.get(c.prop.id) === c.prop && !c.prop.frozen : !c.veh.dead && !!c.veh.behavior.body && !c.veh.driver;
+      c.kind === 'prop' ? api.props.get(c.prop.id) === c.prop && bodyOk(c.prop.body) && !c.prop.frozen : !c.veh.dead && bodyOk(c.veh.behavior.body) && !c.veh.driver;
 
     const release = (t: { x: number; y: number; z: number }) => {
       if (!cargo) return;

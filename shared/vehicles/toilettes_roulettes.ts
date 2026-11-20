@@ -3,6 +3,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
 import { G, grp, type VehicleDef, type SimProp, type SimVehicle } from '../api';
+import { bodyOk } from '../guard';
 
 const MASS = 650;
 const MAX_SPEED = 10;
@@ -39,8 +40,8 @@ export const def: VehicleDef = {
 
     const targetBody = (): RAPIER.RigidBody | null => {
       if (!target) return null;
-      if (target.prop) return api.props.has(target.prop.id) ? target.prop.body : null;
-      if (target.veh && !target.veh.dead) return target.veh.behavior.body ?? null;
+      if (target.prop) return api.props.get(target.prop.id) === target.prop && bodyOk(target.prop.body) ? target.prop.body : null;
+      if (target.veh && !target.veh.dead) return bodyOk(target.veh.behavior.body) ? target.veh.behavior.body : null;
       return null;
     };
 

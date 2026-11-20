@@ -4,11 +4,12 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>WTF SIMULATOR</title>
+<link rel="icon" href="data:," />
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3ff; font-family: "Segoe UI", sans-serif; }
   #hud, #players { position: fixed; color: #fff; text-shadow: 0 1px 3px #000; pointer-events: none; white-space: pre; }
-  #hud { top: 12px; left: 12px; }
-  #players { top: 12px; right: 12px; text-align: right; }
+  #hud { top: 12px; left: 12px; white-space: pre-wrap; max-width: calc(100vw - 190px); }
+  #players { top: 12px; right: 12px; text-align: right; max-height: 40vh; overflow: hidden; }
   #pause { position: fixed; inset: 0; align-items: center; justify-content: center; background: rgba(20, 40, 70, 0.55); cursor: pointer; }
   #pause #card { cursor: default; width: 440px; max-width: 94vw; }
   #pauseInfo { font-size: 14px; color: #2c3e50; margin: 0 0 14px; }
@@ -27,7 +28,7 @@
   #status { margin-top: 10px; min-height: 18px; color: #c0392b; font-size: 14px; }
 
   /* Chat */
-  #chat { position: fixed; left: 12px; bottom: 12px; width: min(460px, 60vw); display: none; pointer-events: none; }
+  #chat { position: fixed; left: 12px; bottom: 176px; width: min(460px, 60vw); display: none; pointer-events: none; }
   #chatLog { max-height: 160px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; font-size: 15px; color: #fff;
     text-shadow: 0 1px 3px #000, 0 0 2px #000; }
   #chatLog div { padding: 2px 8px; background: rgba(0, 0, 0, 0.35); margin-top: 2px; border-radius: 4px; word-break: break-word; transition: opacity .6s; }
@@ -63,6 +64,9 @@
   #itemInfo .t { display: block; font-size: 17px; font-weight: 800; }
   #itemInfo .d { display: block; font-size: 13px; opacity: .9; }
   #damage { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, rgba(255,0,0,0) 35%, rgba(255,20,20,.9) 100%); }
+
+  @media (max-width: 760px) { .slot { width: 48px; height: 52px; } .slot .emoji { font-size: 20px; } .slot .nm { font-size: 8px; max-width: 44px; } #hotbar { gap: 3px; } #itemInfo { bottom: 76px; } #vitals { width: 160px; bottom: 84px; } #chat { bottom: 160px; } }
+  @media (max-height: 540px) { #chatLog { max-height: 90px; } #chat.open #chatLog { max-height: 130px; } }
 
   /* Inventaire */
   #inventory { position: fixed; inset: 0; z-index: 500; align-items: center; justify-content: center; background: rgba(20,40,70,.65); }

@@ -7,6 +7,7 @@ import type { Sim } from '../shared/sim';
 import type { SimPlayer, SimProp } from '../shared/api';
 import type { Input } from '../shared/protocol';
 import { worldHooks } from '../shared/packs/world';
+import { bodyOk } from '../shared/guard';
 
 const WALK = 6; // même valeur que le cœur (vitesse de marche)
 const NORMAL_GRAVITY = -9.81;
@@ -146,16 +147,17 @@ const EVENTS: ChaosEvent[] = [
     tick: (r) => {
       const g = r.data.gnome as SimProp | null;
       if (!g) { r.finish = true; return; }
-      const t = g.body.translation();
-      if (r.sim.props.get(g.id) !== g) {
-        // détruit : 3 caisses de récompense
-        for (let i = 0; i < 3; i++) r.sim.spawnProp('crate_l', new THREE.Vector3(r.data.last.x + (i - 1) * 1.5, 3 + i, r.data.last.z));
-        r.sim.fx({ k: 'confetti', p: [r.data.last.x, 2, r.data.last.z], b: 70 });
+      if (r.sim.props.get(g.id) !== g || !bodyOk(g.body)) {
+        // détruit (le corps n'existe plus : ne JAMAIS le lire) : 3 caisses de récompense là où il est tombé
+        const last = r.data.last ?? { x: 0, z: 0 };
+        for (let i = 0; i < 3; i++) r.sim.spawnProp('crate_l', new THREE.Vector3(last.x + (i - 1) * 1.5, 3 + i, last.z));
+        r.sim.fx({ k: 'confetti', p: [last.x, 2, last.z], b: 70 });
         r.sim.announce('🏆 Le gnome géant est vaincu. Il laisse trois caisses (c\'est tout ce qu\'il avait).');
         r.data.gnome = null;
         r.finish = true;
         return;
       }
+      const t = g.body.translation();
       r.data.last = { x: t.x, z: t.z };
       if (r.n % 300 === 150) {
         let best: { x: number; z: number } | null = null, bd = Infinity;
@@ -181,7 +183,7 @@ const EVENTS: ChaosEvent[] = [
     },
     stop: (r) => {
       const g = r.data.gnome as SimProp | null;
-      if (g && r.sim.props.get(g.id) === g) {
+      if (g && r.sim.props.get(g.id) === g && bodyOk(g.body)) {
         const t = g.body.translation();
         r.sim.fx({ k: 'smoke', p: [t.x, t.y, t.z], a: 3 });
         r.sim.removeProp(g);

@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { Hit, ItemDef, ItemHandler, Pack, PropTick, SimApi, SimPlayer, SimProp, SimVehicle, UseCtx } from '../api';
 import type { PropKind } from '../props';
+import { bodyOk } from '../guard';
 
 const items: ItemDef[] = [
   { id: 'lance_roquettes', name: 'Lance-roquettes', emoji: '🎯', cat: 'weapon', cooldown: 3,
@@ -229,9 +230,9 @@ interface Pull { player?: SimPlayer; prop?: SimProp; veh?: SimVehicle; until: nu
 const pulls = new WeakMap<SimPlayer, Pull>();
 
 function pullPos(api: SimApi, pl: Pull): THREE.Vector3 | null {
-  if (pl.prop) { if (api.props.get(pl.prop.id) !== pl.prop) return null; const t = pl.prop.body.translation(); return V(t.x, t.y, t.z); }
-  if (pl.veh) { if (pl.veh.dead || !pl.veh.behavior.body) return null; const t = pl.veh.behavior.body.translation(); return V(t.x, t.y, t.z); }
-  if (pl.player) { if (pl.player.hp <= 0 || api.players.get(pl.player.id) !== pl.player) return null; const t = pl.player.body.translation(); return V(t.x, t.y, t.z); }
+  if (pl.prop) { if (api.props.get(pl.prop.id) !== pl.prop || !bodyOk(pl.prop.body)) return null; const t = pl.prop.body.translation(); return V(t.x, t.y, t.z); }
+  if (pl.veh) { if (pl.veh.dead || !bodyOk(pl.veh.behavior.body)) return null; const t = pl.veh.behavior.body.translation(); return V(t.x, t.y, t.z); }
+  if (pl.player) { if (pl.player.hp <= 0 || api.players.get(pl.player.id) !== pl.player || !bodyOk(pl.player.body)) return null; const t = pl.player.body.translation(); return V(t.x, t.y, t.z); }
   return null;
 }
 
