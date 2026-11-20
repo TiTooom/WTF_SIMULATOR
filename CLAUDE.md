@@ -20,7 +20,7 @@ Vrai jeu à télécharger (application Windows Electron, `.exe` portable + insta
 
 ## Commandes
 - `npm run app` : compile et lance l'application · `npm run dev` : serveur + client dans le navigateur (http://localhost:5173) · `npm run build` : types + client + app · `npm run dist` : `.exe` dans `release/`.
-- Release : tag `v*` → `.github/workflows/release.yml`.
+- Release : tag `v*` → `.github/workflows/release.yml` (jobs Windows + macOS ; les `.dmg` ne se fabriquent que sur un Mac/runner macOS). macOS : app non signée mais signée « ad hoc » par `scripts/adhoc-sign.cjs` (hook `afterPack`) ; menu d'application minimal sur darwin (`electron/main.ts`). **Le build macOS n'a jamais été exécuté** (développé sous Windows) : à vérifier au premier tag.
 - **Piège** : l'éditeur (VS Code/Claude Code) définit `ELECTRON_RUN_AS_NODE=1` ; pour lancer Electron depuis son terminal il faut le retirer (`env -u ELECTRON_RUN_AS_NODE npx electron .`).
 - Test automatisé de l'app : lancer Electron avec `--remote-debugging-port=9333` et piloter le menu via le protocole CDP.
 

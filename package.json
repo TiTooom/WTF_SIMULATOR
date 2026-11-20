@@ -25,7 +25,13 @@
     "productName": "Jeu 3D",
     "directories": { "output": "release" },
     "files": ["dist-electron/**/*", "dist/public/**/*", "package.json"],
+    "afterPack": "scripts/adhoc-sign.cjs",
     "win": { "target": ["portable", "nsis"], "signAndEditExecutable": false },
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "artifactName": "Jeu3D-${version}-mac-${arch}.${ext}"
+    },
     "portable": { "artifactName": "Jeu3D-${version}-portable.${ext}" },
     "nsis": { "oneClick": true, "perMachine": false, "artifactName": "Jeu3D-Installer-${version}.${ext}" }
   },

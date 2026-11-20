@@ -23,7 +23,12 @@ function createWindow() {
       contextIsolation: true, nodeIntegration: false, sandbox: true,
     },
   });
-  Menu.setApplicationMenu(null);
+  // Windows : pas de barre de menus. macOS : menu minimal indispensable (Cmd+Q, Cmd+C/V dans le pseudo, plein écran Ctrl+Cmd+F).
+  Menu.setApplicationMenu(
+    process.platform === 'darwin'
+      ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }])
+      : null,
+  );
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   // F11 : plein écran
   win.webContents.on('before-input-event', (_e, input) => {
