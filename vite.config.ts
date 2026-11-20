@@ -5,5 +5,5 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   base: './',
   build: { target: 'es2022', outDir: 'dist/public', emptyOutDir: true },
-  server: { proxy: { '/ws': { target: 'ws://localhost:3000', ws: true } } },
+  server: { proxy: { '/ws': { target: `ws://localhost:${process.env.SERVER_PORT ?? 3000}`, ws: true } } },
 });
