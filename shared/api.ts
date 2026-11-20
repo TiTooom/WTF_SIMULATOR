@@ -57,6 +57,8 @@ export interface SimVehicle {
   dead: boolean;
   deadAt: number;
   home: { x: number; z: number; yaw: number };
+  /** Optionnel : jusqu'à ce temps (ms) les variations de vitesse ne comptent pas comme un choc (saisie du pistolet à gravité, téléportation…). */
+  noImpactUntil?: number;
 }
 
 export type HitKind = 'static' | 'prop' | 'vehicle' | 'player';
@@ -215,8 +217,13 @@ export interface ItemHandler {
 }
 
 /** Un paquet de contenu : objets + props qu'ils créent + comportements. Un fichier shared/packs/<nom>.ts par paquet. */
+/** Comportement permanent d'un prop (roue qui tourne, propulseur, mine, trampoline…), appelé à chaque pas physique. */
+export type PropTick = (prop: SimProp, api: SimApi, dt: number) => void;
+
 export interface Pack {
   items: ItemDef[];
   props: PropKind[];
   handlers: Record<string, ItemHandler>;
+  /** Comportements permanents, indexés par PropKind.behavior. */
+  propTicks?: Record<string, PropTick>;
 }

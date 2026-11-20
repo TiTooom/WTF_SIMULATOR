@@ -1,6 +1,6 @@
 // Registres du contenu : objets d'inventaire, props, comportements. Construits à partir des paquets.
 // L'ORDRE des paquets et des props est partagé serveur/client (les indices de props en dépendent).
-import type { ItemDef, ItemHandler, Pack } from './api';
+import type { ItemDef, ItemHandler, Pack, PropTick } from './api';
 import { BASE_PROPS, type PropKind } from './props';
 import { pack as core } from './packs/core';
 import { pack as build } from './packs/build';
@@ -12,6 +12,7 @@ const PACKS: Pack[] = [core, build, weapons, wtf, move];
 
 export const ITEMS: ItemDef[] = PACKS.flatMap((p) => p.items);
 export const ITEM_BY_ID = new Map(ITEMS.map((i) => [i.id, i]));
+export const PROP_TICKS: Record<string, PropTick> = Object.assign({}, ...PACKS.map((p) => p.propTicks ?? {}));
 export const HANDLERS: Record<string, ItemHandler> = Object.assign({}, ...PACKS.map((p) => p.handlers));
 
 export const PROP_KINDS: PropKind[] = [...BASE_PROPS, ...PACKS.flatMap((p) => p.props)];

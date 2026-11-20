@@ -19,6 +19,8 @@ export interface PropKind {
   explosive?: { radius: number; power: number; damage: number }; // explose quand détruit
   life?: number; // secondes avant disparition automatique
   glow?: boolean; // aspect lumineux (non ombré)
+  /** Identifiant d'un comportement permanent exécuté à chaque tick tant que le prop existe (voir Pack.propTicks dans api.ts). */
+  behavior?: string;
 }
 
 /** Sommets d'une rampe (prisme triangulaire) : bord haut du côté −z, bord bas du côté +z. Partagé serveur/client. */

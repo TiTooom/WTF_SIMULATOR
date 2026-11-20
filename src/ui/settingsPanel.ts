@@ -34,7 +34,8 @@ export function keyLabel(code: string, layout: Layout): string {
 
 const CSS = `
 .sp-overlay{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(20,40,70,.7);font-family:"Segoe UI",sans-serif}
-.sp-card{background:#fff;color:#2c3e50;border-radius:16px;width:560px;max-width:94vw;max-height:90vh;overflow:auto;padding:22px 26px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+.sp-card{background:#fff;color:#2c3e50;border-radius:16px;width:560px;max-width:94vw;max-height:90vh;display:flex;flex-direction:column;padding:22px 26px 18px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+.sp-body{flex:1;min-height:0;overflow-y:auto;padding-right:8px;margin-right:-8px}
 .sp-card h2{margin:0 0 4px;font-size:24px}
 .sp-card h3{margin:18px 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:#7f8c9a}
 .sp-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 0;font-size:15px}
@@ -44,9 +45,9 @@ const CSS = `
 .sp-range{width:240px}
 .sp-val{width:44px;text-align:right;color:#7f8c9a;font-size:14px}
 .sp-note{min-height:18px;font-size:13px;color:#c0392b;margin-top:6px}
-.sp-actions{display:flex;gap:10px;margin-top:16px}
+.sp-actions{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
 .sp-actions button{flex:1;padding:11px;font-size:15px;font-weight:700;border:0;border-radius:9px;cursor:pointer;color:#fff;background:#3498db}
-.sp-actions button.sp-reset{background:#95a5a6}
+.sp-actions button.sp-reset{background:#95a5a6;font-size:13px}
 `;
 
 export interface PanelOptions {
@@ -86,14 +87,17 @@ export async function openSettings(opts: PanelOptions): Promise<void> {
   };
 
   card.appendChild(el('h2', undefined, 'Options'));
+  const body = el('div', 'sp-body');
+  card.appendChild(body);
 
   // ---- Touches ----
   const keyButtons = new Map<ActionId, HTMLButtonElement>();
   const refreshKeys = () => {
     for (const [id, b] of keyButtons) b.textContent = keyLabel(s.keys[id], layout);
   };
-  for (const group of ['À pied', 'Général', 'Pelleteuse'] as const) {
-    card.appendChild(el('h3', undefined, group === 'Général' ? 'Général' : group === 'À pied' ? 'Déplacement' : 'Pelleteuse'));
+  const TITLES: Record<string, string> = { 'À pied': 'Déplacement à pied', Véhicules: 'Véhicules', Pilotage: 'Pilotage (avions, hélicoptère…)', Inventaire: 'Inventaire et barre d’objets', Général: 'Général', Pelleteuse: 'Pelleteuse' };
+  for (const group of ['À pied', 'Véhicules', 'Pilotage', 'Inventaire', 'Général', 'Pelleteuse'] as const) {
+    body.appendChild(el('h3', undefined, TITLES[group]));
     for (const a of ACTIONS.filter((x) => x.group === group)) {
       const row = el('div', 'sp-row');
       row.appendChild(el('span', undefined, a.label));
@@ -108,7 +112,7 @@ export async function openSettings(opts: PanelOptions): Promise<void> {
       });
       keyButtons.set(a.id, b);
       row.appendChild(b);
-      card.appendChild(row);
+      body.appendChild(row);
     }
   }
 
@@ -131,12 +135,12 @@ export async function openSettings(opts: PanelOptions): Promise<void> {
     wrap.style.display = 'flex';
     wrap.style.alignItems = 'center';
     row.appendChild(wrap);
-    card.appendChild(row);
+    body.appendChild(row);
     return input;
   };
-  card.appendChild(el('h3', undefined, 'Souris'));
+  body.appendChild(el('h3', undefined, 'Souris'));
   slider('Sensibilité', 0.2, 3, 0.05, () => s.sensitivity, (v) => (s.sensitivity = v), (v) => v.toFixed(2) + '×');
-  card.appendChild(el('h3', undefined, 'Son'));
+  body.appendChild(el('h3', undefined, 'Son'));
   slider('Volume général', 0, 1, 0.05, () => s.master, (v) => (s.master = v), (v) => Math.round(v * 100) + '%');
   slider('Effets (moteurs, pas…)', 0, 1, 0.05, () => s.effects, (v) => (s.effects = v), (v) => Math.round(v * 100) + '%');
 
@@ -150,9 +154,16 @@ export async function openSettings(opts: PanelOptions): Promise<void> {
     refreshKeys();
     changed();
   });
+  const resetBar = el('button', 'sp-reset', 'Barre d’objets par défaut');
+  resetBar.type = 'button';
+  resetBar.addEventListener('click', () => {
+    s = { ...s, hotbar: [] }; // tableau vide = barre par défaut du jeu
+    note.textContent = 'Barre d’objets remise par défaut.';
+    changed();
+  });
   const close = el('button', undefined, 'Fermer');
   close.type = 'button';
-  actions.append(reset, close);
+  actions.append(reset, resetBar, close);
   card.appendChild(actions);
   refreshKeys();
 

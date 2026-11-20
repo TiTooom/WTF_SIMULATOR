@@ -1,173 +1,162 @@
-// Simulation physique autoritaire (tourne sur le serveur, sans aucun rendu).
+// Simulation physique autoritaire (tourne sur le serveur, sans aucun rendu). Implémente SimApi (voir api.ts).
+// Contenu : monde, props unifiés, véhicules (registre), joueurs, objets d'inventaire, projectiles, explosions, dégâts, sauvegarde v2.
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
+import { GROUND, PROJECTILE_KINDS, SPAWNS, STEP, crateLayout, treeLayout } from './constants';
+import { NO_INPUT, type FxEvent, type Input, type PlayerSnap, type Snapshot, type Vec3, type VehicleSnap } from './protocol';
 import {
-  EXC, GROUND, SPAWNS, STEP, VEHICLE_SPECS, crateLayout, treeLayout,
-} from './constants';
-import { NO_INPUT, type Input, type Snapshot, type VehicleSnap } from './protocol';
+  G, grp, type DamageKind, type Hit, type Mods, type ProjectileSpec, type SimApi, type SimPlayer, type SimProp, type SimVehicle,
+  type StepCtx, type VehicleDef,
+} from './api';
+import { wedgeVertices, type PropKind } from './props';
+import { HANDLERS, ITEM_BY_ID, PROP_INDEX, PROP_TICKS, propKindById } from './registry';
+import { VEHICLES } from './vehicles';
+
+// ---------- Réglages ----------
+const PLAYER_HP = 100;
+const RESPAWN_PLAYER_MS = 2000;
+const RESPAWN_VEHICLE_MS = 12000;
+const MAX_PROPS_PER_PLAYER = 40;
+const MAX_PROPS = 400;
+const MAX_PROJECTILES = 300;
+const MAX_FX = 256;
+const MAX_EXTRA_VEHICLES = 12;
+const WALK = 6;
+const JUMP = 6;
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
-const clamp1 = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? Math.max(-1, Math.min(1, n)) : 0);
+const fin = (n: unknown, d = 0) => (typeof n === 'number' && Number.isFinite(n) ? n : d);
+const clamp1 = (n: unknown) => Math.max(-1, Math.min(1, fin(n)));
+const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 const round = (n: number, p = 100) => Math.round(n * p) / p;
+const vec3 = (v: unknown, d: Vec3): Vec3 =>
+  Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && Number.isFinite(n)) ? [v[0], v[1], v[2]] : d;
+const pick = <T>(a: T[]): T => a[Math.floor(Math.random() * a.length)];
 
-interface SimPlayer {
-  id: string;
-  name: string;
-  body: RAPIER.RigidBody;
-  input: Input;
-  vehicle: SimVehicle | null;
+/** Vue interne d'un véhicule : SimVehicle + état propre au cœur. */
+interface VX extends SimVehicle {
+  pv: THREE.Vector3; // vitesse au pas précédent (détection des chocs)
+  grace: number; // pas de dégâts de choc avant ce temps (ms)
+  extra: boolean; // créé par /spawn (pas un véhicule du monde)
+  fails: number;
+  disabled: boolean;
+  pose: { p: Vec3; q: [number, number, number, number] };
 }
-
-interface SimVehicle {
-  type: 'car' | 'excavator';
-  body: RAPIER.RigidBody;
-  driver: SimPlayer | null;
-  steer: number;
-  arm: [number, number, number, number];
-  step(input: Input): void;
+interface PX extends SimProp { base: boolean }
+interface PI { // état interne d'un joueur
+  col: RAPIER.Collider; sc: number; grav: number; deadAt: number; start: Vec3; runAt: number;
 }
+interface Proj {
+  id: number; kind: number; pos: THREE.Vector3; vel: THREE.Vector3; owner: SimPlayer | null; gravity: number; life: number;
+  age: number; fuse: boolean; bounce: boolean; radius: number; power: number; damage: number;
+  onHit?: ProjectileSpec['onHit']; stuck: boolean;
+}
+type Owner = { prop?: PX; vehicle?: VX; player?: SimPlayer };
 
 export interface SaveData {
-  version: 1;
-  crates: { p: number[]; q: number[] }[];
-  vehicles: { p: number[]; q: number[]; arm: number[] }[];
+  version: 2;
+  props: { k: string; p: number[]; q: number[]; f: number }[];
+  /** Véhicules du monde puis véhicules créés par /spawn (extra). Restaurés par type + rang (n-ième véhicule de ce type). */
+  vehicles: { type: string; p: number[]; q: number[]; hp: number; st?: number[]; extra?: boolean }[];
   players: Record<string, [number, number, number]>;
 }
 
-const quatOf = (b: RAPIER.RigidBody) => {
-  const r = b.rotation();
-  return new THREE.Quaternion(r.x, r.y, r.z, r.w);
-};
+let rapierReady: Promise<void> | null = null;
 
-export class Sim {
+const DEATH = {
+  explosion: ['{n} a été pulvérisé par {k}', '{n} s\'est envolé en confettis grâce à {k}', '{n} a pris le feu d\'artifice de {k} en pleine figure'],
+  explosionAlone: ['{n} a explosé tout seul. Bravo.', '{n} est parti en fumée', '{n} a confondu explosif et oreiller'],
+  bullet: ['{n} a été transformé en gruyère par {k}', '{n} a pris une rafale de {k}'],
+  bulletAlone: ['{n} s\'est tiré dessus. Comment ?!'],
+  impact: ['{n} a été aplati par {k}', '{n} a servi de paillasson à {k}'],
+  impactAlone: ['{n} a embrassé un mur à pleine vitesse', '{n} a testé la dureté du sol'],
+  void: ['{n} a découvert que le monde avait une fin', '{n} est tombé dans le grand rien'],
+  generic: ['{n} a été éliminé par {k}', '{n} a connu une fin tragique, signée {k}'],
+  genericAlone: ['{n} a rendu l\'âme', '{n} est mort. Mystère.'],
+} as const;
+
+export class Sim implements SimApi {
   readonly world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
   readonly players = new Map<string, SimPlayer>();
-  readonly vehicles: SimVehicle[] = [];
-  readonly crates: RAPIER.RigidBody[] = [];
-  private savedPlayers: SaveData['players'] = {};
+  readonly vehicles: VX[] = [];
+  readonly props = new Map<number, PX>();
   time = 0;
+  /** Branché par le serveur : annonce affichée dans le chat de tout le monde. */
+  onAnnounce: ((text: string) => void) | null = null;
+  log: (line: string) => void = (l) => console.warn(l);
+
+  private owners = new Map<number, Owner>(); // handle de corps -> propriétaire
+  private pinfo = new Map<string, PI>();
+  private projs: Proj[] = [];
+  private fxQueue: FxEvent[] = [];
+  private pending: { at: number; pos: THREE.Vector3; e: NonNullable<PropKind['explosive']>; by: SimPlayer | null }[] = [];
+  private savedPlayers: SaveData['players'] = {};
+  private nextPropId = 1;
+  private nextProjId = 1;
   private spawnCount = 0;
+  private itemFails = new Map<string, number>();
+  private badItems = new Set<string>();
+  private gravityY = -9.81;
 
   static async create(): Promise<Sim> {
-    await RAPIER.init();
-    return new Sim();
+    rapierReady ??= RAPIER.init();
+    await rapierReady;
+    const sim = new Sim();
+    await sim.loadWorldExtension();
+    return sim;
+  }
+
+  /** Point d'extension : `shared/world.ts` (décor, écrit par une autre équipe) peut exporter `buildWorld(sim: Sim)`. Absent = ignoré. */
+  private async loadWorldExtension() {
+    const spec = './world';
+    try {
+      const m = await import(/* @vite-ignore */ spec);
+      if (typeof m?.buildWorld === 'function') m.buildWorld(this);
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? e);
+      if (!/Cannot find|not found|ERR_MODULE|Failed to (load|resolve)/i.test(msg)) this.log(`[sim] décor (world.ts) ignoré : ${msg}`);
+    }
   }
 
   private constructor() {
     const w = this.world;
-    w.createCollider(RAPIER.ColliderDesc.cuboid(GROUND, 0.5, GROUND).setTranslation(0, -0.5, 0).setFriction(1));
+    w.createCollider(RAPIER.ColliderDesc.cuboid(GROUND, 0.5, GROUND).setTranslation(0, -0.5, 0).setFriction(1).setCollisionGroups(grp(G.WORLD)));
     for (const t of treeLayout())
-      w.createCollider(RAPIER.ColliderDesc.cylinder(1.5 * t.s, 0.4 * t.s).setTranslation(t.x, 1.5 * t.s, t.z));
+      w.createCollider(RAPIER.ColliderDesc.cylinder(1.5 * t.s, 0.4 * t.s).setTranslation(t.x, 1.5 * t.s, t.z).setCollisionGroups(grp(G.WORLD)));
     for (const c of crateLayout()) {
-      const body = w.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(c.x, c.y, c.z));
-      w.createCollider(RAPIER.ColliderDesc.cuboid(c.s / 2, c.s / 2, c.s / 2).setMass(c.mass), body);
-      this.crates.push(body);
+      const p = this.createProp(c.kind, new THREE.Vector3(c.x, c.y, c.z), undefined, undefined, '');
+      if (p) p.base = true;
     }
-    this.vehicles.push(this.makeCar(...SPAWNS.car), this.makeExcavator(...SPAWNS.excavator));
+    for (const def of VEHICLES) for (const [x, z, yaw] of def.spawns) this.makeVehicle(def, x, 1.2, z, yaw, false);
   }
 
-  // ---------- Joueurs ----------
-  addPlayer(id: string, name: string) {
-    const saved = this.savedPlayers[name];
-    // Chaque nouveau joueur apparaît à une place différente autour du point de départ
-    const a = (this.spawnCount++ % 8) * (Math.PI / 4);
-    const [x, y, z] = saved ?? [SPAWNS.player[0] + Math.cos(a) * 2.5, SPAWNS.player[1], SPAWNS.player[2] + Math.sin(a) * 2.5];
-    const body = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y + (saved ? 0.5 : 0), z).lockRotations().setLinearDamping(0),
-    );
-    this.world.createCollider(RAPIER.ColliderDesc.capsule(0.5, 0.35).setFriction(0), body);
-    this.players.set(id, { id, name, body, input: { ...NO_INPUT }, vehicle: null });
+  // =====================================================================================================================
+  // Outils communs (SimApi)
+  // =====================================================================================================================
+  fx(ev: FxEvent) {
+    if (this.fxQueue.length >= MAX_FX) this.fxQueue.shift();
+    this.fxQueue.push(ev);
   }
-
-  removePlayer(id: string) {
-    const p = this.players.get(id);
-    if (!p) return;
-    this.rememberPlayer(p);
-    if (p.vehicle) this.exitVehicle(p);
-    this.world.removeRigidBody(p.body);
-    this.players.delete(id);
+  clearFx() { this.fxQueue.length = 0; }
+  announce(text: string) {
+    try { this.onAnnounce?.(text); } catch { /* le chat ne doit jamais casser la simulation */ }
   }
-
-  private rememberPlayer(p: SimPlayer) {
-    const t = p.vehicle ? p.vehicle.body.translation() : p.body.translation();
-    this.savedPlayers[p.name] = [round(t.x), round(Math.max(t.y, 1)), round(t.z)];
+  setGravity(y: number) {
+    this.gravityY = clamp(fin(y, -9.81), -40, 40);
+    this.world.gravity = { x: 0, y: this.gravityY, z: 0 };
+    for (const p of this.props.values()) p.body.wakeUp();
+    for (const v of this.vehicles) if (!v.dead && v.behavior.body) v.behavior.body.wakeUp();
   }
-
-  setInput(id: string, raw: Partial<Input>) {
-    const p = this.players.get(id);
-    if (!p) return;
-    p.input = {
-      f: clamp1(raw.f), s: clamp1(raw.s), sw: clamp1(raw.sw), bm: clamp1(raw.bm),
-      st: clamp1(raw.st), bk: clamp1(raw.bk), jump: raw.jump ? 1 : 0,
-      yaw: typeof raw.yaw === 'number' && Number.isFinite(raw.yaw) ? raw.yaw : 0,
-    };
+  quatOf(b: RAPIER.RigidBody) {
+    const r = b.rotation();
+    return new THREE.Quaternion(r.x, r.y, r.z, r.w);
   }
-
-  /** Monter dans le véhicule le plus proche libre, ou descendre. */
-  interact(id: string) {
-    const p = this.players.get(id);
-    if (!p) return;
-    if (p.vehicle) return this.exitVehicle(p);
-    const t = p.body.translation();
-    let best: SimVehicle | null = null;
-    let bestDist = Infinity;
-    for (const v of this.vehicles) {
-      if (v.driver) continue;
-      const vt = v.body.translation();
-      const d = Math.hypot(t.x - vt.x, t.z - vt.z);
-      if (d < VEHICLE_SPECS[v.type].enterRadius && d < bestDist) {
-        best = v;
-        bestDist = d;
-      }
-    }
-    if (!best) return;
-    best.driver = p;
-    p.vehicle = best;
-    p.body.setEnabled(false);
+  forwardSpeed(b: RAPIER.RigidBody) {
+    const v = b.linvel();
+    return new THREE.Vector3(v.x, v.y, v.z).dot(new THREE.Vector3(0, 0, -1).applyQuaternion(this.quatOf(b)));
   }
-
-  private exitVehicle(p: SimPlayer) {
-    const v = p.vehicle;
-    if (!v) return;
-    const c = v.body.translation();
-    const side = new THREE.Vector3(VEHICLE_SPECS[v.type].exitOffset, 0, 0).applyQuaternion(quatOf(v.body));
-    v.driver = null;
-    v.steer = 0;
-    v.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    p.vehicle = null;
-    p.body.setEnabled(true);
-    p.body.setTranslation({ x: c.x + side.x, y: c.y + 1.5, z: c.z + side.z }, true);
-    p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-  }
-
-  // ---------- Pas de simulation ----------
-  step() {
-    for (const p of this.players.values()) if (!p.vehicle) this.stepPlayer(p);
-    for (const v of this.vehicles) v.step(v.driver ? v.driver.input : NO_INPUT);
-    this.world.step();
-    this.time += STEP * 1000;
-    // Filet de sécurité : retour au point de départ en cas de chute hors du monde
-    for (const p of this.players.values()) {
-      if (!p.vehicle && p.body.translation().y < -30) {
-        p.body.setTranslation({ x: SPAWNS.player[0], y: SPAWNS.player[1], z: SPAWNS.player[2] }, true);
-        p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      }
-    }
-  }
-
-  private stepPlayer(p: SimPlayer) {
-    const i = p.input;
-    const dir = new THREE.Vector3(i.s, 0, -i.f).applyAxisAngle(Y_AXIS, i.yaw);
-    if (dir.lengthSq() > 1) dir.normalize();
-    dir.multiplyScalar(6);
-    const v = p.body.linvel();
-    const grounded = Math.abs(v.y) < 0.05;
-    p.body.setLinvel({ x: dir.x, y: i.jump && grounded ? 6 : v.y, z: dir.z }, true);
-  }
-
-  // ---------- Conduite arcade commune ----------
-  private driveArcade(body: RAPIER.RigidBody, mass: number, accel: number, throttle: number, turn: number) {
-    const q = quatOf(body);
+  driveArcade(body: RAPIER.RigidBody, mass: number, accel: number, throttle: number, turn: number) {
+    const q = this.quatOf(body);
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
     const v = body.linvel();
@@ -177,214 +166,901 @@ export class Sim {
     body.applyImpulse(right.multiplyScalar(-lateral * mass * 0.9), true);
     body.setAngvel({ x: 0, y: turn, z: 0 }, true);
   }
-
-  // Friction nulle (règle Min) : sinon le frottement du châssis le bloque au sol.
-  private sliding(desc: RAPIER.ColliderDesc) {
+  sliding(desc: RAPIER.ColliderDesc) {
     return desc.setFriction(0).setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min);
   }
 
-  private makeCar(x: number, y: number, z: number): SimVehicle {
-    const MASS = 800;
-    const body = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setLinearDamping(0.45).setAngularDamping(2.5)
-        .enabledRotations(false, true, false),
-    );
-    this.world.createCollider(this.sliding(RAPIER.ColliderDesc.cuboid(1, 0.45, 2).setMass(MASS)), body);
-    const self: SimVehicle = {
-      type: 'car', body, driver: null, steer: 0, arm: [0, 0, 0, 0],
-      step: (input) => {
-        self.steer = -input.s;
-        const fwdSpeed = this.forwardSpeed(body);
-        const turn = self.steer * Math.max(-1, Math.min(1, fwdSpeed / 6)) * 1.8;
-        this.driveArcade(body, MASS, 14, input.f, turn);
-      },
-    };
-    return self;
+  private safe(fn: () => void, label: string) {
+    try { fn(); } catch (e) { this.log(`[sim] erreur dans ${label} : ${(e as Error)?.stack ?? e}`); }
   }
 
-  forwardSpeed(b: RAPIER.RigidBody) {
-    const v = b.linvel();
-    return new THREE.Vector3(v.x, v.y, v.z).dot(new THREE.Vector3(0, 0, -1).applyQuaternion(quatOf(b)));
-  }
-
-  // Pelleteuse : chenilles arcade + bras dont chaque pièce est un corps cinématique (pousse et soulève les caisses).
-  private makeExcavator(x: number, y: number, z: number): SimVehicle {
-    const MASS = 5000;
-    const body = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setLinearDamping(0.9).setAngularDamping(4)
-        .enabledRotations(false, true, false),
-    );
-    const BODY_GROUP = 0x0002;
-    this.world.createCollider(
-      this.sliding(RAPIER.ColliderDesc.cuboid(1.75, 0.5, 2.3).setMass(MASS)).setCollisionGroups((BODY_GROUP << 16) | 0xffff),
-      body,
-    );
-
-    // Hiérarchie sans géométrie : sert uniquement à calculer les poses du bras.
-    const { L1, L2 } = EXC;
-    const root = new THREE.Group();
-    const turret = new THREE.Group();
-    turret.position.y = EXC.turretY;
-    root.add(turret);
-    const boomPivot = new THREE.Group();
-    boomPivot.position.set(...EXC.boomPivot);
-    turret.add(boomPivot);
-    const stickPivot = new THREE.Group();
-    stickPivot.position.z = -L1;
-    boomPivot.add(stickPivot);
-    const bucketPivot = new THREE.Group();
-    bucketPivot.position.z = -L2;
-    stickPivot.add(bucketPivot);
-    const tip = new THREE.Object3D();
-    tip.position.set(0, -0.1, -1.3);
-    bucketPivot.add(tip);
-    const heel = new THREE.Object3D();
-    heel.position.set(0, -0.1, 0.1);
-    bucketPivot.add(heel);
-
-    const ARM_FILTER = (0x0004 << 16) | (0xffff & ~BODY_GROUP); // ne collisionne pas avec le châssis
-    const armPart = (colliders: RAPIER.ColliderDesc[]) => {
-      const b = this.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-      for (const c of colliders) this.world.createCollider(c.setCollisionGroups(ARM_FILTER), b);
-      return b;
-    };
-    const cub = (hx: number, hy: number, hz: number, px: number, py: number, pz: number) =>
-      RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(px, py, pz);
-    const armBodies: [THREE.Object3D, RAPIER.RigidBody][] = [
-      [boomPivot, armPart([cub(0.25, 0.3, L1 / 2, 0, 0, -L1 / 2)])],
-      [stickPivot, armPart([cub(0.19, 0.25, L2 / 2, 0, 0, -L2 / 2)])],
-      [bucketPivot, armPart([
-        cub(0.7, 0.05, 0.55, 0, -0.05, -0.55),
-        cub(0.7, 0.35, 0.05, 0, 0.3, -0.05),
-        cub(0.05, 0.35, 0.55, -0.7, 0.3, -0.55),
-        cub(0.05, 0.35, 0.55, 0.7, 0.3, -0.55),
-      ])],
-    ];
-
-    const wp = new THREE.Vector3();
-    const wq = new THREE.Quaternion();
-    const syncArm = (teleport: boolean) => {
-      for (const [pivot, b] of armBodies) {
-        pivot.getWorldPosition(wp);
-        pivot.getWorldQuaternion(wq);
-        if (teleport) {
-          b.setTranslation(wp, true);
-          b.setRotation(wq, true);
-        } else {
-          b.setNextKinematicTranslation(wp);
-          b.setNextKinematicRotation(wq);
-        }
-      }
-    };
-
-    const self: SimVehicle = {
-      type: 'excavator', body, driver: null, steer: 0,
-      arm: [EXC.rest.swing, EXC.rest.boom, EXC.rest.stick, EXC.rest.bucket],
-      step: (input) => {
-        const A = self.arm;
-        this.driveArcade(body, MASS, 7, input.f, -input.s * 0.9);
-        const prev = [...A] as typeof A;
-        const cl = (v: number, [lo, hi]: readonly number[]) => Math.max(lo, Math.min(hi, v));
-        A[0] += input.sw * 0.9 * STEP;
-        A[1] = cl(A[1] + input.bm * 0.7 * STEP, EXC.limits.boom);
-        A[2] = cl(A[2] + input.st * 0.9 * STEP, EXC.limits.stick);
-        A[3] = cl(A[3] + input.bk * 1.4 * STEP, EXC.limits.bucket);
-        applyPose();
-        if (underground()) {
-          // Le godet ne s'enfonce pas dans le sol
-          for (let k = 0; k < 4; k++) A[k] = prev[k];
-          applyPose();
-        }
-        syncArm(false);
-      },
-    };
-    const applyPose = () => {
-      const t = body.translation();
-      root.position.set(t.x, t.y, t.z);
-      root.quaternion.copy(quatOf(body));
-      turret.rotation.y = self.arm[0];
-      boomPivot.rotation.x = self.arm[1];
-      stickPivot.rotation.x = self.arm[2];
-      bucketPivot.rotation.x = self.arm[3];
-      root.updateMatrixWorld(true);
-    };
-    const underground = () => {
-      for (const o of [bucketPivot, tip, heel]) {
-        o.getWorldPosition(wp);
-        if (wp.y < 0.08) return true;
-      }
-      return false;
-    };
-    applyPose();
-    syncArm(true);
-    // Après une restauration de sauvegarde ou un déplacement : replace le bras.
-    (self as SimVehicle & { resync?: () => void }).resync = () => {
-      applyPose();
-      syncArm(true);
-    };
-    return self;
-  }
-
-  // ---------- État envoyé aux clients ----------
-  snapshot(): Snapshot {
-    const players = [...this.players.values()].map((p) => {
-      const t = (p.vehicle ?? p).body.translation();
-      return {
-        id: p.id, name: p.name, p: [round(t.x), round(t.y), round(t.z)] as [number, number, number],
-        yaw: round(p.input.yaw, 1000), veh: p.vehicle ? this.vehicles.indexOf(p.vehicle) : -1,
-      };
-    });
-    const vehicles: VehicleSnap[] = this.vehicles.map((v) => {
-      const t = v.body.translation();
-      const r = v.body.rotation();
-      return {
-        type: v.type, p: [round(t.x), round(t.y), round(t.z)],
-        q: [round(r.x, 1000), round(r.y, 1000), round(r.z, 1000), round(r.w, 1000)],
-        drv: v.driver?.id ?? '', sp: round(this.forwardSpeed(v.body)), st: v.steer,
-        a: v.arm.map((n) => round(n, 1000)) as VehicleSnap['a'],
-      };
-    });
-    const crates: number[] = [];
-    for (const b of this.crates) {
-      const t = b.translation();
-      const r = b.rotation();
-      crates.push(round(t.x), round(t.y), round(t.z), round(r.x, 1000), round(r.y, 1000), round(r.z, 1000), round(r.w, 1000));
+  // =====================================================================================================================
+  // Props
+  // =====================================================================================================================
+  spawnProp(kindId: string, pos: THREE.Vector3, rot?: THREE.Quaternion, vel?: THREE.Vector3, owner?: SimPlayer | null): SimProp | null {
+    const kind = propKindById(kindId);
+    if (!kind) return null;
+    const ownerId = owner?.id ?? '';
+    if (ownerId) {
+      const mine: PX[] = [];
+      for (const p of this.props.values()) if (p.owner === ownerId && !p.base) mine.push(p);
+      for (let i = 0; i <= mine.length - MAX_PROPS_PER_PLAYER; i++) this.removeProp(mine[i]);
     }
-    return { t: Math.round(this.time), players, vehicles, crates };
+    while (this.props.size >= MAX_PROPS) {
+      let oldest: PX | null = null;
+      for (const p of this.props.values()) if (!p.base) { oldest = p; break; }
+      if (!oldest) return null;
+      this.removeProp(oldest);
+    }
+    return this.createProp(kindId, pos, rot, vel, ownerId);
   }
 
-  // ---------- Sauvegarde ----------
+  private createProp(kindId: string, pos: THREE.Vector3, rot?: THREE.Quaternion, vel?: THREE.Vector3, ownerId = ''): PX | null {
+    const kind = propKindById(kindId);
+    if (!kind) return null;
+    const desc = RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z).setLinearDamping(0.05).setAngularDamping(0.15);
+    if (rot) desc.setRotation({ x: rot.x, y: rot.y, z: rot.z, w: rot.w });
+    if (vel) desc.setLinvel(vel.x, vel.y, vel.z);
+    if (kind.gravityScale !== undefined) desc.setGravityScale(kind.gravityScale);
+    const body = this.world.createRigidBody(desc);
+    const [a, b, c] = kind.size;
+    let cd: RAPIER.ColliderDesc;
+    switch (kind.shape) {
+      case 'sphere': cd = RAPIER.ColliderDesc.ball(a / 2); break;
+      case 'cylinder': cd = RAPIER.ColliderDesc.cylinder((b ?? a) / 2, a / 2); break;
+      case 'wedge':
+        cd = RAPIER.ColliderDesc.convexHull(new Float32Array(wedgeVertices(a, b ?? a, c ?? a)))
+          ?? RAPIER.ColliderDesc.cuboid(a / 2, (b ?? a) / 2, (c ?? a) / 2);
+        break;
+      default: cd = RAPIER.ColliderDesc.cuboid(a / 2, (b ?? a) / 2, (c ?? a) / 2);
+    }
+    cd.setMass(Math.max(0.05, kind.mass)).setFriction(kind.friction ?? 0.8).setRestitution(kind.bounce ?? 0).setCollisionGroups(grp(G.PROP));
+    this.world.createCollider(cd, body);
+    const prop: PX = {
+      id: this.nextPropId++, kind, body, owner: ownerId, frozen: false, held: false,
+      hp: kind.hp ?? (kind.explosive ? 20 : 0), bornAt: this.time, base: false,
+    };
+    this.props.set(prop.id, prop);
+    this.owners.set(body.handle, { prop });
+    return prop;
+  }
+
+  removeProp(p: SimProp) {
+    if (!this.props.has(p.id)) return;
+    this.props.delete(p.id);
+    this.owners.delete(p.body.handle);
+    p.held = false;
+    try { this.world.removeRigidBody(p.body); } catch { /* déjà retiré */ } // retire aussi les joints (soudures)
+  }
+
+  freezeProp(p: SimProp, frozen: boolean) {
+    if (!this.props.has(p.id)) return;
+    p.frozen = frozen;
+    p.body.setBodyType(frozen ? RAPIER.RigidBodyType.Fixed : RAPIER.RigidBodyType.Dynamic, true);
+    if (!frozen) p.body.wakeUp();
+  }
+
+  damageProp(p: SimProp, amount: number, by: SimPlayer | null = null) {
+    const k = p.kind;
+    if ((k.hp === undefined && !k.explosive) || !(amount > 0) || !this.props.has(p.id)) return;
+    p.hp -= amount;
+    if (p.hp > 0) return;
+    const t = p.body.translation();
+    const pos = new THREE.Vector3(t.x, t.y, t.z);
+    this.removeProp(p);
+    if (k.explosive) this.pending.push({ at: this.time + 80 + Math.random() * 120, pos, e: k.explosive, by });
+    else this.fx({ k: 'smoke', p: [t.x, t.y, t.z], a: 1 });
+  }
+
+  // =====================================================================================================================
+  // Raycast / proximité
+  // =====================================================================================================================
+  private resolve(col: RAPIER.Collider): { kind: Hit['kind']; o?: Owner; body: RAPIER.RigidBody | null } {
+    const rb = col.parent();
+    if (!rb) return { kind: 'static', body: null };
+    const o = this.owners.get(rb.handle);
+    if (o) return { kind: o.prop ? 'prop' : o.vehicle ? 'vehicle' : 'player', o, body: rb };
+    if ((col.collisionGroups() >>> 16) & (G.PART | G.VEHICLE)) {
+      // pièce mobile d'un véhicule (bras, tourelle…) : véhicule vivant le plus proche
+      const t = rb.translation();
+      let best: VX | null = null;
+      let bd = 12;
+      for (const v of this.vehicles) {
+        if (v.dead || !v.behavior.body) continue;
+        const vt = v.behavior.body.translation();
+        const d = Math.hypot(vt.x - t.x, vt.y - t.y, vt.z - t.z);
+        if (d < bd) { bd = d; best = v; }
+      }
+      if (best) return { kind: 'vehicle', o: { vehicle: best }, body: rb };
+    }
+    return { kind: 'static', body: rb };
+  }
+
+  private cast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number, exclude: RAPIER.RigidBody | null | undefined,
+    pred?: (c: RAPIER.Collider) => boolean): Hit | null {
+    const d = dir.clone();
+    if (!(d.lengthSq() > 1e-9) || !Number.isFinite(maxDist) || maxDist <= 0) return null;
+    d.normalize();
+    const ray = new RAPIER.Ray({ x: origin.x, y: origin.y, z: origin.z }, { x: d.x, y: d.y, z: d.z });
+    const h = this.world.castRayAndGetNormal(ray, maxDist, true, undefined, undefined, undefined, exclude ?? undefined,
+      (c) => !c.isSensor() && (!pred || pred(c)));
+    if (!h) return null;
+    const r = this.resolve(h.collider);
+    const n = new THREE.Vector3(h.normal.x, h.normal.y, h.normal.z);
+    if (n.lengthSq() < 1e-6) n.copy(d).negate();
+    return {
+      kind: r.kind, point: origin.clone().addScaledVector(d, h.timeOfImpact), normal: n, dist: h.timeOfImpact, body: r.body,
+      prop: r.o?.prop, vehicle: r.o?.vehicle, player: r.o?.player,
+    };
+  }
+
+  raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number, exclude?: RAPIER.RigidBody | null): Hit | null {
+    return this.cast(origin, dir, maxDist, exclude);
+  }
+
+  nearby(pos: THREE.Vector3, radius: number): Hit[] {
+    const out: Hit[] = [];
+    const add = (kind: Hit['kind'], body: RAPIER.RigidBody, extra: Partial<Hit>) => {
+      const t = body.translation();
+      const d = Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z);
+      if (d > radius) return;
+      const point = new THREE.Vector3(t.x, t.y, t.z);
+      const normal = point.clone().sub(pos);
+      if (normal.lengthSq() > 1e-9) normal.normalize(); else normal.set(0, 1, 0);
+      out.push({ kind, point, normal, dist: d, body, ...extra });
+    };
+    for (const p of this.props.values()) add('prop', p.body, { prop: p });
+    for (const v of this.vehicles) if (!v.dead && v.behavior.body) add('vehicle', v.behavior.body, { vehicle: v });
+    for (const p of this.players.values()) if (!p.vehicle && !this.isDead(p)) add('player', p.body, { player: p });
+    return out.sort((a, b) => a.dist - b.dist);
+  }
+
+  // =====================================================================================================================
+  // Explosions et dégâts
+  // =====================================================================================================================
+  /**
+   * `power` ≈ vitesse (m/s) communiquée au centre à un objet léger ; les corps lourds sont moins projetés
+   * (Δv = power × atténuation / (1 + masse/400)). `damage` = dégâts au centre (décroissants avec la distance, blindage inclus).
+   */
+  explode(pos: THREE.Vector3, radius: number, power: number, damage: number, by: SimPlayer | null = null) {
+    radius = Math.max(0.5, fin(radius, 5));
+    power = fin(power, 10);
+    damage = fin(damage, 0);
+    this.fx({ k: 'boom', p: [pos.x, pos.y, pos.z], a: radius });
+    this.fx({ k: 'shake', p: [pos.x, pos.y, pos.z], a: clamp(radius / 8, 0.2, 1.5) });
+    const dirTo = (x: number, y: number, z: number) => {
+      const d = new THREE.Vector3(x - pos.x, y - pos.y + 0.4, z - pos.z);
+      return d.lengthSq() > 1e-9 ? d.normalize() : new THREE.Vector3(0, 1, 0);
+    };
+    for (const p of [...this.props.values()]) {
+      const t = p.body.translation();
+      const d = Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z);
+      if (d > radius + 0.5) continue;
+      const f = clamp(1 - d / radius, 0, 1);
+      if (!p.frozen && f > 0) {
+        const dv = (power * f) / (1 + p.body.mass() / 400);
+        const dir = dirTo(t.x, t.y, t.z);
+        p.body.applyImpulse({ x: dir.x * dv * p.body.mass(), y: dir.y * dv * p.body.mass(), z: dir.z * dv * p.body.mass() }, true);
+        p.body.applyTorqueImpulse({ x: (Math.random() - 0.5) * dv * p.body.mass() * 0.3, y: 0, z: (Math.random() - 0.5) * dv * p.body.mass() * 0.3 }, true);
+      }
+      if (damage > 0) this.damageProp(p, damage * Math.max(f, 0.2), by);
+    }
+    for (const v of this.vehicles) {
+      if (v.dead || !v.behavior.body) continue;
+      const t = v.behavior.body.translation();
+      const d = Math.max(0, Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z) - 1.5);
+      if (d > radius) continue;
+      const f = clamp(1 - d / radius, 0, 1);
+      const b = v.behavior.body;
+      const dv = (power * f) / (1 + b.mass() / 400);
+      const dir = dirTo(t.x, t.y, t.z);
+      b.applyImpulse({ x: dir.x * dv * b.mass(), y: dir.y * dv * b.mass(), z: dir.z * dv * b.mass() }, true);
+      const lv = b.linvel();
+      v.pv.set(lv.x, lv.y, lv.z); // l'explosion n'est pas un choc : elle a déjà ses propres dégâts
+      if (damage > 0) this.damageVehicle(v, damage * f, 'explosion', by);
+    }
+    for (const p of [...this.players.values()]) {
+      if (p.vehicle || this.isDead(p)) continue;
+      const t = p.body.translation();
+      const d = Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z);
+      if (d > radius) continue;
+      const f = clamp(1 - d / radius, 0, 1);
+      const dir = dirTo(t.x, t.y, t.z);
+      const v = power * f * 0.8;
+      const kb = (p.scratch.kb as [number, number] | undefined) ?? [0, 0];
+      kb[0] += dir.x * v;
+      kb[1] += dir.z * v;
+      p.scratch.kb = kb;
+      const lv = p.body.linvel();
+      p.body.setLinvel({ x: lv.x, y: Math.max(lv.y, dir.y * v * 0.9), z: lv.z }, true);
+      if (damage > 0) this.damagePlayer(p, damage * f, by, 'explosion');
+    }
+  }
+
+  damageVehicle(v0: SimVehicle, amount: number, kind: DamageKind, by: SimPlayer | null = null) {
+    const v = v0 as VX;
+    if (v.dead || !(amount > 0)) return;
+    const mult = v.def.armor[kind] ?? 1;
+    v.hp -= amount * mult;
+    if (v.hp <= 0) this.destroyVehicle(v, by);
+  }
+
+  damagePlayer(p: SimPlayer, amount: number, by: SimPlayer | null = null, cause = '') {
+    if (this.isDead(p) || !Number.isFinite(amount)) return;
+    if (amount < 0) { p.hp = Math.min(PLAYER_HP, p.hp - amount); return; }
+    if (this.time < p.invulnUntil) return;
+    p.hp -= amount;
+    if (p.hp <= 0) this.killPlayer(p, by, cause);
+  }
+
+  private isDead(p: SimPlayer) { return (this.pinfo.get(p.id)?.deadAt ?? 0) > 0; }
+
+  private killPlayer(p: SimPlayer, by: SimPlayer | null, cause: string) {
+    const px = this.pinfo.get(p.id);
+    if (!px || px.deadAt > 0) return;
+    this.holster(p);
+    if (p.vehicle) this.leaveVehicle(p, false);
+    p.hp = 0;
+    px.deadAt = Math.max(1, this.time);
+    const t = p.body.translation();
+    this.fx({ k: 'text', p: [t.x, t.y + 1.5, t.z], s: '💀' });
+    this.fx({ k: 'confetti', p: [t.x, t.y + 0.5, t.z], c: 0xff3355 });
+    p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    p.body.setEnabled(false);
+    const c = cause === 'explosion' || cause === 'bullet' || cause === 'impact' || cause === 'void' ? cause : 'generic';
+    const alone = !by || by === p;
+    const key = (c === 'void' ? 'void' : alone ? `${c}Alone` : c) as keyof typeof DEATH;
+    const list = (DEATH[key] ?? DEATH.generic) as readonly string[];
+    this.announce(pick([...list]).replace('{n}', p.name).replace('{k}', by?.name ?? ''));
+  }
+
+  respawnPlayer(p: SimPlayer) {
+    const px = this.pinfo.get(p.id);
+    if (!px) return;
+    this.holster(p);
+    if (p.vehicle) this.leaveVehicle(p, false);
+    p.hp = PLAYER_HP;
+    p.mods = { speed: 1, gravity: 1, jump: 1, scale: 1 };
+    p.modsUntil = { speed: 0, gravity: 0, jump: 0, scale: 0 };
+    p.scratch = {};
+    px.deadAt = 0;
+    this.ensureBody(p, px);
+    p.body.setEnabled(true);
+    p.body.setTranslation({ x: px.start[0], y: px.start[1], z: px.start[2] }, true);
+    p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    p.invulnUntil = this.time + 3000;
+  }
+
+  applyMod(p: SimPlayer, mod: Partial<Mods>, seconds: number) {
+    const lim: Record<keyof Mods, [number, number]> = { speed: [0, 5], gravity: [-3, 5], jump: [0, 5], scale: [0.3, 4] };
+    for (const k of Object.keys(mod) as (keyof Mods)[]) {
+      const v = mod[k];
+      if (!lim[k] || typeof v !== 'number' || !Number.isFinite(v)) continue;
+      p.mods[k] = clamp(v, lim[k][0], lim[k][1]);
+      p.modsUntil[k] = this.time + Math.max(0, fin(seconds)) * 1000;
+    }
+  }
+
+  // =====================================================================================================================
+  // Projectiles
+  // =====================================================================================================================
+  spawnProjectile(spec: ProjectileSpec) {
+    if (this.projs.length >= MAX_PROJECTILES) this.projs.shift();
+    const idx = (PROJECTILE_KINDS as readonly string[]).indexOf(spec.kind);
+    this.projs.push({
+      id: this.nextProjId++, kind: idx >= 0 ? idx : PROJECTILE_KINDS.length, pos: spec.pos.clone(), vel: spec.vel.clone(), owner: spec.owner,
+      gravity: fin(spec.gravity, 0), life: fin(spec.life, 6), age: 0, fuse: !!spec.fuse, bounce: !!spec.bounce,
+      radius: fin(spec.radius, 0), power: fin(spec.power, 0), damage: fin(spec.damage, 0), onHit: spec.onHit, stuck: false,
+    });
+  }
+
+  private stepProjectiles() {
+    const keep: Proj[] = [];
+    for (const pr of this.projs) {
+      let alive = true;
+      try { alive = this.stepProjectile(pr); } catch (e) { this.log(`[sim] projectile : ${e}`); alive = false; }
+      if (alive) keep.push(pr);
+    }
+    this.projs = keep;
+  }
+
+  private detonate(pr: Proj, hit: Hit | null, at: THREE.Vector3) {
+    if (pr.onHit) { pr.onHit(hit, at); return; }
+    if (pr.radius > 0) { this.explode(at, pr.radius, pr.power, pr.damage, pr.owner); return; }
+    if (!hit) return;
+    if (hit.vehicle) this.damageVehicle(hit.vehicle, pr.damage, 'bullet', pr.owner);
+    else if (hit.player) this.damagePlayer(hit.player, pr.damage, pr.owner, 'bullet');
+    else if (hit.prop) {
+      this.damageProp(hit.prop, pr.damage, pr.owner);
+      if (this.props.has(hit.prop.id) && !hit.prop.frozen) {
+        const m = hit.prop.body.mass();
+        const d = pr.vel.clone().multiplyScalar(0.02 * Math.min(m, 20));
+        hit.prop.body.applyImpulseAtPoint({ x: d.x, y: d.y, z: d.z }, { x: at.x, y: at.y, z: at.z }, true);
+      }
+    } else this.fx({ k: 'spark', p: [at.x, at.y, at.z] });
+  }
+
+  private stepProjectile(pr: Proj): boolean {
+    pr.age += STEP;
+    pr.life -= STEP;
+    if (!pr.stuck) {
+      pr.vel.y -= pr.gravity * STEP;
+      const len = pr.vel.length() * STEP;
+      if (len > 1e-6) {
+        const ownerVeh = pr.owner?.vehicle ?? null;
+        const hit = this.cast(pr.pos, pr.vel, len, pr.owner?.body ?? null, (c) => {
+          if (pr.age >= 0.25 || !ownerVeh) return true;
+          const r = this.resolve(c);
+          return r.o?.vehicle !== ownerVeh;
+        });
+        if (hit) {
+          const at = hit.point;
+          if (pr.fuse) {
+            if (pr.bounce) {
+              pr.vel.reflect(hit.normal).multiplyScalar(0.55);
+              pr.pos.copy(at).addScaledVector(hit.normal, 0.05);
+            } else { pr.stuck = true; pr.vel.set(0, 0, 0); pr.pos.copy(at); }
+          } else {
+            this.detonate(pr, hit, at);
+            return false;
+          }
+        } else pr.pos.addScaledVector(pr.vel, STEP);
+      }
+    }
+    if (pr.life <= 0) {
+      if (pr.fuse) this.detonate(pr, null, pr.pos);
+      return false;
+    }
+    return pr.pos.y > -60;
+  }
+
+  // =====================================================================================================================
+  // Joueurs
+  // =====================================================================================================================
+  addPlayer(id: string, name: string) {
+    const saved = this.savedPlayers[name];
+    const a = (this.spawnCount++ % 8) * (Math.PI / 4);
+    const start: Vec3 = [SPAWNS.player[0] + Math.cos(a) * 2.5, SPAWNS.player[1], SPAWNS.player[2] + Math.sin(a) * 2.5];
+    const [x, y, z] = saved ?? start;
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y + (saved ? 0.5 : 0), z).lockRotations().setLinearDamping(0),
+    );
+    const col = this.world.createCollider(this.playerCollider(1), body);
+    const p: SimPlayer = {
+      id, name, body, input: { ...NO_INPUT }, prevInput: { ...NO_INPUT }, vehicle: null, seat: 0, hp: PLAYER_HP,
+      invulnUntil: this.time + 2000, item: '', mods: { speed: 1, gravity: 1, jump: 1, scale: 1 },
+      modsUntil: { speed: 0, gravity: 0, jump: 0, scale: 0 }, cooldowns: {}, scratch: {},
+    };
+    this.players.set(id, p);
+    this.pinfo.set(id, { col, sc: 1, grav: 1, deadAt: 0, start, runAt: 0 });
+    this.owners.set(body.handle, { player: p });
+  }
+
+  private playerCollider(sc: number) {
+    return RAPIER.ColliderDesc.capsule(0.5 * sc, 0.35 * sc).setFriction(0).setMass(40 * sc ** 3).setCollisionGroups(grp(G.PLAYER));
+  }
+
+  /** Met à jour la taille (collider) et la gravité propres du joueur selon ses modificateurs. */
+  private ensureBody(p: SimPlayer, px: PI) {
+    const sc = p.mods.scale;
+    if (Math.abs(sc - px.sc) > 1e-3) {
+      this.world.removeCollider(px.col, true);
+      px.col = this.world.createCollider(this.playerCollider(sc), p.body);
+      if (sc > px.sc) {
+        const t = p.body.translation();
+        p.body.setTranslation({ x: t.x, y: t.y + (sc - px.sc) * 0.85, z: t.z }, true);
+      }
+      px.sc = sc;
+    }
+    if (Math.abs(p.mods.gravity - px.grav) > 1e-3) {
+      p.body.setGravityScale(p.mods.gravity, true);
+      px.grav = p.mods.gravity;
+    }
+  }
+
+  removePlayer(id: string) {
+    const p = this.players.get(id);
+    if (!p) return;
+    this.rememberPlayer(p);
+    this.holster(p);
+    if (p.vehicle) this.leaveVehicle(p, true);
+    this.owners.delete(p.body.handle);
+    this.world.removeRigidBody(p.body);
+    this.players.delete(id);
+    this.pinfo.delete(id);
+  }
+
+  private rememberPlayer(p: SimPlayer) {
+    const t = (p.vehicle?.behavior.body ?? p.body).translation();
+    this.savedPlayers[p.name] = [round(t.x), round(Math.max(t.y, 1)), round(t.z)];
+  }
+
+  setInput(id: string, raw: Partial<Input>) {
+    const p = this.players.get(id);
+    if (!p || !raw || typeof raw !== 'object') return;
+    const ad = new THREE.Vector3(...vec3(raw.ad, [0, 0, -1]));
+    if (ad.lengthSq() < 1e-6) ad.set(0, 0, -1);
+    ad.normalize();
+    p.input = {
+      f: clamp1(raw.f), s: clamp1(raw.s), sw: clamp1(raw.sw), bm: clamp1(raw.bm), st: clamp1(raw.st), bk: clamp1(raw.bk),
+      jump: raw.jump ? 1 : 0, yaw: fin(raw.yaw), yw: clamp1(raw.yw), th: clamp1(raw.th), hn: raw.hn ? 1 : 0,
+      m1: raw.m1 ? 1 : 0, m2: raw.m2 ? 1 : 0, ao: vec3(raw.ao, [0, 0, 0]), ad: [ad.x, ad.y, ad.z],
+      item: typeof raw.item === 'string' && raw.item.length <= 40 ? raw.item : '',
+      wheel: clamp(p.input.wheel + clamp(fin(raw.wheel), -20, 20), -50, 50), // cumul jusqu'à lecture par le tick
+    };
+  }
+
+  teleportPlayer(p: SimPlayer, x: number, y: number, z: number) {
+    if (p.vehicle) this.leaveVehicle(p, false);
+    p.body.setTranslation({ x, y, z }, true);
+    p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    p.scratch.kb = undefined;
+  }
+
+  // ---------- Véhicules : montée / descente ----------
+  /** Monter dans le véhicule le plus proche (conducteur sinon passager), ou descendre. */
+  interact(id: string) {
+    const p = this.players.get(id);
+    if (!p || this.isDead(p)) return;
+    if (p.vehicle) { this.leaveVehicle(p, true); return; }
+    const t = p.body.translation();
+    let best: VX | null = null;
+    let bd = Infinity;
+    for (const v of this.vehicles) {
+      if (v.dead || !v.behavior.body || this.freeSeat(v) < 0) continue;
+      const vt = v.behavior.body.translation();
+      const d = Math.hypot(t.x - vt.x, t.z - vt.z);
+      if (d < v.def.enterRadius && Math.abs(t.y - vt.y) < v.def.enterRadius && d < bd) { best = v; bd = d; }
+    }
+    if (best) this.enterVehicle(p, best);
+  }
+
+  private freeSeat(v: SimVehicle): number {
+    if (!v.driver) return 0;
+    for (let s = 1; s < v.def.seats; s++) if (!v.passengers.some((q) => q.seat === s)) return s;
+    return -1;
+  }
+
+  enterVehicle(p: SimPlayer, v0: SimVehicle, seat?: number): boolean {
+    const v = v0 as VX;
+    if (this.isDead(p) || v.dead || !v.behavior.body) return false;
+    if (p.vehicle === v) return true;
+    const s = seat ?? this.freeSeat(v);
+    if (s < 0 || s >= v.def.seats || (s === 0 ? v.driver : v.passengers.some((q) => q.seat === s))) return false;
+    this.holster(p);
+    if (p.vehicle) this.leaveVehicle(p, false);
+    p.vehicle = v;
+    p.seat = s;
+    if (s === 0) v.driver = p; else v.passengers.push(p);
+    p.scratch.kb = undefined;
+    p.body.setEnabled(false);
+    return true;
+  }
+
+  /** `place` : pose le joueur à côté du véhicule ; sinon (mort, éjection) sa position est laissée à l'appelant. */
+  private leaveVehicle(p: SimPlayer, place: boolean) {
+    const v = p.vehicle as VX | null;
+    if (!v) return;
+    const seat = p.seat;
+    if (v.driver === p) v.driver = null;
+    v.passengers = v.passengers.filter((q) => q !== p);
+    p.vehicle = null;
+    p.seat = 0;
+    const b = v.behavior.body;
+    let c = { x: v.home.x, y: 1, z: v.home.z };
+    let side = new THREE.Vector3(v.def.exitOffset, 0, 0);
+    if (b && !v.dead) {
+      c = b.translation();
+      side.applyQuaternion(this.quatOf(b));
+      if (seat % 2 === 1) side.negate();
+      if (seat >= 2) side.addScaledVector(new THREE.Vector3(0, 0, -1).applyQuaternion(this.quatOf(b)), 1.5 * Math.floor(seat / 2));
+    } else side = new THREE.Vector3(0, 0, 0);
+    p.body.setEnabled(true);
+    if (place || !v.dead) p.body.setTranslation({ x: c.x + side.x, y: c.y + 1.5, z: c.z + side.z }, true);
+    else p.body.setTranslation({ x: c.x, y: c.y + 1, z: c.z }, true);
+    p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    p.invulnUntil = Math.max(p.invulnUntil, this.time + 500);
+  }
+
+  // ---------- Véhicules : création / destruction ----------
+  private dummyBehavior(): VX['behavior'] {
+    return { body: null as unknown as RAPIER.RigidBody, step() {}, anim: () => ({ sp: 0, st: 0, a: [] }), dispose() {} };
+  }
+
+  private makeVehicle(def: VehicleDef, x: number, y: number, z: number, yaw: number, extra: boolean): VX {
+    const v: VX = {
+      id: this.vehicles.length, def, behavior: this.dummyBehavior(), driver: null, passengers: [], hp: def.maxHp, dead: false,
+      deadAt: 0, home: { x, z, yaw }, pv: new THREE.Vector3(), grace: 0, extra, fails: 0, disabled: false,
+      pose: { p: [x, y, z], q: [0, 0, 0, 1] },
+    };
+    this.vehicles.push(v);
+    if (!this.buildBehavior(v, x, y, z, yaw)) { v.dead = true; v.deadAt = this.time; v.hp = 0; }
+    return v;
+  }
+
+  private buildBehavior(v: VX, x: number, y: number, z: number, yaw: number): boolean {
+    try {
+      const b = v.def.create(this, x, y, z, yaw);
+      v.behavior = b;
+      this.owners.set(b.body.handle, { vehicle: v });
+      v.grace = this.time + 1500;
+      v.fails = 0;
+      v.disabled = false;
+      const lv = b.body.linvel();
+      v.pv.set(lv.x, lv.y, lv.z);
+      return true;
+    } catch (e) {
+      this.log(`[sim] création du véhicule ${v.def.type} impossible : ${(e as Error)?.stack ?? e}`);
+      return false;
+    }
+  }
+
+  /** Crée un véhicule supplémentaire (commande /spawn). Retourne null si la limite est atteinte. Non sauvegardé si mort. */
+  spawnExtraVehicle(def: VehicleDef, x: number, z: number, yaw: number, y = 1.5): VX | null {
+    const live = this.vehicles.filter((v) => v.extra && !v.dead).length;
+    if (live >= MAX_EXTRA_VEHICLES) return null;
+    // Réutilise l'emplacement d'un véhicule supplémentaire détruit du même type (les index restent stables)
+    const slot = this.vehicles.find((v) => v.extra && v.dead && v.def.type === def.type);
+    if (slot) {
+      slot.home = { x, z, yaw };
+      if (!this.buildBehavior(slot, x, y, z, yaw)) return null;
+      slot.hp = def.maxHp;
+      slot.dead = false;
+      return slot;
+    }
+    if (this.vehicles.length >= 60) return null;
+    const v = this.makeVehicle(def, x, y, z, yaw, true);
+    return v.dead ? null : v;
+  }
+
+  private destroyVehicle(v: VX, by: SimPlayer | null) {
+    if (v.dead) return;
+    let pos = new THREE.Vector3(v.home.x, 1, v.home.z);
+    try {
+      const t = v.behavior.body.translation();
+      pos = new THREE.Vector3(t.x, t.y, t.z);
+    } catch { /* corps déjà invalide */ }
+    v.hp = 0;
+    v.dead = true;
+    v.deadAt = this.time;
+    for (const p of [v.driver, ...v.passengers]) {
+      if (!p) continue;
+      this.leaveVehicle(p, false);
+      p.body.setTranslation({ x: pos.x, y: pos.y + 1.5, z: pos.z }, true);
+      p.scratch.kb = [(Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10];
+      p.body.setLinvel({ x: 0, y: 8, z: 0 }, true);
+      p.invulnUntil = 0;
+      this.damagePlayer(p, 70, by, 'explosion');
+    }
+    this.safe(() => v.behavior.dispose(), `dispose ${v.def.type}`);
+    this.owners.forEach((o, h) => { if (o.vehicle === v) this.owners.delete(h); });
+    v.pose.p = [pos.x, pos.y, pos.z];
+    const radius = clamp(4 + v.def.maxHp / 50, 5, 9);
+    this.explode(pos, radius, 14, 50, by);
+    for (let i = 0; i < 10; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 5 + Math.random() * 9;
+      this.createProp('debris', new THREE.Vector3(pos.x + (Math.random() - 0.5), pos.y + 0.5, pos.z + (Math.random() - 0.5)),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6)),
+        new THREE.Vector3(Math.cos(a) * s, 4 + Math.random() * 8, Math.sin(a) * s), '');
+    }
+  }
+
+  private respawnVehicle(v: VX) {
+    if (v.extra) return;
+    if (this.buildBehavior(v, v.home.x, 1.2, v.home.z, v.home.yaw)) {
+      v.hp = v.def.maxHp;
+      v.dead = false;
+    } else v.deadAt = this.time; // réessaie plus tard
+  }
+
+  // =====================================================================================================================
+  // Pas de simulation
+  // =====================================================================================================================
+  step() {
+    this.safe(() => this.stepPlayers(), 'joueurs');
+    this.safe(() => this.stepVehicles(), 'véhicules');
+    this.safe(() => this.stepProjectiles(), 'projectiles');
+    this.safe(() => this.stepProps(), 'props');
+    this.world.step();
+    this.safe(() => this.postStep(), 'post-pas');
+    this.time += STEP * 1000;
+  }
+
+  private holster(p: SimPlayer) {
+    const id = p.item;
+    if (!id) return;
+    p.item = '';
+    const h = HANDLERS[id];
+    if (h?.holster) this.safe(() => h.holster!(p, this), `holster ${id}`);
+  }
+
+  private stepPlayers() {
+    for (const p of this.players.values()) {
+      const px = this.pinfo.get(p.id);
+      if (!px) continue;
+      for (const k of ['speed', 'gravity', 'jump', 'scale'] as const)
+        if (p.mods[k] !== 1 && this.time >= p.modsUntil[k]) p.mods[k] = 1;
+      if (px.deadAt > 0) {
+        if (this.time - px.deadAt >= RESPAWN_PLAYER_MS) this.respawnPlayer(p);
+        p.input.wheel = 0;
+        p.prevInput = p.input;
+        continue;
+      }
+      this.safe(() => {
+        this.ensureBody(p, px);
+        this.runItems(p);
+        if (!p.vehicle) this.walk(p, px);
+      }, `joueur ${p.name}`);
+      p.input.wheel = 0;
+      p.prevInput = p.input;
+    }
+  }
+
+  private grounded(p: SimPlayer, px: PI) {
+    const t = p.body.translation();
+    const len = 0.85 * px.sc + 0.2;
+    return !!this.world.castRay(new RAPIER.Ray(t, { x: 0, y: -1, z: 0 }), len, true, undefined, undefined, undefined, p.body, (c) => !c.isSensor());
+  }
+
+  private walk(p: SimPlayer, px: PI) {
+    if (((p.scratch.heldUntil as number) ?? 0) > this.time) return; // tenu par le pistolet à gravité : la saisie pilote le corps
+    const i = p.input;
+    const dir = new THREE.Vector3(i.s, 0, -i.f).applyAxisAngle(Y_AXIS, i.yaw);
+    if (dir.lengthSq() > 1) dir.normalize();
+    dir.multiplyScalar(WALK * p.mods.speed);
+    const v = p.body.linvel();
+    const ground = this.grounded(p, px);
+    let vy = v.y;
+    if (i.jump && ground && p.mods.gravity > 0) vy = JUMP * p.mods.jump;
+    else if (i.jump && ground) vy = JUMP * p.mods.jump * 0.6;
+    const kb = p.scratch.kb as [number, number] | undefined;
+    let kx = 0, kz = 0;
+    if (kb) {
+      kx = kb[0];
+      kz = kb[1];
+      const decay = ground ? 0.88 : 0.992;
+      kb[0] *= decay;
+      kb[1] *= decay;
+      if (Math.hypot(kb[0], kb[1]) < 0.2) p.scratch.kb = undefined;
+    }
+    p.body.setLinvel({ x: dir.x + kx, y: vy, z: dir.z + kz }, true);
+  }
+
+  // ---------- Pipeline d'objets ----------
+  private runItems(p: SimPlayer) {
+    const i = p.input;
+    const id = p.vehicle ? '' : ITEM_BY_ID.has(i.item) && !this.badItems.has(i.item) ? i.item : '';
+    if (id !== p.item) {
+      this.holster(p);
+      p.item = id;
+    }
+    const wheel = i.wheel;
+    i.wheel = 0;
+    if (!id) return;
+    const def = ITEM_BY_ID.get(id)!;
+    const h = HANDLERS[id];
+    if (!h) return;
+    const t = p.body.translation();
+    const ao = new THREE.Vector3(...i.ao);
+    const head = new THREE.Vector3(t.x, t.y + 0.7 * p.mods.scale, t.z);
+    const origin = ao.lengthSq() < 1e-6 || ao.distanceTo(head) > 12 ? head : ao;
+    const prev = p.prevInput;
+    const ctx = {
+      api: this as SimApi, player: p, origin, dir: new THREE.Vector3(...i.ad),
+      pressed1: !!i.m1 && !prev.m1, pressed2: !!i.m2 && !prev.m2, held1: !!i.m1, held2: !!i.m2, wheel, dt: STEP,
+    };
+    const run = (fn: () => void, what: string) => {
+      try { fn(); } catch (e) {
+        const n = (this.itemFails.get(id) ?? 0) + 1;
+        this.itemFails.set(id, n);
+        this.log(`[sim] objet ${id} (${what}) : ${(e as Error)?.stack ?? e}`);
+        if (n >= 5) { this.badItems.add(id); this.log(`[sim] objet ${id} désactivé après ${n} erreurs`); }
+      }
+    };
+    if (h.tick) run(() => h.tick!(ctx), 'tick');
+    if (h.use) {
+      const wants = def.hold ? ctx.held1 || ctx.held2 : ctx.pressed1 || ctx.pressed2;
+      if (wants && (p.cooldowns[id] ?? 0) <= this.time) {
+        if (def.cooldown > 0) p.cooldowns[id] = this.time + def.cooldown * 1000;
+        run(() => h.use!(ctx), 'use');
+      }
+    }
+  }
+
+  // ---------- Véhicules ----------
+  private stepVehicles() {
+    for (const v of this.vehicles) {
+      if (v.dead) {
+        if (!v.extra && this.time - v.deadAt >= RESPAWN_VEHICLE_MS) this.respawnVehicle(v);
+        continue;
+      }
+      if (v.disabled) continue;
+      const ctx: StepCtx = { input: v.driver ? v.driver.input : NO_INPUT, driver: v.driver, dt: STEP, api: this, self: v };
+      try {
+        v.behavior.step(ctx);
+        v.fails = 0;
+      } catch (e) {
+        this.log(`[sim] véhicule ${v.def.type}#${v.id} step : ${(e as Error)?.stack ?? e}`);
+        if (++v.fails >= 5) { v.disabled = true; this.log(`[sim] véhicule ${v.def.type}#${v.id} désactivé`); }
+      }
+    }
+  }
+
+  private stepProps() {
+    for (const p of [...this.props.values()]) {
+      const life = p.kind.life;
+      const t = p.body.translation();
+      if ((life !== undefined && this.time - p.bornAt > life * 1000) || t.y < -60 || !Number.isFinite(t.y)) this.removeProp(p);
+      else if (p.kind.behavior) {
+        const tick = PROP_TICKS[p.kind.behavior];
+        if (tick) this.safe(() => tick(p, this, STEP), 'propTick:' + p.kind.id);
+      }
+    }
+  }
+
+  private postStep() {
+    const g = this.world.gravity.y;
+    for (const v of this.vehicles) {
+      if (v.dead || v.disabled || !v.behavior.body) continue;
+      const b = v.behavior.body;
+      const t = b.translation();
+      if (!Number.isFinite(t.x + t.y + t.z)) { this.destroyVehicle(v, null); continue; }
+      if (t.y < -40) { // tombé hors du monde : retour au point d'origine
+        b.setTranslation({ x: v.home.x, y: 1.5, z: v.home.z }, true);
+        b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        v.grace = this.time + 1500;
+      }
+      const r = b.rotation();
+      v.pose = { p: [t.x, t.y, t.z], q: [r.x, r.y, r.z, r.w] };
+      const lv = b.linvel();
+      if (this.time < v.grace || this.time < (v.noImpactUntil ?? 0)) { v.pv.set(lv.x, lv.y, lv.z); continue; }
+      const dv = Math.hypot(lv.x - v.pv.x, lv.y - v.pv.y - g * STEP * b.gravityScale(), lv.z - v.pv.z);
+      v.pv.set(lv.x, lv.y, lv.z);
+      if (dv > v.def.impact.threshold) {
+        const by = v.driver;
+        this.damageVehicle(v, (dv - v.def.impact.threshold) * v.def.impact.scale, 'impact', by);
+        if (v.behavior.onImpact && !v.dead) {
+          const ctx: StepCtx = { input: v.driver ? v.driver.input : NO_INPUT, driver: v.driver, dt: STEP, api: this, self: v };
+          this.safe(() => v.behavior.onImpact!(dv, ctx), `onImpact ${v.def.type}`);
+        }
+      }
+      if (!v.dead) this.runOver(v, lv);
+    }
+    for (const p of this.players.values()) {
+      if (p.vehicle || this.isDead(p)) continue;
+      if (p.body.translation().y < -30) this.killPlayer(p, null, 'void');
+    }
+    // explosions en chaîne différées
+    if (this.pending.length) {
+      const due = this.pending.filter((e) => e.at <= this.time);
+      this.pending = this.pending.filter((e) => e.at > this.time);
+      for (const e of due) this.explode(e.pos, e.e.radius, e.e.power, e.e.damage, e.by);
+    }
+  }
+
+  /** Un véhicule rapide qui fonce sur un joueur à pied lui fait mal et l'envoie valser. */
+  private runOver(v: VX, lv: { x: number; y: number; z: number }) {
+    const sp = Math.hypot(lv.x, lv.z);
+    if (sp < 7) return;
+    const t = v.behavior.body.translation();
+    for (const p of this.players.values()) {
+      if (p.vehicle || this.isDead(p) || p === v.driver) continue;
+      const px = this.pinfo.get(p.id);
+      const pt = p.body.translation();
+      if (!px || this.time < px.runAt || Math.hypot(pt.x - t.x, pt.z - t.z) > 2.3 || Math.abs(pt.y - t.y) > 2) continue;
+      px.runAt = this.time + 600;
+      p.scratch.kb = [lv.x * 0.9, lv.z * 0.9];
+      p.body.setLinvel({ x: 0, y: 5, z: 0 }, true);
+      this.damagePlayer(p, (sp - 5) * 4, v.driver, 'impact');
+    }
+  }
+
+  // =====================================================================================================================
+  // État envoyé aux clients
+  // =====================================================================================================================
+  snapshot(): Snapshot {
+    const players: PlayerSnap[] = [];
+    for (const p of this.players.values()) {
+      const b = p.vehicle && !p.vehicle.dead && p.vehicle.behavior.body ? p.vehicle.behavior.body : p.body;
+      const t = b.translation();
+      players.push({
+        id: p.id, name: p.name, p: [round(t.x), round(t.y), round(t.z)], yaw: round(p.input.yaw, 1000),
+        veh: p.vehicle ? this.vehicles.indexOf(p.vehicle as VX) : -1, seat: p.seat, hp: Math.max(0, Math.round(p.hp)),
+        item: p.item, sc: round(p.mods.scale),
+      });
+    }
+    const vehicles: VehicleSnap[] = this.vehicles.map((v) => {
+      let a = { sp: 0, st: 0, a: [] as number[] };
+      let pp = v.pose.p, qq = v.pose.q;
+      if (!v.dead && v.behavior.body) {
+        try {
+          const t = v.behavior.body.translation();
+          const r = v.behavior.body.rotation();
+          pp = [t.x, t.y, t.z];
+          qq = [r.x, r.y, r.z, r.w];
+          a = v.behavior.anim();
+        } catch { /* corps retiré par le véhicule lui-même */ }
+      }
+      return {
+        type: v.def.type, p: [round(pp[0]), round(pp[1]), round(pp[2])], q: [round(qq[0], 1000), round(qq[1], 1000), round(qq[2], 1000), round(qq[3], 1000)],
+        drv: v.driver?.id ?? '', sp: round(fin(a.sp)), st: round(fin(a.st)), a: (a.a ?? []).map((n) => round(fin(n), 1000)),
+        hp: round(clamp(v.hp / v.def.maxHp, 0, 1)), dead: v.dead ? 1 : 0,
+      };
+    });
+    const props: number[] = [];
+    for (const p of this.props.values()) {
+      const t = p.body.translation();
+      const r = p.body.rotation();
+      props.push(p.id, PROP_INDEX.get(p.kind.id) ?? 0, round(t.x), round(t.y), round(t.z), round(r.x, 1000), round(r.y, 1000), round(r.z, 1000), round(r.w, 1000),
+        (p.frozen ? 1 : 0) | (p.held ? 2 : 0));
+    }
+    const proj: number[] = [];
+    for (const pr of this.projs) proj.push(pr.id, pr.kind, round(pr.pos.x), round(pr.pos.y), round(pr.pos.z), round(pr.vel.x, 10), round(pr.vel.y, 10), round(pr.vel.z, 10));
+    const fx = this.fxQueue;
+    this.fxQueue = [];
+    return { t: Math.round(this.time), players, vehicles, props, proj, fx };
+  }
+
+  // =====================================================================================================================
+  // Sauvegarde v2
+  // =====================================================================================================================
   serialize(): SaveData {
     for (const p of this.players.values()) this.rememberPlayer(p);
-    const pose = (b: RAPIER.RigidBody) => {
-      const t = b.translation();
-      const r = b.rotation();
-      return { p: [t.x, t.y, t.z], q: [r.x, r.y, r.z, r.w] };
-    };
-    return {
-      version: 1,
-      crates: this.crates.map(pose),
-      vehicles: this.vehicles.map((v) => ({ ...pose(v.body), arm: [...v.arm] })),
-      players: this.savedPlayers,
-    };
+    const props: SaveData['props'] = [];
+    for (const p of this.props.values()) {
+      if (p.kind.life !== undefined) continue; // éphémères (débris…)
+      const t = p.body.translation();
+      const r = p.body.rotation();
+      props.push({ k: p.kind.id, p: [t.x, t.y, t.z], q: [r.x, r.y, r.z, r.w], f: p.frozen ? 1 : 0 });
+    }
+    const vehicles: SaveData['vehicles'] = [];
+    for (const v of this.vehicles) {
+      if (v.dead || !v.behavior.body) continue; // un véhicule détruit réapparaît à son point d'origine
+      const t = v.behavior.body.translation();
+      const r = v.behavior.body.rotation();
+      let st: number[] | undefined;
+      try { st = v.behavior.state?.(); } catch { st = undefined; }
+      vehicles.push({ type: v.def.type, p: [t.x, t.y, t.z], q: [r.x, r.y, r.z, r.w], hp: v.hp / v.def.maxHp, st, extra: v.extra || undefined });
+    }
+    return { version: 2, props, vehicles, players: { ...this.savedPlayers } };
   }
 
   restore(data: SaveData) {
-    if (data?.version !== 1) return;
-    const place = (b: RAPIER.RigidBody, s?: { p: number[]; q: number[] }) => {
-      if (!s || s.p.length !== 3 || s.q.length !== 4 || ![...s.p, ...s.q].every(Number.isFinite)) return;
-      b.setTranslation({ x: s.p[0], y: s.p[1], z: s.p[2] }, true);
-      b.setRotation({ x: s.q[0], y: s.q[1], z: s.q[2], w: s.q[3] }, true);
-      b.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      b.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    };
-    this.crates.forEach((b, i) => place(b, data.crates?.[i]));
-    this.vehicles.forEach((v, i) => {
-      const s = data.vehicles?.[i];
-      place(v.body, s);
-      if (s?.arm?.length === 4 && s.arm.every(Number.isFinite)) v.arm = s.arm as SimVehicle['arm'];
-      (v as SimVehicle & { resync?: () => void }).resync?.();
-    });
-    this.savedPlayers = data.players ?? {};
+    if (!data || (data as { version?: number }).version !== 2) return; // sauvegarde v1 (ou inconnue) : ignorée
+    const okVec = (a: unknown, n: number): a is number[] => Array.isArray(a) && a.length === n && a.every((x) => typeof x === 'number' && Number.isFinite(x));
+    if (Array.isArray(data.props)) {
+      for (const p of [...this.props.values()]) this.removeProp(p);
+      for (const s of data.props.slice(0, MAX_PROPS)) {
+        if (!s || !okVec(s.p, 3) || !okVec(s.q, 4)) continue;
+        const prop = this.createProp(String(s.k), new THREE.Vector3(...(s.p as Vec3)), new THREE.Quaternion(s.q[0], s.q[1], s.q[2], s.q[3]), undefined, '');
+        if (prop && s.f) this.freezeProp(prop, true);
+      }
+    }
+    if (Array.isArray(data.vehicles)) {
+      const rank = new Map<string, number>();
+      for (const s of data.vehicles) {
+        if (!s || typeof s.type !== 'string' || !okVec(s.p, 3) || !okVec(s.q, 4)) continue;
+        const n = rank.get(s.type) ?? 0;
+        rank.set(s.type, n + 1);
+        let v: VX | undefined;
+        if (s.extra) {
+          const def = VEHICLES.find((d) => d.type === s.type);
+          if (def) v = this.spawnExtraVehicle(def, s.p[0], s.p[2], 0, s.p[1]) ?? undefined;
+        } else v = this.vehicles.filter((x) => !x.extra && x.def.type === s.type)[n];
+        if (!v || v.dead || !v.behavior.body) continue;
+        const b = v.behavior.body;
+        b.setTranslation({ x: s.p[0], y: s.p[1], z: s.p[2] }, true);
+        b.setRotation({ x: s.q[0], y: s.q[1], z: s.q[2], w: s.q[3] }, true);
+        b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        if (okVec(s.st, (s.st as number[] | undefined)?.length ?? -1)) this.safe(() => v!.behavior.restore?.(s.st as number[]), `restore ${s.type}`);
+        if (typeof s.hp === 'number' && s.hp > 0) v.hp = clamp(s.hp, 0.05, 1) * v.def.maxHp;
+        v.grace = this.time + 1500;
+        v.pv.set(0, 0, 0);
+      }
+    }
+    if (data.players && typeof data.players === 'object') this.savedPlayers = data.players;
   }
 }

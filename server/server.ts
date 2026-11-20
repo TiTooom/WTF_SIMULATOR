@@ -8,6 +8,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { Sim } from '../shared/sim';
 import { DEFAULT_PORT, MAX_PLAYERS, SNAP_HZ, STEP } from '../shared/constants';
 import type { ChatMsg, ClientMsg, ServerMsg } from '../shared/protocol';
+import { runCommand } from './commands';
 
 export interface ServerOptions {
   mode: 'solo' | 'multi';
@@ -117,6 +118,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const data = JSON.stringify({ type: 'chat', m } satisfies ServerMsg);
     for (const ws of sockets.keys()) if (ws.readyState === ws.OPEN) ws.send(data);
   };
+  sim.onAnnounce = (text) => say({ from: '', text, sys: true });
+  sim.log = (l) => log(l);
   const cleanChat = (raw: unknown) =>
     String(raw ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 
@@ -149,7 +152,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         const recent = (chatTimes.get(ws) ?? []).filter((t) => now - t < 5000);
         if (!text || recent.length >= 5) return; // vide ou trop rapide : ignoré
         chatTimes.set(ws, [...recent, now]);
-        say({ from: sim.players.get(id)?.name ?? '?', text });
+        const player = sim.players.get(id);
+        if (!player) return;
+        if (text.startsWith('/')) {
+          // Commande : exécutée côté serveur, réponse privée, jamais diffusée telle quelle
+          runCommand(sim, player, text, (t) => send(ws, { type: 'chat', m: { from: '', text: t, sys: true } }));
+          return;
+        }
+        say({ from: player.name, text });
       }
     });
     ws.on('close', () => {
@@ -174,11 +184,22 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     acc = Math.min(acc + (now - last) / 1000, 0.25);
     last = now;
     while (acc >= STEP) {
-      sim.step();
+      try {
+        sim.step();
+      } catch (e) {
+        log(`Erreur de simulation (ignorée) : ${e}`);
+      }
       acc -= STEP;
-      if (++ticks % snapEvery === 0 && sockets.size > 0) {
-        const data = JSON.stringify({ type: 'snap', s: sim.snapshot() } satisfies ServerMsg);
-        for (const ws of sockets.keys()) if (ws.readyState === ws.OPEN) ws.send(data);
+      if (++ticks % snapEvery === 0) {
+        if (sockets.size === 0) sim.clearFx();
+        else {
+          try {
+            const data = JSON.stringify({ type: 'snap', s: sim.snapshot() } satisfies ServerMsg);
+            for (const ws of sockets.keys()) if (ws.readyState === ws.OPEN) ws.send(data);
+          } catch (e) {
+            log(`Erreur de snapshot (ignorée) : ${e}`);
+          }
+        }
       }
     }
   }, 8);

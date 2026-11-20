@@ -28,21 +28,29 @@ export function treeLayout(): TreeDef[] {
   return trees;
 }
 
-export interface CrateDef { x: number; y: number; z: number; s: number; color: number; mass: number }
+/** Caisse du monde de départ : un prop de kind `crate_s` | `crate_m` | `crate_l` (voir BASE_PROPS dans props.ts). */
+export interface CrateDef { kind: 'crate_s' | 'crate_m' | 'crate_l'; x: number; y: number; z: number }
 export function crateLayout(): CrateDef[] {
-  const colors = [0xffb347, 0xf4a261, 0xe9c46a];
   const out: CrateDef[] = [];
-  // Pyramide
+  // Pyramide de petites caisses
   for (let i = 0; i < 4; i++)
     for (let j = 0; j < 4 - i; j++)
-      out.push({ x: 10 + j * 1.05 + i * 0.5, y: 0.5 + i * 1.05, z: 0, s: 1, color: colors[(i + j) % 3], mass: 1 });
+      out.push({ kind: 'crate_s', x: 10 + j * 1.05 + i * 0.5, y: 0.5 + i * 1.05, z: 0 });
   // Tas à portée de la pelleteuse
   for (let i = 0; i < 3; i++)
     for (let j = 0; j < 3; j++)
       for (let k = 0; k < (i === 1 && j === 1 ? 2 : 1); k++)
-        out.push({ x: 13 + i * 1.3, y: 0.6 + k * 1.2, z: 3 + j * 1.3, s: 1.2, color: colors[(i + j + k) % 3], mass: 2 });
+        out.push({ kind: (i + j + k) % 2 ? 'crate_l' : 'crate_m', x: 13 + i * 1.3, y: 0.6 + k * 1.2, z: 3 + j * 1.3 });
   return out;
 }
+
+/**
+ * Apparences de projectiles : `Snapshot.proj[i*8 + 1]` = index dans cette liste (ProjectileSpec.kind).
+ * Un kind inconnu est envoyé avec l'index `PROJECTILE_KINDS.length` (apparence générique). Liste additive : ajouter à la fin.
+ */
+export const PROJECTILE_KINDS = [
+  'rocket', 'grenade', 'bullet', 'chicken', 'tomato', 'dart', 'mine', 'watermelon', 'confetti', 'cow', 'missile', 'shell', 'plasma',
+] as const;
 
 export const SPAWNS = {
   player: [0, 2, 5] as const,

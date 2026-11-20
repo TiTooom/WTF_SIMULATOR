@@ -67,3 +67,14 @@ Bac à sable 3D multijoueur entre copains. Serveur **autoritaire** (Node + Rapie
 **Autres** : événements chaos + commandes de chat + modes (`server/events.ts`, `server/commands.ts`, `server/modes.ts`), décor + easter eggs (`shared/world.ts`, `src/scene.ts`).
 
 **Touches** (Input v2) : `f`/`s` = avant-arrière / droite-gauche (WASD) ; `th` = gaz/altitude (Maj+/Ctrl) ; `yw` = lacet (Z/C physiques) ; `hn` = klaxon / action spéciale (H) ; `jump` (Espace) = frein à main/turbo en véhicule ; `m1`/`m2` = clic gauche/droit ; molette = zoom en véhicule, distance du pistolet à gravité, sinon changement d'emplacement de la barre ; chiffres 1-9 = emplacements ; Tab = inventaire. Convention aéronefs : `f` positif = piquer, négatif = cabrer ; `s` = roulis.
+
+## Précisions du cœur serveur (additif)
+- **`power` d'une explosion** ≈ vitesse (m/s) donnée au centre à un objet léger : Δv = power × atténuation / (1 + masse/400). Valeurs typiques 12–25. `damage` = dégâts au centre (décroissants, × `armor.explosion`).
+- **Chocs** : Δv linéaire d'un pas moins la gravité ; `SimVehicle.noImpactUntil?` (ms, optionnel) désactive la détection (utilisé par le pistolet à gravité). Un véhicule a 1,5 s de grâce après création/réapparition.
+- **`SimPlayer.scratch`** (clés utilisées par le cœur) : `kb: [vx, vz]` = élan horizontal (explosions, lancer), `heldUntil: ms` = joueur tenu par le pistolet à gravité (la marche est suspendue).
+- **Projectiles** : `Snapshot.proj[i*8+1]` = index dans `PROJECTILE_KINDS` (`shared/constants.ts`, ajouter à la fin) ; kind inconnu = `PROJECTILE_KINDS.length` (apparence générique).
+- **Commandes** : `import { registerCommand } from './commands'` puis `registerCommand('party', ({ sim, player, args, reply, announce }) => …, '/party : aide')`. `reply` = message privé, `announce` = chat public.
+- **/spawn** : véhicules « extra » (12 vivants max) ; ils se sauvegardent tant qu'ils sont en vie, ne réapparaissent pas quand détruits (leur emplacement d'index est réutilisé pour le même type).
+- **Sauvegarde v2** : props (id de kind, pose, gelé), véhicules par type + rang (n-ième véhicule de ce type), `state()/restore()`. Les soudures ne sont pas sauvegardées. Une sauvegarde v1 est ignorée.
+- **Décor** : `shared/world.ts` peut exporter `buildWorld(sim: Sim)` (import dynamique, ignoré s'il est absent). Attention : dans le serveur empaqueté par esbuild, l'import dynamique n'est pas inclus : ajouter alors un import statique dans `shared/sim.ts`.
+- **Harnais** : `npx tsx tests/harness.ts <type> [avance|virage|tir|crash] [secondes]` · `npx tsx tests/smoke.ts` (vérifications PASS/FAIL).
