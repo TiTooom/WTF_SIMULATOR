@@ -95,8 +95,8 @@ export async function openSettings(opts: PanelOptions): Promise<void> {
   const refreshKeys = () => {
     for (const [id, b] of keyButtons) b.textContent = keyLabel(s.keys[id], layout);
   };
-  const TITLES: Record<string, string> = { 'À pied': 'Déplacement à pied', Véhicules: 'Véhicules', Pilotage: 'Pilotage (avions, hélicoptère…)', Inventaire: 'Inventaire et barre d’objets', Général: 'Général', Pelleteuse: 'Pelleteuse' };
-  for (const group of ['À pied', 'Véhicules', 'Pilotage', 'Inventaire', 'Général', 'Pelleteuse'] as const) {
+  const TITLES: Record<string, string> = { 'À pied': 'Déplacement à pied', Véhicules: 'Véhicules', Général: 'Général' };
+  for (const group of ['À pied', 'Véhicules', 'Général'] as const) {
     body.appendChild(el('h3', undefined, TITLES[group]));
     for (const a of ACTIONS.filter((x) => x.group === group)) {
       const row = el('div', 'sp-row');
@@ -154,16 +154,9 @@ export async function openSettings(opts: PanelOptions): Promise<void> {
     refreshKeys();
     changed();
   });
-  const resetBar = el('button', 'sp-reset', 'Barre d’objets par défaut');
-  resetBar.type = 'button';
-  resetBar.addEventListener('click', () => {
-    s = { ...s, hotbar: [] }; // tableau vide = barre par défaut du jeu
-    note.textContent = 'Barre d’objets remise par défaut.';
-    changed();
-  });
   const close = el('button', undefined, 'Fermer');
   close.type = 'button';
-  actions.append(reset, resetBar, close);
+  actions.append(reset, close);
   card.appendChild(actions);
   refreshKeys();
 

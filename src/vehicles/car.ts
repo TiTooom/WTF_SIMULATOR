@@ -47,10 +47,10 @@ function build(): VehicleView {
 }
 
 export const view: VehicleViewDef = {
-  name: 'la voiture',
+  name: 'la citadine',
   enterRadius: 5,
   build,
   cam: { height: 1.6, distance: 8.5, pitch: -0.22 },
-  hud: (s, L) => `Voiture · ${Math.round(Math.abs(s.sp) * 3.6)} km/h\n${L('forward')}/${L('back')} : accélérer · ${L('left')}/${L('right')} : tourner · ${L('horn')} : klaxon · Molette : zoom · ${L('interact')} : descendre`,
+  hud: (s, L) => `Citadine · ${Math.round(Math.abs(s.sp) * 3.6)} km/h\n${L('forward')}/${L('back')} : accélérer · ${L('left')}/${L('right')} : tourner · ${L('horn')} : klaxon · Molette : zoom · ${L('interact')} : descendre`,
   engine: { base: 38, speedK: 4.4, level: 0.16 },
 };

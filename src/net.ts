@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {
-  PROJ_STRIDE, PROP_STRIDE,
-  type ChatMsg, type ClientMsg, type FxEvent, type Input, type PlayerSnap, type ServerMsg, type Snapshot, type VehicleSnap, type Vec3,
+  PED_STRIDE, PROJ_STRIDE, PROP_STRIDE,
+  type ChatMsg, type ClientMsg, type FxEvent, type GameServerEvent, type Input, type PlayerSnap, type PrivateState, type ServerMsg,
+  type Snapshot, type VehicleSnap, type Vec3,
 } from '../shared/protocol';
 
 /** Les états sont rendus ~100 ms dans le passé et interpolés : mouvement fluide malgré 30 envois/s. */
@@ -15,6 +16,8 @@ export interface Sampled {
   props: Float32Array;
   /** Projectiles (PROJ_STRIDE) : id, kind, x, y, z, vx, vy, vz. */
   proj: Float32Array;
+  /** Piétons interpolés par id (PED_STRIDE) : id, kind (index de PED_KINDS), x, z, yaw, st. */
+  peds: Float32Array;
 }
 
 interface Entry {
@@ -22,6 +25,7 @@ interface Entry {
   at: number;
   propIdx?: Map<number, number>;
   projIdx?: Map<number, number>;
+  pedIdx?: Map<number, number>;
 }
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -52,11 +56,16 @@ export class Net {
   private propState = new Map<number, number[]>();
   private vehState: VehicleSnap[] = [];
   private names = new Map<string, string>();
-  private wheelAcc = 0;
   /** Compteurs pour les tests. */
   snapCount = 0;
   onWelcome: () => void = () => {};
+  /** Dernier état privé reçu (message `me`), null avant le premier. */
+  me: PrivateState | null = null;
   onChat: (m: ChatMsg) => void = () => {};
+  /** État privé du joueur (argent, sac, étoiles, repères…) : appelé seulement quand il change. */
+  onMe: (s: PrivateState) => void = () => {};
+  /** Événement de jeu ponctuel (SMS, mini-jeu, mission, arrestation…). */
+  onGame: (e: GameServerEvent) => void = () => {};
   onClose: (reason: string) => void = () => {};
   onError: (message: string) => void = () => {};
 
@@ -79,6 +88,11 @@ export class Net {
         if (this.fxQueue.length > 200) this.fxQueue.splice(0, this.fxQueue.length - 200);
         this.snaps.push({ s: msg.s, at: performance.now() });
         if (this.snaps.length > 30) this.snaps.shift();
+      } else if (msg.type === 'me') {
+        this.me = msg.s;
+        this.onMe(msg.s);
+      } else if (msg.type === 'game') {
+        this.onGame(msg.e);
       } else if (msg.type === 'chat') {
         this.onChat(msg.m);
       } else if (msg.type === 'error') {
@@ -92,6 +106,7 @@ export class Net {
   /** Transforme un snapshot différentiel en snapshot complet (props, véhicules, noms) ; un snapshot complet remet l'état à zéro. */
   private expand(s: Snapshot) {
     s.fx ??= [];
+    s.peds ??= []; // toujours la liste complète (jamais en delta)
     for (const p of s.players) {
       if (p.name === undefined) p.name = this.names.get(p.id) ?? '';
       else this.names.set(p.id, p.name);
@@ -117,15 +132,9 @@ export class Net {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
-  /** Cumule des crans de molette ; envoyés (puis remis à zéro) avec le prochain Input. */
-  addWheel(n: number) {
-    this.wheelAcc += n;
-  }
-
-  /** Envoie l'Input v2 ; le cumul de molette part avec et repart à zéro. */
-  sendInput(i: Omit<Input, 'wheel'>) {
-    this.send({ type: 'input', i: { ...i, wheel: this.wheelAcc } });
-    this.wheelAcc = 0;
+  /** Envoie l'Input (30 Hz). */
+  sendInput(i: Input) {
+    this.send({ type: 'input', i });
   }
 
   /** Événements fx reçus depuis le dernier appel (chacun n'est rendu qu'une fois). */
@@ -149,7 +158,7 @@ export class Net {
 
     const players = b.players.map((pb) => {
       const pa = a.players.find((p) => p.id === pb.id) ?? pb;
-      return { ...pb, p: lerpV(pa.p, pb.p, k), yaw: lerpAngle(pa.yaw, pb.yaw, k), sc: lerp(pa.sc ?? pb.sc ?? 1, pb.sc ?? 1, k) };
+      return { ...pb, p: lerpV(pa.p, pb.p, k), yaw: lerpAngle(pa.yaw, pb.yaw, k) };
     });
 
     const qa = new THREE.Quaternion();
@@ -202,6 +211,21 @@ export class Net {
       if (oa === undefined) continue;
       for (let j = 2; j < 5; j++) proj[o + j] = lerp(ja[oa + j], jb[o + j], k);
     }
-    return { players, vehicles, props, proj };
+    ea.pedIdx ??= indexOf(a.peds ?? [], PED_STRIDE);
+    const ka = a.peds ?? [], kb = b.peds ?? [];
+    const nk = Math.floor(kb.length / PED_STRIDE);
+    const peds = new Float32Array(nk * PED_STRIDE);
+    for (let c = 0; c < nk; c++) {
+      const o = c * PED_STRIDE;
+      const oa = ea.pedIdx.get(kb[o]);
+      for (let j = 0; j < PED_STRIDE; j++) peds[o + j] = kb[o + j];
+      if (oa === undefined) continue;
+      const dx = kb[o + 2] - ka[oa + 2], dz = kb[o + 3] - ka[oa + 3];
+      if (dx * dx + dz * dz > TELEPORT_D2) continue;
+      peds[o + 2] = ka[oa + 2] + dx * k;
+      peds[o + 3] = ka[oa + 3] + dz * k;
+      peds[o + 4] = lerpAngle(ka[oa + 4], kb[o + 4], k);
+    }
+    return { players, vehicles, props, proj, peds };
   }
 }

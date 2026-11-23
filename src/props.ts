@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { PROP_STRIDE } from '../shared/protocol';
 import { wedgeVertices, type PropKind } from '../shared/props';
 import { PROP_KINDS } from '../shared/registry';
-import { outlined, toon } from './gfx';
+import { outlined, toon, toonRaw } from './gfx';
 
 function wedgeGeometry(w: number, h: number, l: number): THREE.BufferGeometry {
   const v = wedgeVertices(w, h, l);
@@ -42,9 +42,7 @@ function makeMats(k: PropKind): THREE.Material[] {
   if (k.glow) {
     return [new THREE.MeshBasicMaterial({ color: base }), new THREE.MeshBasicMaterial({ color: frozen }), new THREE.MeshBasicMaterial({ color: held })];
   }
-  const heldMat = toon(held.getHex());
-  (heldMat as THREE.MeshToonMaterial).emissive = new THREE.Color(0xffe27a);
-  (heldMat as THREE.MeshToonMaterial).emissiveIntensity = 0.45;
+  const heldMat = toonRaw({ color: held.getHex(), emissive: 0xffe27a, emissiveIntensity: 0.45 });
   return [toon(k.color), toon(frozen.getHex()), heldMat];
 }
 

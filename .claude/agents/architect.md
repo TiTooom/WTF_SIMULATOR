@@ -218,3 +218,13 @@ Example architecture for an AI-powered SaaS platform:
 - **10M users**: Event-driven architecture, distributed caching, multi-region
 
 **Remember**: Good architecture enables rapid development, easy maintenance, and confident scaling. The best architecture is simple, clear, and follows established patterns.
+
+## Contexte projet : Grand Theft Auto : Edition UniLaSalle
+
+Jeu à télécharger (Electron, `.exe` + installateur) jouable aussi dans le navigateur, **sur ordinateur uniquement, sans mobile ni tactile**. Inspiré de GTA: Chinatown Wars : vue de dessus inclinée, cel-shading BD, conduite arcade, économie de rue avec marchandises **fictives**, étoiles de recherche, missions courtes avec médailles, mini-jeux de moins de 4 s. Multi coopératif LAN (l'hôte est le serveur).
+
+- Serveur **autoritaire** : économie, missions, étoiles et physique Rapier dans `shared/` et `server/` ; le client dessine l'état interpolé et envoie des `Input`.
+- Piège Rapier : jamais de lecture d'un corps retiré (`bodyOk`, `shared/guard.ts`).
+- Client léger, touches via `event.code`, économie pilotée par des tables.
+- Spécialistes disponibles : `art-toon`, `game-camera-driving`, `game-economy`, `game-missions`, `game-minigames`.
+- Lire `CLAUDE.md`, `DA.md` et `docs/` avant de planifier.

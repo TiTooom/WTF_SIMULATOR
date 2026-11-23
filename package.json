@@ -1,8 +1,8 @@
 {
   "name": "jeu-3d",
-  "productName": "WTF SIMULATOR",
-  "description": "WTF SIMULATOR : jeu 3D en monde ouvert, véhicules et multijoueur entre amis",
-  "author": "WTF SIMULATOR",
+  "productName": "GTA Edition UniLaSalle",
+  "description": "Grand Theft Auto : Edition UniLaSalle : jeu de ville en vue de dessus, coop entre amis",
+  "author": "UniLaSalle",
   "private": true,
   "version": "0.3.0",
   "type": "module",
@@ -22,7 +22,7 @@
   },
   "build": {
     "appId": "fr.jeu3d.app",
-    "productName": "WTF SIMULATOR",
+    "productName": "GTA Edition UniLaSalle",
     "directories": {
       "output": "release"
     },
@@ -46,7 +46,7 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "artifactName": "WTF-SIMULATOR-Setup-${version}.${ext}"
+      "artifactName": "GTA-UniLaSalle-Setup-${version}.${ext}"
     },
     "mac": {
       "category": "public.app-category.games",
@@ -59,7 +59,7 @@
           ]
         }
       ],
-      "artifactName": "WTF-SIMULATOR-${version}-mac-${arch}.${ext}"
+      "artifactName": "GTA-UniLaSalle-${version}-mac-${arch}.${ext}"
     }
   },
   "dependencies": {

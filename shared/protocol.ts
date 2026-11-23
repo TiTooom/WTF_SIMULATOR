@@ -1,31 +1,27 @@
 // Messages échangés client <-> serveur (JSON sur WebSocket). CONTRAT : ne pas changer sans prévenir tout le monde.
 
+import type { DistrictId, GangId, GoodId, MedalTier, MinigameKind } from './ids';
+
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 
 /** Commandes du joueur envoyées 30×/s. Valeurs dans [-1, 1] sauf indication. */
 export interface Input {
-  f: number; // avant(+) / arrière(-). Avion : pousser(+) = piquer, tirer(-) = cabrer
-  s: number; // droite(+) / gauche(-). Avion : roulis
-  sw: number; // pelleteuse : pivot cabine (gauche +)
-  bm: number; // pelleteuse : flèche (haut +)
-  st: number; // pelleteuse : bras (sortir +)
-  bk: number; // pelleteuse : godet (rentrer +)
-  jump: number; // 0|1 — à pied : saut ; en véhicule : frein à main / turbo
+  f: number; // avant(+) / arrière(-)
+  s: number; // droite(+) / gauche(-)
+  jump: number; // 0|1 — à pied : saut (roulade plus tard) ; en véhicule : frein à main
+  run: number; // 0|1 — à pied : sprint
   yaw: number; // direction du regard (radians) — utilisé à pied
-  yw: number; // lacet / palonnier : droite(+)
-  th: number; // gaz / altitude : monter(+) descendre(-) (avion : gaz, hélico : collectif, OVNI : altitude)
-  hn: number; // 0|1 klaxon / action spéciale du véhicule
-  m1: number; // 0|1 bouton principal (tirer / utiliser l'objet / saisir)
-  m2: number; // 0|1 bouton secondaire (tir secondaire / geler)
+  hn: number; // 0|1 klaxon / sirène
+  act: number; // 0|1 touche d'activité (taxi, justicier…)
+  m1: number; // 0|1 bouton principal (tirer)
+  m2: number; // 0|1 bouton secondaire (viser / tir secondaire)
   ao: Vec3; // origine de visée (caméra)
   ad: Vec3; // direction de visée (unitaire)
-  item: string; // identifiant de l'objet sélectionné dans la barre ('' = aucun)
-  wheel: number; // ticks de molette cumulés depuis le dernier envoi (distance du pistolet à gravité)
 }
 export const NO_INPUT: Input = {
-  f: 0, s: 0, sw: 0, bm: 0, st: 0, bk: 0, jump: 0, yaw: 0, yw: 0, th: 0, hn: 0, m1: 0, m2: 0,
-  ao: [0, 0, 0], ad: [0, 0, -1], item: '', wheel: 0,
+  f: 0, s: 0, jump: 0, run: 0, yaw: 0, hn: 0, act: 0, m1: 0, m2: 0,
+  ao: [0, 0, 0], ad: [0, 0, -1],
 };
 
 export interface PlayerSnap {
@@ -36,8 +32,8 @@ export interface PlayerSnap {
   veh: number; // index du véhicule occupé, -1 sinon
   seat: number; // 0 = conducteur, >0 passager
   hp: number; // 0..100
-  item: string; // objet en main
-  sc: number; // échelle du joueur (1 = normal ; effets : géant, minuscule…)
+  ws?: number; // étoiles de recherche 0..5 (absent = 0)
+  an?: number; // état d'animation du personnage (absent = 0 ; valeurs définies par le client art-toon)
 }
 
 export interface VehicleSnap {
@@ -49,7 +45,10 @@ export interface VehicleSnap {
   st: number; // braquage −1..1
   a: number[]; // animations propres au véhicule (bras, hélice, tourelle, train d'atterrissage…)
   hp: number; // points de vie 0..1
-  dead: number; // 1 = détruit, en attente de réapparition (ne pas dessiner)
+  dead: number; // 1 = détruit (ne pas dessiner, fumée), 2 = rangé dans le pool (ne pas dessiner, pas d'effet)
+  lv?: number; // livrée (variante de couleur, index défini par la vue ; absent = 0)
+  lk?: 1; // verrouillé (absent = ouvert)
+  ai?: 1; // piloté par une IA (trafic, police) : pas de conducteur humain
 }
 
 /** Événement visuel/sonore éphémère, diffusé une fois (explosions, confettis, textes flottants…). */
@@ -81,16 +80,20 @@ export interface Snapshot {
   vi?: number[];
   /** Delta : nombre total de véhicules. */
   vn?: number;
+  /** Piétons à plat, PED_STRIDE nombres chacun : id, kind (index de PED_KINDS), x, z, yaw, st (état d'animation). Toujours la liste complète ; absent = aucun. */
+  peds?: number[];
   // Delta : `players[i].name` est omis quand le client le connaît déjà (mémorisé par id).
 }
 export const PROP_STRIDE = 10;
 export const PROJ_STRIDE = 8;
+export const PED_STRIDE = 6;
 
 export type ClientMsg =
   | { type: 'join'; name: string }
   | { type: 'input'; i: Input }
   | { type: 'interact' } // monter / descendre
-  | { type: 'chat'; text: string };
+  | { type: 'chat'; text: string }
+  | { type: 'game'; m: GameClientMsg }; // actions de jeu (commerce, missions, mini-jeux…) : TOUT champ est revalidé côté serveur
 
 export interface ChatMsg {
   from: string; // pseudo (vide pour un message du serveur)
@@ -102,4 +105,85 @@ export type ServerMsg =
   | { type: 'welcome'; id: string; mode: 'solo' | 'multi' }
   | { type: 'snap'; s: Snapshot }
   | { type: 'chat'; m: ChatMsg }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'me'; s: PrivateState } // état privé du joueur (10 Hz max, envoyé seulement s'il change)
+  | { type: 'game'; e: GameServerEvent }; // événement de jeu ponctuel destiné à ce joueur
+
+// ---------- Jeu : état privé, messages, événements (vague 1) ----------
+export const PDA_PANELS = ['carte', 'sms', 'marche', 'missions', 'stats'] as const;
+/** Onglet du PDA. */
+export type Panel = (typeof PDA_PANELS)[number];
+
+/** Message reçu sur le téléphone du joueur. Un « tuyau » (tip) annonce un événement de prix. */
+export interface Sms {
+  id: number; // unique par joueur, croissant
+  from: string;
+  text: string;
+  at: number; // temps de simulation (ms)
+  tip?: { good: GoodId; district: DistrictId; mult: number; until: number }; // until : temps de simulation (ms)
+}
+
+/** Repère affiché sur la carte et dans le monde (au plus 16 par joueur). */
+export interface Mark {
+  x: number;
+  z: number;
+  k: 'mission' | 'dealer' | 'planque' | 'camera' | 'donneur' | 'hopital' | 'commissariat' | 'cible' | 'danger' | 'autre';
+  label?: string;
+}
+
+/** Étal ouvert chez un dealer proche : prix calculés par le serveur (jamais crus du client). */
+export interface ShopView {
+  dealer: string; // id du POI
+  district: DistrictId;
+  gang: GangId;
+  goods: { good: GoodId; buy: number; sell: number }[]; // prix unitaires que paie / reçoit le joueur
+}
+
+export interface MinigameStart {
+  sid: number; // identifiant de session, unique, croissant
+  kind: MinigameKind;
+  seed: number;
+  difficulty: number; // 0..1
+  maxMs: number;
+}
+export interface MinigameResult {
+  sid: number;
+  ok: boolean;
+  ms: number; // durée mesurée par le client (le serveur vérifie qu'elle est plausible)
+  data?: number[]; // données propres au jeu (validées par minigames/rules.ts)
+}
+
+/** État privé d'un joueur (message `me`). Construit par `server/game.ts` : le cœur remplit les champs de base, chaque système complète les siens. */
+export interface PrivateState {
+  money: number;
+  bag: Partial<Record<GoodId, number>>;
+  bagCap: number;
+  stars: number; // 0..5
+  starProgress: number; // 0..1 vers l'étoile suivante / précédente
+  district: DistrictId;
+  shop?: ShopView;
+  stash?: Partial<Record<GoodId, number>>; // contenu de la planque proche
+  mission?: { id: string; step: number; steps: number; text: string; ms: number; timeLimitMs?: number };
+  activity?: { kind: 'taxi' | 'ambulance' | 'pompier' | 'justicier'; text: string; score: number };
+  marks: Mark[];
+  medals: Record<string, MedalTier>; // id de mission -> meilleure médaille
+  unread: number; // SMS non lus
+}
+
+export type GameClientMsg =
+  | { k: 'trade'; dealer: string; good: GoodId; qty: number; side: 'buy' | 'sell' }
+  | { k: 'stash'; op: 'put' | 'take'; good: GoodId; qty: number }
+  | { k: 'mission'; op: 'start' | 'abort' | 'retry'; id: string }
+  | { k: 'mg'; r: MinigameResult }
+  | { k: 'sms_lu'; id: number };
+
+export type GameServerEvent =
+  | { k: 'sms'; sms: Sms }
+  | { k: 'mg_start'; s: MinigameStart }
+  | { k: 'mg_end'; sid: number; ok: boolean }
+  | { k: 'mission'; ev: 'start' | 'checkpoint' | 'done' | 'fail'; id: string; medal?: MedalTier; ms?: number; text?: string }
+  | { k: 'vignettes'; id: string } // planches BD (narration)
+  | { k: 'arrete' } // arrêté par la police
+  | { k: 'mort' }
+  | { k: 'monde'; camsDown: number } // nombre de caméras de surveillance détruites
+  | { k: 'toast'; text: string };

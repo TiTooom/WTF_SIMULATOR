@@ -8,7 +8,7 @@ interface Launcher {
 }
 export const launcher = (): Launcher | undefined => (window as unknown as { launcher?: Launcher }).launcher;
 
-const STORAGE_KEY = 'wtf-simulator-settings';
+const STORAGE_KEY = 'gta-unilasalle-settings';
 
 /** Application : réglages enregistrés dans le dossier de l'app (valables pour toutes les parties).
  *  Navigateur : stockés dans ce navigateur, pour ce serveur. */

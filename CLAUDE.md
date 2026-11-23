@@ -1,4 +1,8 @@
-# WTF SIMULATOR
+# Grand Theft Auto : Edition UniLaSalle
+
+> **Nouvelle direction** (voir `DA.md`) : le jeu s'appelle désormais « Grand Theft Auto : Edition UniLaSalle », inspiré de GTA: Chinatown Wars : vue de dessus inclinée (50-65°), cel-shading BD avec contours noirs, conduite arcade assistée, économie de rue (marchandises **fictives**), étoiles de recherche, missions courtes avec médailles, mini-jeux < 4 s, interface PDA. Multi coopératif LAN dans la même ville. Plateformes : application Windows ou navigateur **sur ordinateur uniquement (pas de mobile ni tactile)**.
+> Le moteur (Electron, serveur autoritaire, réseau, sauvegarde, chat, réglages, son) est conservé ; la vue FPS, les 12 véhicules, les 33 objets et le mode casser/construire de l'ancien « WTF SIMULATOR » sont à remplacer. Le texte ci-dessous décrit l'état actuel du code (encore l'ancien jeu) tant que la migration n'est pas faite.
+> Agents spécialisés : `art-toon`, `game-camera-driving`, `game-economy`, `game-missions`, `game-minigames` (`.claude/agents/`).
 
 Vrai jeu à télécharger (application Windows Electron, `.exe` portable + installateur, publiés dans les Releases GitHub). Plus d'itch.io. Three.js (rendu) + Rapier (physique, côté serveur) + Node (serveur intégré à l'app) + Vite + TypeScript strict.
 
@@ -7,7 +11,7 @@ Vrai jeu à télécharger (application Windows Electron, `.exe` portable + insta
 - Le joueur conduit tout type de véhicule (voiture, camion + remorque, avion/chasseur, engins de chantier), chacun avec sa spécificité
   (remorque, train rentrant + tir, godet...) et interagit avec l'environnement (casser, construire, déplacer). Physique arcade crédible.
 - Ordre des véhicules : voiture + marche (fait) → pelleteuse (fait) → camion/remorque → avion.
-- **Tout se fait dans l'application, aucune commande ni .bat** : menu Solo / Héberger / Rejoindre. Multi entre amis sans enjeu : l'hôte = serveur (même Wi-Fi uniquement, LAN, pas de NAT traversal), parties détectées par diffusion UDP (port 41234) ou adresse saisie. Sauvegarde chez l'hôte dans `%APPDATA%/WTF SIMULATOR/saves/` (`solo.json`, `multi.json`).
+- **Tout se fait dans l'application, aucune commande ni .bat** : menu Solo / Héberger / Rejoindre. Multi entre amis sans enjeu : l'hôte = serveur (même Wi-Fi uniquement, LAN, pas de NAT traversal), parties détectées par diffusion UDP (port 41234) ou adresse saisie. Sauvegarde chez l'hôte dans `%APPDATA%/GTA Edition UniLaSalle/saves/` (`solo.json`, `multi.json`).
 
 ## Architecture
 - `shared/` : constantes + génération déterministe du monde (arbres, caisses), protocole, **simulation Rapier** (`sim.ts`).
@@ -20,7 +24,7 @@ Vrai jeu à télécharger (application Windows Electron, `.exe` portable + insta
 
 - **Réglages** (`shared/settings.ts`) : touches (event.code, une touche = une action, échange en cas de conflit), sensibilité, volumes. Stockés par l'app dans `settings.json` (IPC `settings:get/save`, toujours revalidés par `sanitizeSettings`), sinon localStorage en navigateur. Le panneau `src/ui/settingsPanel.ts` est partagé entre le menu (`electron/menu.ts`, bundle iife) et le jeu.
 - **Chat** : `chat` dans le protocole, historique/anti-spam/nettoyage dans `server/server.ts`, UI `src/chat.ts` (toujours `textContent`). **Son** : `src/audio.ts`, synthèse Web Audio, aucun fichier audio.
-- **Mobile / tactile** : `src/touch.ts` (détection `pointer: coarse` ou `?touch=1`) ajoute joystick, regard au doigt et boutons en simulant les touches/boutons existants ; aucune logique serveur. Un téléphone ouvre l'adresse de l'hôte (`http://IP:3000`, affichée dans la pause) dans son navigateur : même monde que les PC. Pas de plein écran sur iPhone (Safari).
+- **Mobile / tactile : abandonné** (décision du projet). `src/touch.ts` supprimé ; ne pas ajouter de support tactile.
 - `window.__wtf` expose l'audio pour les tests CDP.
 
 ## Contenu v2 (voir docs/ARCHITECTURE.md, docs/CONTENT-BRIEF.md, docs/wtf-ideas.md)

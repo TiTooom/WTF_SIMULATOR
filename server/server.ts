@@ -10,9 +10,10 @@ import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { Sim, type SaveData } from '../shared/sim';
 import { DEFAULT_PORT, MAX_PLAYERS, SNAP_HZ, STEP } from '../shared/constants';
-import type { ChatMsg, ClientMsg, ServerMsg } from '../shared/protocol';
+import { MAX_GAME_MSG_CHARS } from '../shared/game';
+import type { ChatMsg, ClientMsg, GameServerEvent, ServerMsg } from '../shared/protocol';
 import { runCommand } from './commands';
-import { installExtras, type Extras } from './extras';
+import { installGame, type Game, type Outgoing } from './game';
 
 export interface ServerOptions {
   mode: 'solo' | 'multi';
@@ -78,15 +79,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   // ---------- Simulation + sauvegarde ----------
   let sim = await Sim.create();
+  let savedGame: unknown;
   try {
-    sim.restore(JSON.parse(fs.readFileSync(saveFile, 'utf8')));
+    const raw = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+    sim.restore(raw); // ignore tout ce qui n'est pas une sauvegarde v3
+    savedGame = raw?.version === 3 ? raw.systems : undefined; // état des systèmes de jeu (revalidé par chaque système)
     log(`Sauvegarde chargée : ${saveFile}`);
   } catch {
     log('Nouvelle partie (aucune sauvegarde trouvée).');
   }
-  let extras: Extras = installExtras(sim, { mode }); // événements chaos, modes, commandes /meteo /party /mode…, trampolines, décor frais
+  let game: Game = installGame(sim, { mode, saved: savedGame }); // logique de jeu (systèmes) au-dessus de la physique
   sim.soloMode = mode === 'solo';
 
+  let lastGameState: unknown = savedGame ?? null; // dernier état du jeu sain (reconstruction et sauvegarde d'un monde cassé)
   let lastGood: SaveData | null = null; // dernier état sérialisé alors que le monde était sain (reconstruction du disjoncteur)
   try { lastGood = sim.serialize(); } catch (e) { sim.noteError(e); }
   let nextGoodAt = performance.now() + GOOD_STATE_EVERY_MS;
@@ -102,9 +107,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       data ??= lastGood; // monde empoisonné : on sauvegarde le dernier état sain, jamais une lecture du monde cassé
       if (!data) return;
+      let gameState: unknown = null;
+      if (!sim.broken && !rebuilding) { try { gameState = game.serialize(); lastGameState = gameState; } catch (e) { log(`Sérialisation du jeu ignorée : ${e}`); } } else gameState = lastGameState;
       fs.mkdirSync(saveDir, { recursive: true });
       const tmp = `${saveFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(data));
+      fs.writeFileSync(tmp, JSON.stringify({ version: 3, players: data.players, systems: (gameState && typeof gameState === 'object' ? gameState : {}) as Record<string, unknown> } satisfies SaveData));
       fs.renameSync(tmp, saveFile); // écriture atomique : jamais de sauvegarde à moitié écrite
     } catch (e) {
       log(`Échec de la sauvegarde : ${e}`);
@@ -140,7 +147,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (!file.startsWith(publicDir + path.sep)) return reply(res, 403, {});
       fs.readFile(file, (err, data) => {
         try {
-          if (err) return reply(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, urlPath === '/' ? 'Serveur WTF SIMULATOR en marche, mais le client ne se trouve pas ici. En développement, ouvre le port 5173 ; sinon lance npm run build.' : 'Introuvable');
+          if (err) return reply(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, urlPath === '/' ? 'Serveur Grand Theft Auto : Edition UniLaSalle en marche, mais le client ne se trouve pas ici. En développement, ouvre le port 5173 ; sinon lance npm run build.' : 'Introuvable');
           reply(res, 200, { 'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream' }, data);
         } catch { /* réponse impossible : on ignore */ }
       });
@@ -199,6 +206,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   // ---------- Chat ----------
   const chatHistory: ChatMsg[] = []; // derniers messages, renvoyés aux nouveaux arrivants
   const chatTimes = new WeakMap<WebSocket, number[]>(); // anti-spam : 5 messages max par 5 s et par joueur
+  const gameTimes = new WeakMap<WebSocket, number[]>(); // anti-spam des messages `game` : 20 par seconde et par socket
+  const lastMe = new WeakMap<WebSocket, string>(); // dernier état privé envoyé (le message `me` ne part que s'il change)
   const say = (m: ChatMsg) => {
     chatHistory.push(m);
     if (chatHistory.length > 30) chatHistory.shift();
@@ -262,6 +271,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       // Le socket n'est enregistré qu'une fois le joueur réellement créé
       sockets.set(ws, pid);
+      try { const pl = sim.players.get(pid); if (pl) game.onJoin(pl); } catch (e) { log(`Erreur du jeu à l'arrivée (ignorée) : ${e}`); }
       needFull.add(ws);
       if (!sim.hostId || !sim.players.has(sim.hostId)) sim.hostId = pid; // le premier arrivé est le chef de la bande
       send(ws, { type: 'welcome', id: pid, mode });
@@ -272,6 +282,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       sim.setInput(id, msg.i ?? {});
     } else if (id && msg.type === 'interact') {
       sim.interact(id);
+    } else if (id && msg.type === 'game') {
+      // Message de jeu : taille bornée, cadence bornée, puis validation structurelle stricte dans game.onMessage (parseGameMsg)
+      if (String(raw).length > MAX_GAME_MSG_CHARS) return;
+      const now = Date.now();
+      const recent = (gameTimes.get(ws) ?? []).filter((t) => now - t < 1000);
+      if (recent.length >= 20) return;
+      gameTimes.set(ws, [...recent, now]);
+      const player = sim.players.get(id);
+      if (!player || rebuilding || sim.broken) return;
+      game.onMessage(player, (msg as { m?: unknown }).m);
     } else if (id && msg.type === 'chat') {
       const text = cleanChat(msg.text);
       const now = Date.now();
@@ -317,6 +337,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         const name = sim.players.get(id)?.name;
         sockets.delete(ws);
         log(`- ${name} (${sockets.size} joueur(s))`);
+        try { const pl = sim.players.get(id); if (pl) game.onLeave(pl); } catch (e) { log(`Erreur du jeu au départ (ignorée) : ${e}`); }
         try { sim.removePlayer(id); } catch (e) { sim.noteError(e); }
         if (sim.hostId === id || !sim.hostId || !sim.players.has(sim.hostId)) {
           // le chef est parti : le joueur connecté le plus ancien reprend le flambeau
@@ -359,15 +380,18 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (lastGood) {
         try { fresh.restore(lastGood); } catch (e) { log(`Restauration partielle (ignorée) : ${e}`); }
       }
-      const fx = installExtras(fresh, { mode });
+      let carried: unknown = lastGameState ?? undefined;
+      try { carried = game.serialize(); } catch { /* l'état des systèmes ne lit pas Rapier : sinon on garde le dernier état sain */ }
+      const fg = installGame(fresh, { mode, saved: carried });
       const connected = new Set(sockets.values());
       for (const pl of people) {
         if (!connected.has(pl.id)) continue;
         try { fresh.addPlayer(pl.id, pl.name, pl.pos); } catch (e) { log(`Joueur ${pl.name} non replacé : ${e}`); }
+        try { const np = fresh.players.get(pl.id); if (np) fg.onJoin(np); } catch (e) { log(`Erreur du jeu à la reconstruction (ignorée) : ${e}`); }
       }
       if (hostId && !fresh.players.has(hostId)) fresh.hostId = '';
       sim = fresh;
-      extras = fx;
+      game = fg;
       fresh.resetDelta();
       for (const ws of sockets.keys()) needFull.add(ws); // snapshot complet pour tous : le monde a changé d'identité
       try { lastGood = fresh.serialize(); } catch (e) { fresh.noteError(e); }
@@ -383,6 +407,33 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     }
   };
 
+  // ---------- Jeu : événements ponctuels et état privé ----------
+  const routeOutbox = (out: Outgoing[]) => {
+    for (const o of out) {
+      const data = JSON.stringify({ type: 'game', e: o.ev satisfies GameServerEvent } satisfies ServerMsg);
+      for (const [ws, id] of sockets) {
+        if (o.to !== null && o.to !== id) continue;
+        try { if (ws.readyState === ws.OPEN) ws.send(data); } catch { /* socket qui se ferme */ }
+      }
+    }
+  };
+  /** Message `me` : état privé de chaque joueur, 10 Hz au plus, seulement s'il a changé depuis le dernier envoi. */
+  const sendMe = () => {
+    for (const [ws, id] of sockets) {
+      try {
+        const p = sim.players.get(id);
+        if (!p || ws.readyState !== ws.OPEN) continue;
+        const json = JSON.stringify(game.privateFor(p));
+        if (lastMe.get(ws) === json) continue;
+        lastMe.set(ws, json);
+        ws.send(`{"type":"me","s":${json}}`);
+      } catch (e) {
+        if (sim.noteError(e)) return;
+        log(`Erreur d'état privé (ignorée) : ${e}`);
+      }
+    }
+  };
+
   // ---------- Boucle de simulation à pas fixe ----------
   let acc = 0;
   let last = performance.now();
@@ -395,19 +446,22 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     acc = Math.min(acc + (now - last) / 1000, 0.25);
     last = now;
     while (acc >= STEP) {
-      try { extras.step(); } catch (e) { if (!sim.noteError(e)) log(`Erreur des extras (ignorée) : ${e}`); }
+      try { game.preStep(); } catch (e) { if (!sim.noteError(e)) log(`Erreur du jeu (preStep, ignorée) : ${e}`); }
       try {
         sim.step();
       } catch (e) {
         if (!sim.noteError(e)) log(`Erreur de simulation (ignorée) : ${e}`);
       }
+      if (!sim.broken) { try { game.postStep(); } catch (e) { if (!sim.noteError(e)) log(`Erreur du jeu (postStep, ignorée) : ${e}`); } }
+      if (!sim.broken) routeOutbox(game.drainOutbox());
       if (sim.broken) { acc = 0; void rebuild(); return; }
       acc -= STEP;
       if (now >= nextGoodAt) {
         nextGoodAt = now + GOOD_STATE_EVERY_MS;
-        try { lastGood = sim.serialize(); } catch (e) { if (!sim.noteError(e)) log(`Instantané ignoré : ${e}`); }
+        try { lastGood = sim.serialize(); lastGameState = game.serialize(); } catch (e) { if (!sim.noteError(e)) log(`Instantané ignoré : ${e}`); }
         if (sim.broken) { acc = 0; void rebuild(); return; }
       }
+      if (ticks % 6 === 0 && !sim.broken) sendMe();
       if (++ticks % snapEvery === 0) {
         if (sockets.size === 0) {
           sim.clearFx();
@@ -417,6 +471,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           try {
             const d = sim.snapshotDelta();
             if (!d.fx.length) delete (d as Partial<typeof d>).fx; // fx vide : non sérialisé
+            const peds = game.pedsFlat();
+            if (peds.length) d.peds = peds;
             const delta = JSON.stringify({ type: 'snap', s: d } satisfies ServerMsg);
             let full: string | null = null;
             for (const ws of sockets.keys()) {
@@ -424,7 +480,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
               try {
                 if (needFull.has(ws)) {
                   needFull.delete(ws);
-                  full ??= JSON.stringify({ type: 'snap', s: { ...sim.snapshotFull(), fx: d.fx ?? [] } } satisfies ServerMsg);
+                  full ??= JSON.stringify({ type: 'snap', s: { ...sim.snapshotFull(), fx: d.fx ?? [], ...(peds.length ? { peds } : {}) } } satisfies ServerMsg);
                   ws.send(full);
                 } else ws.send(delta);
               } catch (e) {

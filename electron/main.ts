@@ -21,7 +21,7 @@ let stopListen: (() => void) | null = null;
 
 const menuFile = path.join(__dirname, 'menu.html');
 const publicDir = path.join(app.getAppPath(), 'dist', 'public');
-const saveDir = path.join(app.getPath('userData'), 'saves'); // ex : %APPDATA%/WTF SIMULATOR/saves
+const saveDir = path.join(app.getPath('userData'), 'saves'); // ex : %APPDATA%/GTA Edition UniLaSalle/saves
 const settingsFile = path.join(app.getPath('userData'), 'settings.json');
 
 // Le jeu s'appelait « Jeu 3D » : on récupère les anciennes sauvegardes une seule fois.
@@ -34,7 +34,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1280, height: 720, minWidth: 800, minHeight: 500, backgroundColor: '#9fd3ff', title: 'WTF SIMULATOR',
+    width: 1280, height: 720, minWidth: 800, minHeight: 500, backgroundColor: '#9fd3ff', title: 'Grand Theft Auto : Edition UniLaSalle',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,

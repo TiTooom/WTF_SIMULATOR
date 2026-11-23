@@ -1,41 +1,16 @@
 // Registre client des véhicules : un `VehicleViewDef` par type (voir shared/vehicles pour le côté serveur).
-// Un type sans vue (null) ou inconnu est dessiné par un modèle de secours : le jeu ne casse jamais.
+// Un type sans vue ou inconnu est dessiné par un modèle de secours : le jeu ne casse jamais.
 import * as THREE from 'three';
 import type { ActionId } from '../../shared/settings';
 import { box } from '../gfx';
 import type { VehicleViewDef } from './types';
-import { view as car } from './car';
-import { view as excavator } from './excavator';
-import { view as tank } from './tank';
-import { view as camion_articule } from './camion_articule';
-import { view as caddie_turbo } from './caddie_turbo';
-import { view as camion_glaces } from './camion_glaces';
-import { view as toilettes_roulettes } from './toilettes_roulettes';
-import { view as avion_chasse } from './avion_chasse';
-import { view as helicoptere } from './helicoptere';
-import { view as ovni } from './ovni';
-import { view as canape_fusee } from './canape_fusee';
-import { view as dirigeable_pedales } from './dirigeable_pedales';
+import { view as citadine } from './car';
 
 // Même liste/ordre que VEHICLE_TYPES (shared/vehicles) ; recopiée pour ne pas embarquer le code serveur dans le client.
-export const VIEW_TYPES = [
-  'car', 'excavator', 'tank', 'camion_articule', 'caddie_turbo', 'camion_glaces', 'toilettes_roulettes',
-  'avion_chasse', 'helicoptere', 'ovni', 'canape_fusee', 'dirigeable_pedales',
-] as const;
+export const VIEW_TYPES = ['citadine'] as const;
 
-const ALL: Record<string, VehicleViewDef | null> = {
-  car, excavator, tank, camion_articule, caddie_turbo, camion_glaces, toilettes_roulettes,
-  avion_chasse, helicoptere, ovni, canape_fusee, dirigeable_pedales,
-};
-/** Vues disponibles (les types encore sans vue n'y figurent pas). */
-export const VIEWS: Record<string, VehicleViewDef> = {};
-for (const [k, v] of Object.entries(ALL)) if (v) VIEWS[k] = v;
-
-const FALLBACK_NAMES: Record<string, string> = {
-  tank: 'le tank', camion_articule: 'le camion articulé', caddie_turbo: 'le caddie turbo', camion_glaces: 'le camion de glaces',
-  toilettes_roulettes: 'les toilettes à roulettes', avion_chasse: "l'avion de chasse", helicoptere: "l'hélicoptère", ovni: "l'OVNI",
-  canape_fusee: 'le canapé-fusée', dirigeable_pedales: 'le dirigeable à pédales',
-};
+/** Vues disponibles. */
+export const VIEWS: Record<string, VehicleViewDef> = { citadine };
 
 function hashColor(s: string) {
   let h = 0;
@@ -45,7 +20,7 @@ function hashColor(s: string) {
 
 /** Modèle de secours : boîte colorée portant le nom du type. */
 function buildFallback(type: string): VehicleViewDef {
-  const name = FALLBACK_NAMES[type] ?? `le véhicule « ${type} »`;
+  const name = `le véhicule « ${type} »`;
   return {
     name,
     build() {

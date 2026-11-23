@@ -1,12 +1,13 @@
-// Voiture : conduite arcade (poussée, adhérence latérale, braquage proportionnel à la vitesse). Deux places.
+// Citadine (TEMPORAIRE, vague 1) : l'ancienne `car` renommée pour coller aux types de shared/ids.ts. Remplacée par shared/vehicles/arcade.ts en vague 2.
+// Conduite arcade (poussée, adhérence latérale, braquage proportionnel à la vitesse). Deux places.
 import RAPIER from '@dimforge/rapier3d-compat';
 import { G, grp, type VehicleDef } from '../api';
 
 const MASS = 800;
 
 export const def: VehicleDef = {
-  type: 'car',
-  name: 'la voiture',
+  type: 'citadine',
+  name: 'la citadine',
   emoji: '🚗',
   enterRadius: 5,
   exitOffset: 3.5,
@@ -14,7 +15,7 @@ export const def: VehicleDef = {
   maxHp: 100,
   armor: { impact: 1, explosion: 1.3, bullet: 1 },
   impact: { threshold: 7, scale: 3.5 },
-  spawns: [[-6, -4, 0], [-3, -6, 0]],
+  spawns: [], // inutilisé : le pool est alloué par VEHICLE_POOL, les voitures de départ viennent des POI `spawn` de la ville
   create(api, x, y, z, yaw) {
     const body = api.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) })

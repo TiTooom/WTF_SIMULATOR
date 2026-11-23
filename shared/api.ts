@@ -1,5 +1,5 @@
-// CONTRAT D'EXTENSION DU SERVEUR : ce que les véhicules et les objets d'inventaire ont le droit d'appeler.
-// Le cœur (shared/sim.ts) implémente SimApi. Les véhicules (shared/vehicles/*) et les objets (shared/packs/*)
+// CONTRAT D'EXTENSION DU SERVEUR : ce que les véhicules (et plus tard les systèmes de jeu) ont le droit d'appeler.
+// Le cœur (shared/sim.ts) implémente SimApi. Les véhicules (shared/vehicles/*)
 // ne dépendent QUE de ce fichier, de protocol.ts, props.ts et constants.ts.
 import type * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
@@ -17,8 +17,6 @@ export const G = {
 } as const;
 export const grp = (member: number, filter: number = G.ALL) => ((member << 16) | filter) >>> 0;
 
-export interface Mods { speed: number; gravity: number; jump: number; scale: number } // 1 = normal
-
 export interface SimPlayer {
   id: string;
   name: string;
@@ -29,11 +27,7 @@ export interface SimPlayer {
   seat: number; // 0 = conducteur
   hp: number; // 0..100
   invulnUntil: number; // temps de simulation (ms)
-  item: string; // objet sélectionné
-  mods: Mods;
-  modsUntil: Record<keyof Mods, number>; // expiration (ms) de chaque modificateur
-  cooldowns: Record<string, number>; // id objet -> temps (ms) où il sera de nouveau utilisable
-  scratch: Record<string, unknown>; // mémoire libre pour les objets (saisie du pistolet à gravité, etc.)
+  scratch: Record<string, unknown>; // mémoire libre (recul d'explosion…)
 }
 
 export interface SimProp {
@@ -59,6 +53,45 @@ export interface SimVehicle {
   home: { x: number; z: number; yaw: number };
   /** Optionnel : jusqu'à ce temps (ms) les variations de vitesse ne comptent pas comme un choc (saisie du pistolet à gravité, téléportation…). */
   noImpactUntil?: number;
+  // ---- Pool (vague 1) : les véhicules sont créés une fois pour toutes, jamais retirés du monde Rapier ----
+  /** Incrémenté à chaque recyclage (releaseVehicle) : une `VRef` conservée entre deux ticks se revalide avec `resolveRef`. */
+  gen: number;
+  /** Vrai tant que le véhicule est rangé dans le pool (corps désactivé, hors du monde, invisible). */
+  pooled: boolean;
+  /** Verrouillé : on ne monte pas avec E (vol par mini-jeu, voir SimHooks.canEnter). */
+  locked: boolean;
+  /** Variante de couleur (index défini par la vue client). */
+  livery: number;
+  /** Pilote automatique : `input` est lu à la place de celui d'un conducteur (un conducteur humain a toujours priorité). */
+  ai: { input: Input } | null;
+  /** Id du dernier joueur ayant endommagé le véhicule (attribution des crimes). */
+  lastHitBy: string | null;
+}
+
+/** Référence à un véhicule gardée entre deux ticks : valide tant que `gen` correspond (voir SimApi.resolveRef). */
+export interface VRef { id: number; gen: number }
+
+/** Branchements de la logique de jeu (server/game.ts) sur le moteur : chacun est facultatif et protégé par try/catch dans le cœur. */
+export interface SimHooks {
+  /** Touche d'interaction : retourne true si un système a traité l'action (le cœur n'essaie alors pas de monter dans un véhicule). */
+  onInteract?(p: SimPlayer): boolean;
+  /** Montée dans un véhicule : false = refusé ; true = autorisé même s'il est verrouillé ; undefined = règle par défaut (refusé si verrouillé). */
+  canEnter?(p: SimPlayer, v: SimVehicle): boolean | undefined;
+  onEnter?(p: SimPlayer, v: SimVehicle): void;
+  onVehicleDestroyed?(v: SimVehicle, by: SimPlayer | null): void;
+  onPlayerKilled?(p: SimPlayer, by: SimPlayer | null, cause: string): void;
+  /** Un joueur à pied appuie sur le bouton de tir (front montant de m1). */
+  onShot?(p: SimPlayer, origin: Vec3, dir: Vec3): void;
+}
+
+export interface AcquireOpts {
+  y?: number;
+  livery?: number;
+  locked?: boolean;
+  /** Piloté par une IA (`v.ai = { input }`). */
+  ai?: boolean;
+  /** Réapparaît à son point d'origine quand il est détruit au lieu de retourner au pool (véhicules du monde de départ). */
+  keep?: boolean;
 }
 
 export type HitKind = 'static' | 'prop' | 'vehicle' | 'player';
@@ -118,15 +151,23 @@ export interface SimApi {
   fx(ev: FxEvent): void;
   /** Message système dans le chat de tout le monde. */
   announce(text: string): void;
-  /** Applique un modificateur temporaire (vitesse, gravité, saut, taille) à un joueur. */
-  applyMod(p: SimPlayer, mod: Partial<Mods>, seconds: number): void;
-  setGravity(y: number): void; // gravité globale (-9.81 par défaut)
   respawnPlayer(p: SimPlayer): void;
 
   forwardSpeed(body: RAPIER.RigidBody): number;
   quatOf(body: RAPIER.RigidBody): THREE.Quaternion;
   /** Conduite arcade commune (poussée, adhérence latérale, frottement de roulement, lacet). */
   driveArcade(body: RAPIER.RigidBody, mass: number, accel: number, throttle: number, turn: number): void;
+  /** Prend un véhicule libre du pool pour ce type et le place ; null si le pool de ce type est vide. Jamais de création de corps. */
+  acquireVehicle(type: string, x: number, z: number, yaw: number, opts?: AcquireOpts): SimVehicle | null;
+  /** Range le véhicule dans le pool (éjecte les occupants, désactive le corps, gen+1). Idempotent. */
+  releaseVehicle(v: SimVehicle): void;
+  refOf(v: SimVehicle): VRef;
+  /** Le véhicule si la référence est encore valable (même `gen`, ni rangé ni détruit, corps valide), sinon null. */
+  resolveRef(r: VRef | null | undefined): SimVehicle | null;
+  /** Position sûre d'un joueur (véhicule ou corps ; dernière position connue si le corps est invalide). */
+  playerPos(p: SimPlayer): Vec3;
+  /** Branchements du jeu sur le moteur. */
+  hooks: SimHooks;
   /** Collider à friction nulle (sinon le frottement du châssis bloque le véhicule). */
   sliding(desc: RAPIER.ColliderDesc): RAPIER.ColliderDesc;
 }
@@ -176,54 +217,4 @@ export interface VehicleDef {
   /** Positions de départ (x, z, lacet en radians) : une instance du véhicule par entrée. */
   spawns: Array<[number, number, number]>;
   create(api: SimApi, x: number, y: number, z: number, yaw: number): VehicleBehavior;
-}
-
-// ---------- Objets d'inventaire ----------
-
-export type ItemCategory = 'build' | 'weapon' | 'wtf' | 'move' | 'tool';
-
-export interface ItemDef {
-  id: string; // snake_case ASCII, unique
-  name: string; // nom français
-  emoji: string;
-  cat: ItemCategory;
-  desc: string; // une phrase : ce que ça fait et comment l'utiliser
-  cooldown: number; // secondes entre deux utilisations (0 = aucune limite)
-  hold?: boolean; // true : utilisable en continu tant que le bouton est maintenu (sinon une fois par clic)
-}
-
-export interface UseCtx {
-  api: SimApi;
-  player: SimPlayer;
-  origin: THREE.Vector3; // caméra du joueur
-  dir: THREE.Vector3; // visée (unitaire)
-  /** Front montant du bouton principal / secondaire ce tick. */
-  pressed1: boolean;
-  pressed2: boolean;
-  /** Boutons maintenus. */
-  held1: boolean;
-  held2: boolean;
-  wheel: number; // ticks de molette depuis le dernier tick
-  dt: number;
-}
-
-export interface ItemHandler {
-  /** Clic : appelé selon cooldown/hold. */
-  use?(ctx: UseCtx): void;
-  /** Chaque tick tant que l'objet est en main (saisie continue, visée laser…). */
-  tick?(ctx: UseCtx): void;
-  /** Le joueur range l'objet ou change d'objet (relâcher une saisie, etc.). */
-  holster?(player: SimPlayer, api: SimApi): void;
-}
-
-/** Un paquet de contenu : objets + props qu'ils créent + comportements. Un fichier shared/packs/<nom>.ts par paquet. */
-/** Comportement permanent d'un prop (roue qui tourne, propulseur, mine, trampoline…), appelé à chaque pas physique. */
-export type PropTick = (prop: SimProp, api: SimApi, dt: number) => void;
-
-export interface Pack {
-  items: ItemDef[];
-  props: PropKind[];
-  handlers: Record<string, ItemHandler>;
-  /** Comportements permanents, indexés par PropKind.behavior. */
-  propTicks?: Record<string, PropTick>;
 }

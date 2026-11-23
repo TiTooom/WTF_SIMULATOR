@@ -1,4 +1,4 @@
-# WTF SIMULATOR
+# Grand Theft Auto : Edition UniLaSalle
 
 Monde ouvert 3D en vue à la première personne, style cartoon léger. Tu conduis des véhicules (voiture, pelleteuse avec godet, d'autres à venir) et tu joues **entre amis, sur le même Wi-Fi**, avec 12 véhicules (qui explosent), 33 objets WTF, un pistolet à gravité façon Garry's Mod, un chat, du son et des touches que tu règles comme tu veux.
 
@@ -7,8 +7,8 @@ C'est une vraie application : tu la lances, un menu s'ouvre, tu choisis.
 ## Jouer
 
 1. Télécharge ta version dans l'onglet [*Releases*](../../releases) du dépôt :
-   - **Windows** : `WTF-SIMULATOR-Setup-….exe`. Double-clique : l'installation est automatique (sans question) et le jeu se lance. Ensuite, un raccourci *WTF SIMULATOR* apparaît dans le menu Démarrer.
-   - **macOS** : `WTF-SIMULATOR-…-mac-arm64.dmg` pour les Mac Apple Silicon (M1 et suivants) ou `…-mac-x64.dmg` pour les Mac Intel. Ouvre le `.dmg` et glisse *WTF SIMULATOR* dans *Applications*.
+   - **Windows** : `GTA-UniLaSalle-Setup-….exe`. Double-clique : l'installation est automatique (sans question) et le jeu se lance. Ensuite, un raccourci *GTA Edition UniLaSalle* apparaît dans le menu Démarrer.
+   - **macOS** : `GTA-UniLaSalle-…-mac-arm64.dmg` pour les Mac Apple Silicon (M1 et suivants) ou `…-mac-x64.dmg` pour les Mac Intel. Ouvre le `.dmg` et glisse *GTA Edition UniLaSalle* dans *Applications*.
 2. Lance-le, tape ton pseudo, puis :
    - **Jouer en solo** : ta partie, sur ton ordinateur.
    - **Héberger une partie** : ton ordinateur devient le serveur. Tes amis sur le même Wi-Fi te voient apparaître dans leur menu.
@@ -19,9 +19,9 @@ Au premier lancement en tant qu'hôte, le pare-feu peut demander une autorisatio
 
 L'application n'est pas signée (une signature officielle est payante), donc le système affiche un avertissement la première fois :
 - **Windows** (« SmartScreen ») : *Informations complémentaires → Exécuter quand même*.
-- **macOS** (« WTF SIMULATOR ne peut pas être ouvert… » ou « est endommagé ») : dans *Applications*, **clic droit sur WTF SIMULATOR → Ouvrir → Ouvrir**. Si le message « endommagé » persiste, ouvre le Terminal et tape une seule fois :
+- **macOS** (« GTA Edition UniLaSalle ne peut pas être ouvert… » ou « est endommagé ») : dans *Applications*, **clic droit sur GTA Edition UniLaSalle → Ouvrir → Ouvrir**. Si le message « endommagé » persiste, ouvre le Terminal et tape une seule fois :
   ```
-  xattr -cr "/Applications/WTF SIMULATOR.app"
+  xattr -cr "/Applications/GTA Edition UniLaSalle.app"
   ```
   Puis relance l'application normalement.
 
@@ -49,7 +49,7 @@ Tu n'as à télécharger le `.exe` **qu'une seule fois**. À chaque lancement (p
 Sur macOS, la mise à jour automatique n'existe pas (elle exige une signature Apple payante) : il faut retélécharger le `.dmg`.
 
 ### Sauvegarde
-La partie est stockée **chez l'hôte**, dans `%APPDATA%\WTF SIMULATOR\saves\` sous Windows ou `~/Library/Application Support/WTF SIMULATOR/saves/` sous macOS (`multi.json` pour l'hébergement, `solo.json` en solo) : caisses, véhicules et dernière position de chaque pseudo. Elle est enregistrée toutes les 30 s et quand l'hôte quitte. Supprime le fichier pour repartir de zéro. Tes réglages (touches, volumes) sont dans `settings.json`, au même endroit. Les sauvegardes de l'ancien nom (« Jeu 3D ») sont reprises automatiquement.
+La partie est stockée **chez l'hôte**, dans `%APPDATA%\GTA Edition UniLaSalle\saves\` sous Windows ou `~/Library/Application Support/GTA Edition UniLaSalle/saves/` sous macOS (`multi.json` pour l'hébergement, `solo.json` en solo) : caisses, véhicules et dernière position de chaque pseudo. Elle est enregistrée toutes les 30 s et quand l'hôte quitte. Supprime le fichier pour repartir de zéro. Tes réglages (touches, volumes) sont dans `settings.json`, au même endroit. Les sauvegardes de l'ancien nom (« Jeu 3D ») sont reprises automatiquement.
 
 > L'hôte doit garder le jeu ouvert : c'est lui le serveur. S'il quitte, les autres reviennent au menu.
 

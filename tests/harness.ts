@@ -1,9 +1,9 @@
 // Harnais physique sans rendu : pilote un véhicule avec des entrées scriptées et imprime sa télémétrie.
-//   npx tsx tests/harness.ts <type> [avance|virage|tir|crash] [secondes]
+//   npx tsx tests/harness.ts <type> [avance|virage|tir|crash] [secondes]  (vague 1 : type = citadine)
 // Utilisable aussi comme bibliothèque : driveScenario(typeId, inputFn, seconds).
 import { Sim } from '../shared/sim';
 import { STEP } from '../shared/constants';
-import { VEHICLE_BY_TYPE, VEHICLES } from '../shared/vehicles';
+import { VEHICLES } from '../shared/vehicles';
 import type { FxEvent, Input } from '../shared/protocol';
 import type { SimPlayer, SimVehicle } from '../shared/api';
 
@@ -25,9 +25,7 @@ export async function driveScenario(typeId: string, inputFn: InputFn, seconds: n
   sim.onAnnounce = (t) => messages.push(t);
   sim.addPlayer('p1', 'Testeur');
   const player = sim.players.get('p1')!;
-  let vehicle = sim.vehicles.find((v) => v.def.type === typeId && !v.dead) as SimVehicle | undefined;
-  const def = VEHICLE_BY_TYPE.get(typeId);
-  if (!vehicle && def) vehicle = sim.spawnExtraVehicle(def, 0, -30, 0) ?? undefined;
+  let vehicle = sim.vehicles.find((v) => v.def.type === typeId && !v.dead && !v.pooled) as SimVehicle | undefined;
   if (!vehicle) {
     const err = `Type de véhicule inconnu ou pas encore écrit : « ${typeId} ». Disponibles : ${VEHICLES.map((d) => d.type).join(', ')}`;
     return { sim, player, vehicle: undefined as unknown as SimVehicle, rows: [], fx: [], error: err };
@@ -66,12 +64,12 @@ export async function driveScenario(typeId: string, inputFn: InputFn, seconds: n
   return { sim, player, vehicle, rows, fx: allFx };
 }
 
-/** Scénarios génériques (aéronefs : th = gaz, f > 0 = piquer). */
+/** Scénarios génériques. */
 export const SCENARIOS: Record<string, { seconds: number; input: InputFn; help: string }> = {
-  avance: { seconds: 8, help: 'tout droit, plein gaz', input: () => ({ f: 1, th: 1 }) },
-  virage: { seconds: 10, help: 'avance en braquant à droite puis à gauche', input: (t) => ({ f: 1, th: 1, s: t < 5 ? 1 : -1, yw: t < 5 ? 1 : -1 }) },
-  tir: { seconds: 8, help: 'avance doucement en tirant (m1) et en klaxonnant', input: (t) => ({ f: 0.4, th: 0.5, m1: Math.floor(t * 2) % 2, m2: t > 4 ? 1 : 0, hn: t > 2 && t < 2.2 ? 1 : 0 }) },
-  crash: { seconds: 12, help: 'fonce tout droit puis pique : doit abîmer ou détruire', input: (t) => ({ f: t < 6 ? 1 : 1, th: 1, jump: 0 }) },
+  avance: { seconds: 8, help: 'tout droit, plein gaz', input: () => ({ f: 1 }) },
+  virage: { seconds: 10, help: 'avance en braquant à droite puis à gauche', input: (t) => ({ f: 1, s: t < 5 ? 1 : -1 }) },
+  tir: { seconds: 8, help: 'avance doucement en tirant (m1) et en klaxonnant', input: (t) => ({ f: 0.4, m1: Math.floor(t * 2) % 2, m2: t > 4 ? 1 : 0, hn: t > 2 && t < 2.2 ? 1 : 0 }) },
+  crash: { seconds: 12, help: 'fonce tout droit : doit abîmer ou détruire contre un obstacle', input: () => ({ f: 1 }) },
 };
 
 async function main() {

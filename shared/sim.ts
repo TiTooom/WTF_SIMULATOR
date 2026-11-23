@@ -1,16 +1,16 @@
 // Simulation physique autoritaire (tourne sur le serveur, sans aucun rendu). Implémente SimApi (voir api.ts).
-// Contenu : monde, props unifiés, véhicules (registre), joueurs, objets d'inventaire, projectiles, explosions, dégâts, sauvegarde v2.
+// Contenu : ville (colliders), props, pool de véhicules (registre), joueurs, projectiles, explosions, dégâts, sauvegarde v3.
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { GROUND, PROJECTILE_KINDS, SPAWNS, STEP, crateLayout, treeLayout } from './constants';
+import { GROUND, PROJECTILE_KINDS, STEP, VEHICLE_POOL } from './constants';
+import { CITY, getCity } from './city/layout';
 import { NO_INPUT, type FxEvent, type Input, type PlayerSnap, type Snapshot, type Vec3, type VehicleSnap } from './protocol';
 import {
-  G, grp, type DamageKind, type Hit, type Mods, type ProjectileSpec, type SimApi, type SimPlayer, type SimProp, type SimVehicle,
-  type StepCtx, type VehicleDef,
+  G, grp, type AcquireOpts, type DamageKind, type Hit, type ProjectileSpec, type SimApi, type SimHooks, type SimPlayer, type SimProp,
+  type SimVehicle, type StepCtx, type VehicleDef, type VRef,
 } from './api';
 import { wedgeVertices, type PropKind } from './props';
-import { buildWorld, STATICS, type WorldBuilder } from './world';
-import { HANDLERS, ITEM_BY_ID, PROP_INDEX, PROP_TICKS, propKindById } from './registry';
+import { PROP_INDEX, propKindById } from './registry';
 import { VEHICLES } from './vehicles';
 import { bodyOk, isPoison } from './guard';
 
@@ -22,12 +22,13 @@ const MAX_PROPS_PER_PLAYER = 40;
 const MAX_PROPS = 400;
 const MAX_PROJECTILES = 300;
 const MAX_FX = 256;
-const MAX_EXTRA_VEHICLES = 12;
 const MAX_SAVED_PLAYERS = 200;
 const MIN_SESSION_MS = 30_000; // un joueur resté moins longtemps n'est pas mémorisé
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const PARK: Vec3 = [0, -200, 0]; // où l'on range un véhicule du pool (corps désactivé, jamais lu ni simulé)
 const VEH_HALF: Vec3 = [0.8, 0.5, 1.2]; // boîte (demi-dimensions, volontairement étroite) du test anti-enclavement des véhicules
 const WALK = 6;
+const RUN = 10;
 const JUMP = 6;
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
@@ -43,17 +44,18 @@ const pick = <T>(a: T[]): T => a[Math.floor(Math.random() * a.length)];
 interface VX extends SimVehicle {
   pv: THREE.Vector3; // vitesse au pas précédent (détection des chocs)
   grace: number; // pas de dégâts de choc avant ce temps (ms)
-  extra: boolean; // créé par /spawn (pas un véhicule du monde)
   fails: number;
   disabled: boolean;
-  owner: string; // joueur qui l'a invoqué avec /spawn ('' sinon)
   pose: { p: Vec3; q: [number, number, number, number] };
+  keep: boolean; // véhicule du monde de départ : réapparaît à son point d'origine quand il est détruit
 }
 interface PX extends SimProp { base: boolean; sentAsleep?: boolean; sent?: number[] /* dernier état envoyé (delta réseau) */ }
 interface PI { // état interne d'un joueur
-  col: RAPIER.Collider; sc: number; grav: number; deadAt: number; start: Vec3; runAt: number;
+  col: RAPIER.Collider; deadAt: number; start: Vec3; runAt: number;
   last: Vec3; // dernière position connue (lue sans toucher Rapier : sert à reconstruire un monde empoisonné)
   joinedAt: number;
+  ws: number; // étoiles (publié dans PlayerSnap.ws)
+  an: number; // animation (publié dans PlayerSnap.an)
 }
 interface Proj {
   id: number; kind: number; pos: THREE.Vector3; vel: THREE.Vector3; owner: SimPlayer | null; gravity: number; life: number;
@@ -62,12 +64,11 @@ interface Proj {
 }
 type Owner = { prop?: PX; vehicle?: VX; player?: SimPlayer };
 
+/** Sauvegarde v3 : positions des joueurs + état de chaque système de jeu (rempli par server/game.ts). Le pool de véhicules n'est PAS sauvegardé. */
 export interface SaveData {
-  version: 2;
-  props: { k: string; p: number[]; q: number[]; f: number }[];
-  /** Véhicules du monde puis véhicules créés par /spawn (extra). Restaurés par type + rang (n-ième véhicule de ce type). */
-  vehicles: { type: string; p: number[]; q: number[]; hp: number; st?: number[]; extra?: boolean; i?: number }[];
+  version: 3;
   players: Record<string, [number, number, number]>;
+  systems: Record<string, unknown>;
 }
 
 let rapierReady: Promise<void> | null = null;
@@ -95,6 +96,8 @@ export class Sim implements SimApi {
   /** Gouvernance (multi) : id du chef de la bande. Vide = tout est permis (tests, solo). */
   hostId = '';
   soloMode = false;
+  /** Branchements du jeu (server/game.ts) : appelés sous try/catch, jamais obligatoires. */
+  hooks: SimHooks = {};
   /** Branché par le serveur : annonce affichée dans le chat de tout le monde. */
   onAnnounce: ((text: string) => void) | null = null;
   log: (line: string) => void = (l) => console.warn(l);
@@ -111,9 +114,6 @@ export class Sim implements SimApi {
   private nextPropId = 1;
   private nextProjId = 1;
   private spawnCount = 0;
-  private itemFails = new Map<string, number>();
-  private badItems = new Set<string>();
-  private gravityY = -9.81;
   private removedIds: number[] = []; // props retirés depuis le dernier snapshot delta (déjà connus des clients)
   private vSent: string[] = []; // dernier état envoyé de chaque véhicule (delta réseau)
   private pSent = new Map<string, string>();
@@ -122,43 +122,36 @@ export class Sim implements SimApi {
     rapierReady ??= RAPIER.init();
     await rapierReady;
     const sim = new Sim();
-    await sim.loadWorldExtension();
     return sim;
   }
 
-  /** Décor : `shared/world.ts` (STATICS → colliders fixes, buildWorld → props de décor). Import statique (compatible avec le paquet esbuild). */
-  private async loadWorldExtension() {
-    try {
-      for (const s of STATICS) {
-        if (s.collide === false) continue;
-        const r = s.rotY ?? 0;
-        const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), r);
-        let desc: RAPIER.ColliderDesc | null = null;
-        if (s.shape === 'box') desc = RAPIER.ColliderDesc.cuboid(s.size[0] / 2, s.size[1] / 2, s.size[2] / 2);
-        else if (s.shape === 'cylinder') desc = RAPIER.ColliderDesc.cylinder(s.size[1] / 2, s.size[0] / 2);
-        else if (s.shape === 'sphere') desc = RAPIER.ColliderDesc.ball(s.size[0] / 2);
-        else desc = RAPIER.ColliderDesc.convexHull(new Float32Array(wedgeVertices(s.size[0], s.size[1], s.size[2])));
-        if (!desc) continue;
-        this.world.createCollider(
-          desc.setTranslation(s.pos[0], s.pos[1], s.pos[2]).setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }).setFriction(0.9).setCollisionGroups(grp(G.WORLD)),
-        );
-      }
-      buildWorld(this as unknown as WorldBuilder);
-    } catch (e) {
-      this.log(`[sim] décor ignoré : ${String((e as Error)?.message ?? e)}`);
-    }
+  private constructor() {
+    this.buildCityColliders();
+    this.buildPool();
+    // Voitures du monde de départ : prises dans le pool, aux points d'apparition « car » de la ville (réapparaissent si détruites)
+    const carSpawns = getCity().pois.filter((q) => q.kind === 'spawn' && q.tag === 'car');
+    const startDef = VEHICLES[0];
+    if (startDef) for (const q of carSpawns.slice(0, 2)) this.acquireVehicle(startDef.type, q.x, q.z, q.yaw, { keep: true });
   }
 
-  private constructor() {
+  /** Sol, bâtiments (cuboïdes fixes) et 4 murs de bordure : la ville de shared/city. Aucun de ces corps ne sera jamais retiré. */
+  private buildCityColliders() {
     const w = this.world;
-    this.groundCol = w.createCollider(RAPIER.ColliderDesc.cuboid(GROUND, 0.5, GROUND).setTranslation(0, -0.5, 0).setFriction(1).setCollisionGroups(grp(G.WORLD)));
-    for (const t of treeLayout())
-      w.createCollider(RAPIER.ColliderDesc.cylinder(1.5 * t.s, 0.4 * t.s).setTranslation(t.x, 1.5 * t.s, t.z).setCollisionGroups(grp(G.WORLD)));
-    for (const c of crateLayout()) {
-      const p = this.createProp(c.kind, new THREE.Vector3(c.x, c.y, c.z), undefined, undefined, '');
-      if (p) p.base = true;
+    const B = CITY.BORDER;
+    this.groundCol = w.createCollider(RAPIER.ColliderDesc.cuboid(B + 2, 0.5, B + 2).setTranslation(0, -0.5, 0).setFriction(1).setCollisionGroups(grp(G.WORLD)));
+    for (const b of getCity().buildings)
+      w.createCollider(RAPIER.ColliderDesc.cuboid(b.w / 2, b.h / 2, b.d / 2).setTranslation(b.x, b.h / 2, b.z).setFriction(0.9).setCollisionGroups(grp(G.WORLD)));
+    const wallH = 15, t = 1;
+    for (const [x, z, hx, hz] of [[0, -(B + t), B + 2 * t, t], [0, B + t, B + 2 * t, t], [-(B + t), 0, t, B], [B + t, 0, t, B]] as const)
+      w.createCollider(RAPIER.ColliderDesc.cuboid(hx, wallH, hz).setTranslation(x, wallH, z).setFriction(0.2).setCollisionGroups(grp(G.WORLD)));
+  }
+
+  /** Crée une fois pour toutes les véhicules du pool (types définis dans VEHICLES), rangés (désactivés, hors du monde). */
+  private buildPool() {
+    for (const def of VEHICLES) {
+      const n = (VEHICLE_POOL as Record<string, number>)[def.type] ?? 0;
+      for (let k = 0; k < n; k++) this.makePooled(def, k);
     }
-    for (const def of VEHICLES) for (const [x, z, yaw] of def.spawns) this.makeVehicle(def, x, 1.2, z, yaw, false);
   }
 
   // =====================================================================================================================
@@ -171,12 +164,6 @@ export class Sim implements SimApi {
   clearFx() { this.fxQueue.length = 0; this.removedIds.length = 0; }
   announce(text: string) {
     try { this.onAnnounce?.(text); } catch { /* le chat ne doit jamais casser la simulation */ }
-  }
-  setGravity(y: number) {
-    this.gravityY = clamp(fin(y, -9.81), -40, 40);
-    this.world.gravity = { x: 0, y: this.gravityY, z: 0 };
-    for (const p of this.props.values()) p.body.wakeUp();
-    for (const v of this.vehicles) if (!v.dead && v.behavior.body) v.behavior.body.wakeUp();
   }
   quatOf(b: RAPIER.RigidBody) {
     const r = b.rotation();
@@ -236,6 +223,9 @@ export class Sim implements SimApi {
     }
     return out;
   }
+
+  /** Véhicule en jeu : ni rangé dans le pool, ni détruit, avec un corps. */
+  private live(v: SimVehicle): boolean { return !v.pooled && !v.dead && !!v.behavior.body; }
 
   isHost(p: SimPlayer) { return this.soloMode || !this.hostId || this.hostId === p.id; }
 
@@ -350,7 +340,7 @@ export class Sim implements SimApi {
       let best: VX | null = null;
       let bd = 12;
       for (const v of this.vehicles) {
-        if (v.dead || !v.behavior.body) continue;
+        if (!this.live(v)) continue;
         const vt = v.behavior.body.translation();
         const d = Math.hypot(vt.x - t.x, vt.y - t.y, vt.z - t.z);
         if (d < bd) { bd = d; best = v; }
@@ -394,7 +384,7 @@ export class Sim implements SimApi {
       out.push({ kind, point, normal, dist: d, body, ...extra });
     };
     for (const p of this.props.values()) add('prop', p.body, { prop: p });
-    for (const v of this.vehicles) if (!v.dead && v.behavior.body) add('vehicle', v.behavior.body, { vehicle: v });
+    for (const v of this.vehicles) if (this.live(v)) add('vehicle', v.behavior.body, { vehicle: v });
     for (const p of this.players.values()) if (!p.vehicle && !this.isDead(p)) add('player', p.body, { player: p });
     return out.sort((a, b) => a.dist - b.dist);
   }
@@ -430,7 +420,7 @@ export class Sim implements SimApi {
       if (damage > 0) this.damageProp(p, damage * Math.max(f, 0.2), by);
     }
     for (const v of this.vehicles) {
-      if (v.dead || !v.behavior.body) continue;
+      if (!this.live(v)) continue;
       const t = v.behavior.body.translation();
       const d = Math.max(0, Math.hypot(t.x - pos.x, t.y - pos.y, t.z - pos.z) - 1.5);
       if (d > radius) continue;
@@ -463,7 +453,8 @@ export class Sim implements SimApi {
 
   damageVehicle(v0: SimVehicle, amount: number, kind: DamageKind, by: SimPlayer | null = null) {
     const v = v0 as VX;
-    if (v.dead || !(amount > 0)) return;
+    if (v.dead || v.pooled || !(amount > 0)) return;
+    if (by) v.lastHitBy = by.id;
     const mult = v.def.armor[kind] ?? 1;
     v.hp -= amount * mult;
     if (v.hp <= 0) this.destroyVehicle(v, by);
@@ -482,7 +473,6 @@ export class Sim implements SimApi {
   private killPlayer(p: SimPlayer, by: SimPlayer | null, cause: string) {
     const px = this.pinfo.get(p.id);
     if (!px || px.deadAt > 0) return;
-    this.holster(p);
     if (p.vehicle) this.leaveVehicle(p, false);
     p.hp = 0;
     px.deadAt = Math.max(1, this.time);
@@ -496,33 +486,30 @@ export class Sim implements SimApi {
     const key = (c === 'void' ? 'void' : alone ? `${c}Alone` : c) as keyof typeof DEATH;
     const list = (DEATH[key] ?? DEATH.generic) as readonly string[];
     this.announce(pick([...list]).replace('{n}', p.name).replace('{k}', by?.name ?? ''));
+    this.callHook('onPlayerKilled', p, by, cause);
+  }
+
+  /** Appelle un crochet du jeu sans jamais laisser une exception remonter dans la simulation. */
+  private callHook<K extends keyof SimHooks>(k: K, ...args: Parameters<NonNullable<SimHooks[K]>>): ReturnType<NonNullable<SimHooks[K]>> | undefined {
+    const fn = this.hooks[k] as ((...a: unknown[]) => unknown) | undefined;
+    if (!fn) return undefined;
+    try { return fn(...args) as ReturnType<NonNullable<SimHooks[K]>>; } catch (e) {
+      if (!this.noteError(e)) this.log(`[sim] crochet ${k} : ${(e as Error)?.stack ?? e}`);
+      return undefined;
+    }
   }
 
   respawnPlayer(p: SimPlayer) {
     const px = this.pinfo.get(p.id);
     if (!px) return;
-    this.holster(p);
     if (p.vehicle) this.leaveVehicle(p, false);
     p.hp = PLAYER_HP;
-    p.mods = { speed: 1, gravity: 1, jump: 1, scale: 1 };
-    p.modsUntil = { speed: 0, gravity: 0, jump: 0, scale: 0 };
     p.scratch = {};
     px.deadAt = 0;
-    this.ensureBody(p, px);
     p.body.setEnabled(true);
     p.body.setTranslation({ x: px.start[0], y: px.start[1], z: px.start[2] }, true);
     p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     p.invulnUntil = this.time + 3000;
-  }
-
-  applyMod(p: SimPlayer, mod: Partial<Mods>, seconds: number) {
-    const lim: Record<keyof Mods, [number, number]> = { speed: [0, 5], gravity: [-3, 5], jump: [0, 5], scale: [0.3, 4] };
-    for (const k of Object.keys(mod) as (keyof Mods)[]) {
-      const v = mod[k];
-      if (!lim[k] || typeof v !== 'number' || !Number.isFinite(v)) continue;
-      p.mods[k] = clamp(v, lim[k][0], lim[k][1]);
-      p.modsUntil[k] = this.time + Math.max(0, fin(seconds)) * 1000;
-    }
   }
 
   // =====================================================================================================================
@@ -607,8 +594,11 @@ export class Sim implements SimApi {
     if (this.players.has(id)) return;
     let saved: Vec3 | undefined = at ? vec3(at, [0, 0, 0]) : this.savedPlayers.get(name);
     if (!at && [...this.players.values()].some((q) => q.name === name)) saved = undefined; // pseudo déjà pris : pas de position partagée
-    const a = (this.spawnCount++ % 8) * (Math.PI / 4);
-    const start: Vec3 = [SPAWNS.player[0] + Math.cos(a) * 2.5, SPAWNS.player[1], SPAWNS.player[2] + Math.sin(a) * 2.5];
+    const spawns = getCity().pois.filter((q) => q.kind === 'spawn' && q.tag === 'player'); // rues dégagées, un point différent par joueur
+    const sp = spawns[this.spawnCount % spawns.length];
+    const wrap = Math.floor(this.spawnCount / spawns.length);
+    this.spawnCount++;
+    const start: Vec3 = [sp.x + (wrap % 2 ? 1.5 : -1.5) * Math.min(wrap, 1), 1.5, sp.z + wrap * 1.5];
     let [x, y, z] = saved ?? start;
     if (saved) {
       y += 0.5;
@@ -618,44 +608,24 @@ export class Sim implements SimApi {
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).lockRotations().setLinearDamping(0),
     );
-    const col = this.world.createCollider(this.playerCollider(1), body);
+    const col = this.world.createCollider(this.playerCollider(), body);
     const p: SimPlayer = {
       id, name, body, input: { ...NO_INPUT }, prevInput: { ...NO_INPUT }, vehicle: null, seat: 0, hp: PLAYER_HP,
-      invulnUntil: this.time + 2000, item: '', mods: { speed: 1, gravity: 1, jump: 1, scale: 1 },
-      modsUntil: { speed: 0, gravity: 0, jump: 0, scale: 0 }, cooldowns: {}, scratch: {},
+      invulnUntil: this.time + 2000, scratch: {},
     };
     this.players.set(id, p);
-    this.pinfo.set(id, { col, sc: 1, grav: 1, deadAt: 0, start, runAt: 0, last: [x, y, z], joinedAt: this.time });
+    this.pinfo.set(id, { col, deadAt: 0, start, runAt: 0, last: [x, y, z], joinedAt: this.time, ws: 0, an: 0 });
     this.owners.set(body.handle, { player: p });
   }
 
-  private playerCollider(sc: number) {
-    return RAPIER.ColliderDesc.capsule(0.5 * sc, 0.35 * sc).setFriction(0).setMass(40 * sc ** 3).setCollisionGroups(grp(G.PLAYER));
-  }
-
-  /** Met à jour la taille (collider) et la gravité propres du joueur selon ses modificateurs. */
-  private ensureBody(p: SimPlayer, px: PI) {
-    const sc = p.mods.scale;
-    if (Math.abs(sc - px.sc) > 1e-3) {
-      this.world.removeCollider(px.col, true);
-      px.col = this.world.createCollider(this.playerCollider(sc), p.body);
-      if (sc > px.sc) {
-        const t = p.body.translation();
-        p.body.setTranslation({ x: t.x, y: t.y + (sc - px.sc) * 0.85, z: t.z }, true);
-      }
-      px.sc = sc;
-    }
-    if (Math.abs(p.mods.gravity - px.grav) > 1e-3) {
-      p.body.setGravityScale(p.mods.gravity, true);
-      px.grav = p.mods.gravity;
-    }
+  private playerCollider() {
+    return RAPIER.ColliderDesc.capsule(0.5, 0.35).setFriction(0).setMass(40).setCollisionGroups(grp(G.PLAYER));
   }
 
   removePlayer(id: string) {
     const p = this.players.get(id);
     if (!p) return;
     this.rememberPlayer(p);
-    this.holster(p);
     if (p.vehicle) this.leaveVehicle(p, true);
     this.owners.delete(p.body.handle);
     this.players.delete(id);
@@ -668,7 +638,7 @@ export class Sim implements SimApi {
     const px = this.pinfo.get(p.id);
     if (!px || this.time - px.joinedAt < MIN_SESSION_MS) return; // passage éclair : on ne pollue pas la sauvegarde
     const vb = p.vehicle?.behavior.body;
-    const b = vb && !p.vehicle!.dead && bodyOk(vb) ? vb : p.body;
+    const b = vb && this.live(p.vehicle!) && bodyOk(vb) ? vb : p.body;
     if (!bodyOk(b)) return;
     const t = b.translation();
     if (![t.x, t.y, t.z].every(Number.isFinite)) return;
@@ -687,23 +657,20 @@ export class Sim implements SimApi {
     const ao = vec3(raw.ao, [0, 0, 0]);
     if (ao[0] || ao[1] || ao[2]) {
       const veh = p.vehicle as VX | null;
-      const vb = veh && !veh.dead ? veh.behavior.body : null;
+      const vb = veh && this.live(veh) ? veh.behavior.body : null;
       const inVeh = bodyOk(vb);
       const rb = inVeh ? vb! : p.body;
       if (bodyOk(rb)) {
         const t = rb.translation();
-        const ref = new THREE.Vector3(t.x, t.y + (inVeh ? 0 : 0.7 * p.mods.scale), t.z);
+        const ref = new THREE.Vector3(t.x, t.y + (inVeh ? 0 : 0.7), t.z);
         const d = new THREE.Vector3(ao[0], ao[1], ao[2]).sub(ref);
         const max = inVeh ? 40 : 12;
         if (d.length() > max) { d.setLength(max).add(ref); ao[0] = d.x; ao[1] = d.y; ao[2] = d.z; }
       } else { ao[0] = ao[1] = ao[2] = 0; }
     }
     p.input = {
-      f: clamp1(raw.f), s: clamp1(raw.s), sw: clamp1(raw.sw), bm: clamp1(raw.bm), st: clamp1(raw.st), bk: clamp1(raw.bk),
-      jump: raw.jump ? 1 : 0, yaw: fin(raw.yaw), yw: clamp1(raw.yw), th: clamp1(raw.th), hn: raw.hn ? 1 : 0,
-      m1: raw.m1 ? 1 : 0, m2: raw.m2 ? 1 : 0, ao, ad: [ad.x, ad.y, ad.z],
-      item: typeof raw.item === 'string' && raw.item.length <= 40 ? raw.item : '',
-      wheel: clamp(p.input.wheel + clamp(fin(raw.wheel), -20, 20), -50, 50), // cumul jusqu'à lecture par le tick
+      f: clamp1(raw.f), s: clamp1(raw.s), jump: raw.jump ? 1 : 0, run: raw.run ? 1 : 0, yaw: fin(raw.yaw), hn: raw.hn ? 1 : 0,
+      act: raw.act ? 1 : 0, m1: raw.m1 ? 1 : 0, m2: raw.m2 ? 1 : 0, ao, ad: [ad.x, ad.y, ad.z],
     };
   }
 
@@ -715,16 +682,17 @@ export class Sim implements SimApi {
   }
 
   // ---------- Véhicules : montée / descente ----------
-  /** Monter dans le véhicule le plus proche (conducteur sinon passager), ou descendre. */
+  /** Monter dans le véhicule le plus proche (conducteur sinon passager), ou descendre. Un système de jeu peut préempter l'action (SimHooks.onInteract). */
   interact(id: string) {
     const p = this.players.get(id);
     if (!p || this.isDead(p)) return;
     if (p.vehicle) { this.leaveVehicle(p, true); return; }
+    if (this.callHook('onInteract', p)) return;
     const t = p.body.translation();
     let best: VX | null = null;
     let bd = Infinity;
     for (const v of this.vehicles) {
-      if (v.dead || !v.behavior.body || this.freeSeat(v) < 0) continue;
+      if (!this.live(v) || v.locked || this.freeSeat(v) < 0) continue;
       const vt = v.behavior.body.translation();
       const d = Math.hypot(t.x - vt.x, t.z - vt.z);
       if (d < v.def.enterRadius && Math.abs(t.y - vt.y) < v.def.enterRadius && d < bd) { best = v; bd = d; }
@@ -738,19 +706,24 @@ export class Sim implements SimApi {
     return -1;
   }
 
-  enterVehicle(p: SimPlayer, v0: SimVehicle, seat?: number): boolean {
+  /** `force` : ignore verrouillage et refus du jeu (commandes de debug, scènes scénarisées). */
+  enterVehicle(p: SimPlayer, v0: SimVehicle, seat?: number, force = false): boolean {
     const v = v0 as VX;
-    if (this.isDead(p) || v.dead || !v.behavior.body) return false;
+    if (this.isDead(p) || !this.live(v)) return false;
     if (p.vehicle === v) return true;
+    if (!force) {
+      const c = this.callHook('canEnter', p, v);
+      if (c === false || (v.locked && c !== true)) return false;
+    }
     const s = seat ?? this.freeSeat(v);
     if (s < 0 || s >= v.def.seats || (s === 0 ? v.driver : v.passengers.some((q) => q.seat === s))) return false;
-    this.holster(p);
     if (p.vehicle) this.leaveVehicle(p, false);
     p.vehicle = v;
     p.seat = s;
     if (s === 0) v.driver = p; else v.passengers.push(p);
     p.scratch.kb = undefined;
     p.body.setEnabled(false);
+    this.callHook('onEnter', p, v);
     return true;
   }
 
@@ -766,86 +739,143 @@ export class Sim implements SimApi {
     const b = v.behavior.body;
     let c = { x: v.home.x, y: 1, z: v.home.z };
     let side = new THREE.Vector3(v.def.exitOffset, 0, 0);
-    if (b && !v.dead) {
+    if (b && this.live(v)) {
       c = b.translation();
       side.applyQuaternion(this.quatOf(b));
       if (seat % 2 === 1) side.negate();
       if (seat >= 2) side.addScaledVector(new THREE.Vector3(0, 0, -1).applyQuaternion(this.quatOf(b)), 1.5 * Math.floor(seat / 2));
     } else side = new THREE.Vector3(0, 0, 0);
     p.body.setEnabled(true);
-    if (place || !v.dead) p.body.setTranslation({ x: c.x + side.x, y: c.y + 1.5, z: c.z + side.z }, true);
+    if (place || this.live(v)) p.body.setTranslation({ x: c.x + side.x, y: c.y + 1.5, z: c.z + side.z }, true);
     else p.body.setTranslation({ x: c.x, y: c.y + 1, z: c.z }, true);
     p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     p.invulnUntil = Math.max(p.invulnUntil, this.time + 500);
   }
 
-  // ---------- Véhicules : création / destruction ----------
+  // ---------- Véhicules : pool (création unique, jamais de removeRigidBody) ----------
   private dummyBehavior(): VX['behavior'] {
     return { body: null as unknown as RAPIER.RigidBody, step() {}, anim: () => ({ sp: 0, st: 0, a: [] }), dispose() {} };
   }
 
-  private makeVehicle(def: VehicleDef, x: number, y: number, z: number, yaw: number, extra: boolean): VX {
+  /** Crée un véhicule rangé dans le pool. Son corps existe pour toute la vie du monde : on ne fait que l'activer / le désactiver. */
+  private makePooled(def: VehicleDef, k: number): VX | null {
     const v: VX = {
       id: this.vehicles.length, def, behavior: this.dummyBehavior(), driver: null, passengers: [], hp: def.maxHp, dead: false,
-      deadAt: 0, home: { x, z, yaw }, pv: new THREE.Vector3(), grace: 0, extra, fails: 0, disabled: false, owner: '',
-      pose: { p: [x, y, z], q: [0, 0, 0, 1] },
+      deadAt: 0, home: { x: PARK[0], z: PARK[2], yaw: 0 }, pv: new THREE.Vector3(), grace: 0, fails: 0, disabled: false,
+      pose: { p: [...PARK] as Vec3, q: [0, 0, 0, 1] }, keep: false,
+      gen: 0, pooled: true, locked: false, livery: 0, ai: null, lastHitBy: null,
     };
+    try {
+      const b = def.create(this, PARK[0] + k * 6, PARK[1], PARK[2], 0);
+      v.behavior = b;
+      this.owners.set(b.body.handle, { vehicle: v });
+      b.body.setEnabled(false);
+    } catch (e) {
+      if (this.noteError(e)) throw e;
+      this.log(`[sim] création du véhicule ${def.type} (pool ${k}) impossible : ${(e as Error)?.stack ?? e}`);
+      return null; // pas de trou dans les index : le véhicule n'existe simplement pas
+    }
     this.vehicles.push(v);
-    if (!this.buildBehavior(v, x, y, z, yaw)) { v.dead = true; v.deadAt = this.time; v.hp = 0; }
     return v;
   }
 
-  private buildBehavior(v: VX, x: number, y: number, z: number, yaw: number): boolean {
-    try {
-      const b = v.def.create(this, x, y, z, yaw);
-      v.behavior = b;
-      this.owners.set(b.body.handle, { vehicle: v });
-      v.grace = this.time + 1500;
-      v.fails = 0;
-      v.disabled = false;
-      const lv = b.body.linvel();
-      v.pv.set(lv.x, lv.y, lv.z);
-      return true;
-    } catch (e) {
-      this.log(`[sim] création du véhicule ${v.def.type} impossible : ${(e as Error)?.stack ?? e}`);
-      return false;
+  /** Active le corps du véhicule à la pose donnée (corps remis à zéro). */
+  private placeVehicle(v: VX, x: number, y: number, z: number, yaw: number) {
+    const b = v.behavior.body;
+    b.setEnabled(true);
+    b.setTranslation({ x, y, z }, true);
+    b.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
+    b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    b.wakeUp();
+    v.pose = { p: [x, y, z], q: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)] };
+    v.pv.set(0, 0, 0);
+    v.grace = this.time + 1500;
+    v.fails = 0;
+    v.disabled = false;
+  }
+
+  acquireVehicle(type: string, x: number, z: number, yaw: number, opts: AcquireOpts = {}): SimVehicle | null {
+    if (![x, z, yaw].every(Number.isFinite)) return null;
+    const v = this.vehicles.find((q) => q.pooled && q.def.type === type);
+    if (!v) return null;
+    v.pooled = false;
+    v.dead = false;
+    v.hp = v.def.maxHp;
+    v.driver = null;
+    v.passengers = [];
+    v.locked = !!opts.locked;
+    v.livery = Math.max(0, Math.floor(fin(opts.livery)));
+    v.ai = opts.ai ? { input: { ...NO_INPUT } } : null;
+    v.lastHitBy = null;
+    v.keep = !!opts.keep;
+    v.noImpactUntil = undefined;
+    v.home = { x, z, yaw };
+    this.placeVehicle(v, x, opts.y ?? 1.2, z, yaw);
+    return v;
+  }
+
+  releaseVehicle(v0: SimVehicle) {
+    const v = v0 as VX;
+    if (v.pooled || this.vehicles[v.id] !== v) return;
+    for (const p of [v.driver, ...v.passengers]) if (p && this.players.get(p.id) === p) this.leaveVehicle(p, this.live(v));
+    v.driver = null;
+    v.passengers = [];
+    v.pooled = true;
+    v.dead = false;
+    v.hp = v.def.maxHp;
+    v.gen++; // toute VRef conservée devient invalide
+    v.locked = false;
+    v.livery = 0;
+    v.ai = null;
+    v.lastHitBy = null;
+    v.keep = false;
+    v.disabled = false;
+    v.fails = 0;
+    v.pose = { p: [...PARK] as Vec3, q: [0, 0, 0, 1] };
+    const b = v.behavior.body;
+    if (bodyOk(b)) {
+      b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      b.setTranslation({ x: PARK[0] + v.id * 6, y: PARK[1], z: PARK[2] }, true);
+      b.setEnabled(false);
     }
   }
 
-  /** Crée un véhicule supplémentaire (commande /spawn). Retourne null si la limite est atteinte. Non sauvegardé si mort. */
-  spawnExtraVehicle(def: VehicleDef, x: number, z: number, yaw: number, y = 1.5, ownerId = ''): VX | null {
-    const live = this.vehicles.filter((v) => v.extra && !v.dead).length;
-    if (live >= MAX_EXTRA_VEHICLES) return null;
-    // Anti-enclavement : jamais dans un mur / sous le sol ; à défaut, au point d'origine du type
-    const cy = this.clearSpot(x, y, z, VEH_HALF);
-    if (cy === null) {
-      const o = def.spawns[0];
-      if (o) { x = o[0]; z = o[1]; yaw = o[2]; }
-      y = 1.5;
-    } else y = cy;
-    // Réutilise l'emplacement d'un véhicule supplémentaire détruit du même type (les index restent stables)
-    const slot = this.vehicles.find((v) => v.extra && v.dead && v.def.type === def.type);
-    if (slot) {
-      slot.home = { x, z, yaw };
-      slot.owner = ownerId;
-      if (!this.buildBehavior(slot, x, y, z, yaw)) return null;
-      slot.hp = def.maxHp;
-      slot.dead = false;
-      return slot;
+  refOf(v: SimVehicle): VRef { return { id: v.id, gen: v.gen }; }
+
+  resolveRef(r: VRef | null | undefined): SimVehicle | null {
+    if (!r || !Number.isInteger(r.id) || !Number.isInteger(r.gen)) return null;
+    const v = this.vehicles[r.id];
+    if (!v || v.gen !== r.gen || !this.live(v) || !bodyOk(v.behavior.body)) return null;
+    return v;
+  }
+
+  playerPos(p: SimPlayer): Vec3 {
+    const v = p.vehicle as VX | null;
+    if (v && this.live(v)) return [...v.pose.p] as Vec3;
+    if (bodyOk(p.body)) {
+      const t = p.body.translation();
+      if (Number.isFinite(t.x + t.y + t.z)) return [t.x, t.y, t.z];
     }
-    if (this.vehicles.length >= 60) return null;
-    const v = this.makeVehicle(def, x, y, z, yaw, true);
-    v.owner = ownerId;
-    return v.dead ? null : v;
+    return [...(this.pinfo.get(p.id)?.last ?? [0, 0, 0])] as Vec3;
+  }
+
+  /** Publié dans le snapshot (PlayerSnap.ws / an) : étoiles de recherche et animation, fixés par les systèmes de jeu. */
+  setPlayerSnap(id: string, patch: { ws?: number; an?: number }) {
+    const px = this.pinfo.get(id);
+    if (!px) return;
+    if (patch.ws !== undefined) px.ws = clamp(Math.round(fin(patch.ws)), 0, 5);
+    if (patch.an !== undefined) px.an = clamp(Math.round(fin(patch.an)), 0, 255);
   }
 
   private destroyVehicle(v: VX, by: SimPlayer | null) {
-    if (v.dead) return;
+    if (v.dead || v.pooled) return;
     let pos = new THREE.Vector3(v.home.x, 1, v.home.z);
-    try {
+    if (bodyOk(v.behavior.body)) {
       const t = v.behavior.body.translation();
       pos = new THREE.Vector3(t.x, t.y, t.z);
-    } catch { /* corps déjà invalide */ }
+    }
     v.hp = 0;
     v.dead = true;
     v.deadAt = this.time;
@@ -858,9 +888,13 @@ export class Sim implements SimApi {
       p.invulnUntil = 0;
       this.damagePlayer(p, 70, by, 'explosion');
     }
-    this.safe(() => v.behavior.dispose(), `dispose ${v.def.type}`);
-    this.owners.forEach((o, h) => { if (o.vehicle === v) this.owners.delete(h); });
     v.pose.p = [pos.x, pos.y, pos.z];
+    const b = v.behavior.body;
+    if (bodyOk(b)) { // le corps reste dans le monde (pool) : on le désactive
+      b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      b.setEnabled(false);
+    }
     const radius = clamp(4 + v.def.maxHp / 50, 5, 9);
     this.explode(pos, radius, 14, 50, by);
     for (let i = 0; i < 10; i++) {
@@ -870,14 +904,17 @@ export class Sim implements SimApi {
         new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.random() * 6, Math.random() * 6, Math.random() * 6)),
         new THREE.Vector3(Math.cos(a) * s, 4 + Math.random() * 8, Math.sin(a) * s), '');
     }
+    this.callHook('onVehicleDestroyed', v, by);
   }
 
-  private respawnVehicle(v: VX) {
-    if (v.extra) return;
-    if (this.buildBehavior(v, v.home.x, 1.2, v.home.z, v.home.yaw)) {
-      v.hp = v.def.maxHp;
-      v.dead = false;
-    } else v.deadAt = this.time; // réessaie plus tard
+  /** Fin de l'attente après destruction : retour au point d'origine (véhicule du monde) ou au pool (trafic, police…). */
+  private recycleDead(v: VX) {
+    if (!v.keep) { this.releaseVehicle(v); return; }
+    v.gen++;
+    v.hp = v.def.maxHp;
+    v.dead = false;
+    v.lastHitBy = null;
+    this.placeVehicle(v, v.home.x, 1.2, v.home.z, v.home.yaw);
   }
 
   // =====================================================================================================================
@@ -901,53 +938,43 @@ export class Sim implements SimApi {
     this.time += STEP * 1000;
   }
 
-  private holster(p: SimPlayer) {
-    const id = p.item;
-    if (!id) return;
-    p.item = '';
-    const h = HANDLERS[id];
-    if (h?.holster) this.safe(() => h.holster!(p, this), `holster ${id}`);
-  }
-
   private stepPlayers() {
     for (const p of this.players.values()) {
       const px = this.pinfo.get(p.id);
       if (!px) continue;
-      for (const k of ['speed', 'gravity', 'jump', 'scale'] as const)
-        if (p.mods[k] !== 1 && this.time >= p.modsUntil[k]) p.mods[k] = 1;
       if (px.deadAt > 0) {
         if (this.time - px.deadAt >= RESPAWN_PLAYER_MS) this.respawnPlayer(p);
-        p.input.wheel = 0;
         p.prevInput = p.input;
         continue;
       }
       this.safe(() => {
-        this.ensureBody(p, px);
-        this.runItems(p);
-        if (!p.vehicle) this.walk(p, px);
+        if (!p.vehicle) {
+          this.walk(p);
+          if (p.input.m1 && !p.prevInput.m1) {
+            const t = p.body.translation();
+            this.callHook('onShot', p, [t.x, t.y + 0.7, t.z], [...p.input.ad] as Vec3);
+          }
+        }
       }, `joueur ${p.name}`);
-      p.input.wheel = 0;
       p.prevInput = p.input;
     }
   }
 
-  private grounded(p: SimPlayer, px: PI) {
+  private grounded(p: SimPlayer) {
     const t = p.body.translation();
-    const len = 0.85 * px.sc + 0.2;
+    const len = 0.85 + 0.2;
     return !!this.world.castRay(new RAPIER.Ray(t, { x: 0, y: -1, z: 0 }), len, true, undefined, undefined, undefined, p.body, (c) => !c.isSensor());
   }
 
-  private walk(p: SimPlayer, px: PI) {
-    if (((p.scratch.heldUntil as number) ?? 0) > this.time) return; // tenu par le pistolet à gravité : la saisie pilote le corps
+  private walk(p: SimPlayer) {
     const i = p.input;
     const dir = new THREE.Vector3(i.s, 0, -i.f).applyAxisAngle(Y_AXIS, i.yaw);
     if (dir.lengthSq() > 1) dir.normalize();
-    dir.multiplyScalar(WALK * p.mods.speed);
+    dir.multiplyScalar(i.run ? RUN : WALK);
     const v = p.body.linvel();
-    const ground = this.grounded(p, px);
+    const ground = this.grounded(p);
     let vy = v.y;
-    if (i.jump && ground && p.mods.gravity > 0) vy = JUMP * p.mods.jump;
-    else if (i.jump && ground) vy = JUMP * p.mods.jump * 0.6;
+    if (i.jump && ground) vy = JUMP;
     const kb = p.scratch.kb as [number, number] | undefined;
     let kx = 0, kz = 0;
     if (kb) {
@@ -961,57 +988,17 @@ export class Sim implements SimApi {
     p.body.setLinvel({ x: dir.x + kx, y: vy, z: dir.z + kz }, true);
   }
 
-  // ---------- Pipeline d'objets ----------
-  private runItems(p: SimPlayer) {
-    const i = p.input;
-    const id = p.vehicle ? '' : ITEM_BY_ID.has(i.item) && !this.badItems.has(i.item) ? i.item : '';
-    if (id !== p.item) {
-      this.holster(p);
-      p.item = id;
-    }
-    const wheel = i.wheel;
-    i.wheel = 0;
-    if (!id) return;
-    const def = ITEM_BY_ID.get(id)!;
-    const h = HANDLERS[id];
-    if (!h) return;
-    const t = p.body.translation();
-    const ao = new THREE.Vector3(...i.ao);
-    const head = new THREE.Vector3(t.x, t.y + 0.7 * p.mods.scale, t.z);
-    const origin = ao.lengthSq() < 1e-6 || ao.distanceTo(head) > 12 ? head : ao;
-    const prev = p.prevInput;
-    const ctx = {
-      api: this as SimApi, player: p, origin, dir: new THREE.Vector3(...i.ad),
-      pressed1: !!i.m1 && !prev.m1, pressed2: !!i.m2 && !prev.m2, held1: !!i.m1, held2: !!i.m2, wheel, dt: STEP,
-    };
-    const run = (fn: () => void, what: string) => {
-      try { fn(); } catch (e) {
-        if (this.noteError(e)) return; // panique du monde : pas la faute de l'objet
-        const n = (this.itemFails.get(id) ?? 0) + 1;
-        this.itemFails.set(id, n);
-        this.log(`[sim] objet ${id} (${what}) : ${(e as Error)?.stack ?? e}`);
-        if (n >= 5) { this.badItems.add(id); this.log(`[sim] objet ${id} désactivé après ${n} erreurs`); }
-      }
-    };
-    if (h.tick) run(() => h.tick!(ctx), 'tick');
-    if (h.use) {
-      const wants = def.hold ? ctx.held1 || ctx.held2 : ctx.pressed1 || ctx.pressed2;
-      if (wants && (p.cooldowns[id] ?? 0) <= this.time) {
-        if (def.cooldown > 0) p.cooldowns[id] = this.time + def.cooldown * 1000;
-        run(() => h.use!(ctx), 'use');
-      }
-    }
-  }
-
   // ---------- Véhicules ----------
   private stepVehicles() {
     for (const v of this.vehicles) {
+      if (v.pooled) continue;
       if (v.dead) {
-        if (!v.extra && this.time - v.deadAt >= RESPAWN_VEHICLE_MS) this.respawnVehicle(v);
+        if (this.time - v.deadAt >= RESPAWN_VEHICLE_MS) this.recycleDead(v);
         continue;
       }
       if (v.disabled) continue;
-      const ctx: StepCtx = { input: v.driver ? v.driver.input : NO_INPUT, driver: v.driver, dt: STEP, api: this, self: v };
+      // Un conducteur humain a toujours priorité sur le pilote automatique
+      const ctx: StepCtx = { input: this.inputOf(v), driver: v.driver, dt: STEP, api: this, self: v };
       try {
         v.behavior.step(ctx);
         v.fails = 0;
@@ -1023,18 +1010,16 @@ export class Sim implements SimApi {
     }
   }
 
+  private inputOf(v: VX): Input { return v.driver ? v.driver.input : v.ai ? v.ai.input : NO_INPUT; }
+
   private stepProps() {
     const dead: PX[] = [];
     for (const p of this.props.values()) {
       const life = p.kind.life;
       if (life !== undefined && this.time - p.bornAt > life * 1000) { dead.push(p); continue; }
-      if (p.body.isSleeping() && !p.kind.behavior) continue; // endormi : ne bouge pas, ne tombe pas
+      if (p.body.isSleeping()) continue; // endormi : ne bouge pas, ne tombe pas
       const y = p.body.translation().y;
       if (y < -60 || !Number.isFinite(y)) dead.push(p);
-      else if (p.kind.behavior) {
-        const tick = PROP_TICKS[p.kind.behavior];
-        if (tick) this.safe(() => tick(p, this, STEP), 'propTick:' + p.kind.id);
-      }
     }
     for (const p of dead) this.removeProp(p);
   }
@@ -1042,7 +1027,7 @@ export class Sim implements SimApi {
   private postStep() {
     const g = this.world.gravity.y;
     for (const v of this.vehicles) {
-      if (v.dead || v.disabled || !v.behavior.body) continue;
+      if (v.pooled || v.dead || v.disabled || !v.behavior.body) continue;
       const b = v.behavior.body;
       const t = b.translation();
       if (!Number.isFinite(t.x + t.y + t.z)) { this.destroyVehicle(v, null); continue; }
@@ -1062,7 +1047,7 @@ export class Sim implements SimApi {
         const by = v.driver;
         this.damageVehicle(v, (dv - v.def.impact.threshold) * v.def.impact.scale, 'impact', by);
         if (v.behavior.onImpact && !v.dead) {
-          const ctx: StepCtx = { input: v.driver ? v.driver.input : NO_INPUT, driver: v.driver, dt: STEP, api: this, self: v };
+          const ctx: StepCtx = { input: this.inputOf(v), driver: v.driver, dt: STEP, api: this, self: v };
           this.safe(() => v.behavior.onImpact!(dv, ctx), `onImpact ${v.def.type}`);
         }
       }
@@ -1139,13 +1124,15 @@ export class Sim implements SimApi {
   private buildSnapshot(delta: boolean): Snapshot {
     const players: PlayerSnap[] = [];
     for (const p of this.players.values()) {
-      const b = p.vehicle && !p.vehicle.dead && p.vehicle.behavior.body ? p.vehicle.behavior.body : p.body;
+      const b = p.vehicle && this.live(p.vehicle) ? p.vehicle.behavior.body : p.body;
       const t = b.translation();
       const ps: PlayerSnap = {
         id: p.id, name: p.name, p: [round(t.x), round(t.y), round(t.z)], yaw: round(p.input.yaw, 1000),
         veh: p.vehicle ? this.vehicles.indexOf(p.vehicle as VX) : -1, seat: p.seat, hp: Math.max(0, Math.round(p.hp)),
-        item: p.item, sc: round(p.mods.scale),
       };
+      const pxi = this.pinfo.get(p.id);
+      if (pxi?.ws) ps.ws = pxi.ws;
+      if (pxi?.an) ps.an = pxi.an;
       if (delta) { // le nom n'est envoyé qu'une fois par joueur et par client (le client le mémorise par id)
         if (this.pSent.get(p.id) === p.name) delete (ps as Partial<PlayerSnap>).name;
         else this.pSent.set(p.id, p.name);
@@ -1158,7 +1145,7 @@ export class Sim implements SimApi {
     this.vehicles.forEach((v, idx) => {
       let a = { sp: 0, st: 0, a: [] as number[] };
       let pp = v.pose.p, qq = v.pose.q;
-      if (!v.dead && v.behavior.body) {
+      if (!v.dead && !v.pooled && v.behavior.body) {
         try {
           const t = v.behavior.body.translation();
           const r = v.behavior.body.rotation();
@@ -1170,8 +1157,11 @@ export class Sim implements SimApi {
       const vs: VehicleSnap = {
         type: v.def.type, p: [round(pp[0]), round(pp[1]), round(pp[2])], q: [round(qq[0], 1000), round(qq[1], 1000), round(qq[2], 1000), round(qq[3], 1000)],
         drv: v.driver?.id ?? '', sp: round(fin(a.sp)), st: round(fin(a.st)), a: (a.a ?? []).map((n) => round(fin(n), 1000)),
-        hp: round(clamp(v.hp / v.def.maxHp, 0, 1)), dead: v.dead ? 1 : 0,
+        hp: round(clamp(v.hp / v.def.maxHp, 0, 1)), dead: v.pooled ? 2 : v.dead ? 1 : 0,
       };
+      if (v.livery) vs.lv = v.livery;
+      if (v.locked) vs.lk = 1;
+      if (v.ai) vs.ai = 1;
       if (delta) {
         const str = JSON.stringify(vs);
         if (this.vSent[idx] === str) return;
@@ -1209,93 +1199,16 @@ export class Sim implements SimApi {
   }
 
   // =====================================================================================================================
-  // Sauvegarde v2
+  // Sauvegarde v3 : positions des joueurs (les systèmes de jeu ajoutent leur état dans `systems`, voir server/game.ts)
   // =====================================================================================================================
   serialize(): SaveData {
     for (const p of this.players.values()) this.rememberPlayer(p);
-    const props: SaveData['props'] = [];
-    for (const p of this.props.values()) {
-      if (p.kind.life !== undefined || !bodyOk(p.body)) continue; // éphémères (débris…)
-      const t = p.body.translation();
-      const r = p.body.rotation();
-      props.push({ k: p.kind.id, p: [t.x, t.y, t.z], q: [r.x, r.y, r.z, r.w], f: p.frozen ? 1 : 0 });
-    }
-    const vehicles: SaveData['vehicles'] = [];
-    this.vehicles.forEach((v, idx) => {
-      // Un véhicule détruit n'est pas sauvegardé : il réapparaît à son point d'origine. Les véhicules du monde portent leur
-      // index de création (`i`, stable) : un véhicule mort ne décale donc plus le rang des suivants.
-      if (v.dead || !bodyOk(v.behavior.body)) return;
-      const t = v.behavior.body.translation();
-      const r = v.behavior.body.rotation();
-      let st: number[] | undefined;
-      try { st = v.behavior.state?.(); } catch (e) { st = undefined; this.noteError(e); }
-      vehicles.push({ type: v.def.type, p: [t.x, t.y, t.z], q: [r.x, r.y, r.z, r.w], hp: v.hp / v.def.maxHp, st, extra: v.extra || undefined, i: v.extra ? undefined : idx });
-    });
-    return { version: 2, props, vehicles, players: Object.fromEntries(this.savedPlayers) as SaveData['players'] };
-  }
-
-  /** Pose un corps de véhicule à (x, y, z) après anti-enclavement ; à défaut, à son point d'origine. */
-  private placeVehicleSafely(v: VX, x: number, y: number, z: number, q: { x: number; y: number; z: number; w: number }) {
-    const b = v.behavior.body;
-    const ny = this.clearSpot(x, y, z, VEH_HALF, q);
-    if (ny === null) {
-      const h = v.home;
-      b.setTranslation({ x: h.x, y: 1.2, z: h.z }, true);
-      b.setRotation({ x: 0, y: Math.sin(h.yaw / 2), z: 0, w: Math.cos(h.yaw / 2) }, true);
-    } else {
-      b.setTranslation({ x, y: ny, z }, true);
-      b.setRotation(q, true);
-    }
+    return { version: 3, players: Object.fromEntries(this.savedPlayers) as SaveData['players'], systems: {} };
   }
 
   restore(data: SaveData) {
-    if (!data || typeof data !== 'object' || (data as { version?: number }).version !== 2) return; // sauvegarde v1 (ou inconnue) : ignorée
+    if (!data || typeof data !== 'object' || (data as { version?: number }).version !== 3) return; // v1, v2 ou inconnue : ignorée sans erreur
     const okVec = (a: unknown, n: number): a is number[] => Array.isArray(a) && a.length === n && a.every((x) => typeof x === 'number' && Number.isFinite(x));
-    if (Array.isArray(data.props)) {
-      for (const p of [...this.props.values()]) this.removeProp(p);
-      for (const s of data.props.slice(0, MAX_PROPS)) {
-        if (!s || typeof s.k !== 'string' || !okVec(s.p, 3) || !okVec(s.q, 4)) continue;
-        const kind = propKindById(s.k);
-        if (!kind) continue;
-        const q = new THREE.Quaternion(s.q[0], s.q[1], s.q[2], s.q[3]);
-        if (!(q.lengthSq() > 1e-6)) q.identity(); else q.normalize();
-        const [a, b, c] = kind.size;
-        const half: Vec3 = [Math.max(0.05, (a / 2) * 0.8), Math.max(0.05, ((b ?? a) / 2) * 0.8), Math.max(0.05, ((c ?? a) / 2) * 0.8)];
-        const ny = this.clearSpot(s.p[0], s.p[1], s.p[2], half, q);
-        if (ny === null) continue; // enclavé dans le décor : abandonné plutôt que coincé à jamais
-        const prop = this.createProp(s.k, new THREE.Vector3(s.p[0], ny, s.p[2]), q, undefined, '');
-        if (prop && s.f) this.freezeProp(prop, true);
-      }
-    }
-    if (Array.isArray(data.vehicles)) {
-      const rank = new Map<string, number>();
-      for (const s of data.vehicles) {
-        if (!s || typeof s.type !== 'string' || !okVec(s.p, 3) || !okVec(s.q, 4)) continue;
-        let v: VX | undefined;
-        if (s.extra) {
-          const def = VEHICLES.find((d) => d.type === s.type);
-          if (def) v = this.spawnExtraVehicle(def, s.p[0], s.p[2], 0, s.p[1]) ?? undefined;
-        } else if (typeof s.i === 'number' && Number.isInteger(s.i)) {
-          const c = this.vehicles[s.i];
-          if (c && !c.extra && c.def.type === s.type) v = c;
-        } else { // sauvegarde ancienne (sans index `i`) : n-ième véhicule du monde de ce type
-          const n = rank.get(s.type) ?? 0;
-          rank.set(s.type, n + 1);
-          v = this.vehicles.filter((x) => !x.extra && x.def.type === s.type)[n];
-        }
-        if (!v || v.dead || !bodyOk(v.behavior.body)) continue;
-        const b = v.behavior.body;
-        const q = new THREE.Quaternion(s.q[0], s.q[1], s.q[2], s.q[3]);
-        if (!(q.lengthSq() > 1e-6)) q.identity(); else q.normalize();
-        this.placeVehicleSafely(v, s.p[0], s.p[1], s.p[2], { x: q.x, y: q.y, z: q.z, w: q.w });
-        b.setLinvel({ x: 0, y: 0, z: 0 }, true);
-        b.setAngvel({ x: 0, y: 0, z: 0 }, true);
-        if (Array.isArray(s.st) && okVec(s.st, s.st.length)) this.safe(() => v!.behavior.restore?.(s.st as number[]), `restore ${s.type}`);
-        if (typeof s.hp === 'number' && Number.isFinite(s.hp) && s.hp > 0) v.hp = clamp(s.hp, 0.05, 1) * v.def.maxHp;
-        v.grace = this.time + 1500;
-        v.pv.set(0, 0, 0);
-      }
-    }
     if (data.players && typeof data.players === 'object' && !Array.isArray(data.players)) {
       const m = new Map<string, Vec3>();
       for (const [name, pos] of Object.entries(data.players)) {

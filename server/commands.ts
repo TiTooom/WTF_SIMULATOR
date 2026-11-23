@@ -1,7 +1,5 @@
 // Commandes de chat (« /quelquechose ») exécutées côté serveur, jamais diffusées telles quelles.
-// Extensible : d'autres fichiers (événements, modes…) appellent registerCommand('party', handler, 'aide') sans toucher à celui-ci.
-// Les véhicules créés par /spawn sont de vrais véhicules du monde mais NE se sauvegardent qu'en vie (voir Sim.serialize, champ `extra`).
-import * as THREE from 'three';
+// Extensible : d'autres fichiers (systèmes de jeu) appellent registerCommand('nom', handler, 'aide') sans toucher à celui-ci.
 import type { SimPlayer } from '../shared/api';
 import type { Sim } from '../shared/sim';
 import { VEHICLES, VEHICLE_BY_TYPE } from '../shared/vehicles';
@@ -56,15 +54,14 @@ export function requireHost(ctx: { sim: Sim; player: SimPlayer; reply(t: string)
   ctx.reply(NOT_HOST[Math.floor(Math.random() * NOT_HOST.length)]);
   return false;
 }
-const MAX_SPAWN_PER_PLAYER = 3;
-const spawnedBy = (sim: Sim, id: string) => sim.vehicles.filter((v) => v.extra && !v.dead && v.owner === id).length;
 
 // ---------- Utilitaires ----------
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 /** Retrouve un type de véhicule par identifiant, nom français (« la voiture ») ou début de mot. */
 export function findVehicleDef(word: string): VehicleDef | null {
-  const w = norm(word).replace(/[-\s]/g, '_');
+  let w = norm(word).replace(/[-\s]/g, '_');
+  if (w === 'car' || w === 'voiture') w = 'citadine'; // ancien nom (vague 0)
   if (!w) return null;
   const direct = VEHICLE_BY_TYPE.get(w);
   if (direct) return direct;
@@ -76,28 +73,10 @@ function typeList() {
   return VEHICLES.map((d) => d.type).join(', ');
 }
 
-function frontOf(p: SimPlayer, dist: number) {
-  const yaw = p.input.yaw;
-  const t = p.body.translation();
-  // Même convention que la marche : avant = (0, 0, -1) tourné de `yaw`
-  const d = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-  return { x: t.x + d.x * dist, z: t.z + d.z * dist, yaw };
-}
-
 // ---------- Commandes de base ----------
 registerCommand('help', ({ reply }) => {
   reply('Commandes : ' + [...commands.entries()].map(([n, c]) => (c.help.startsWith('/') ? c.help : `/${n}${c.help ? ` (${c.help})` : ''}`)).join(' · '));
 }, 'cette aide');
-
-registerCommand('spawn', ({ sim, player, args, reply, announce }) => {
-  const def = findVehicleDef(args[0] ?? '');
-  if (!def) return reply(`Usage : /spawn <type>. Types : ${typeList()}`);
-  if (spawnedBy(sim, player.id) >= MAX_SPAWN_PER_PLAYER) return reply(`Tu as déjà invoqué ${MAX_SPAWN_PER_PLAYER} véhicules ! Fais-en exploser un avant d'en demander un autre.`);
-  const f = frontOf(player, 8);
-  const v = sim.spawnExtraVehicle(def, f.x, f.z, f.yaw, 1.5, player.id);
-  if (!v) return reply('Trop de véhicules en jeu ! Détruis-en un d\'abord (ou fais-le exploser).');
-  announce(`${player.name} a invoqué ${def.name} ${def.emoji}`);
-}, '/spawn <type> : crée un véhicule devant toi');
 
 registerCommand('drive', ({ sim, player, args, reply }) => {
   const def = findVehicleDef(args[0] ?? '');
@@ -106,19 +85,14 @@ registerCommand('drive', ({ sim, player, args, reply }) => {
   let best = null as (typeof sim.vehicles)[number] | null;
   let bd = Infinity;
   for (const v of sim.vehicles) {
-    if (v.def !== def || v.dead || v.driver || !v.behavior.body) continue;
+    if (v.def !== def || v.dead || v.pooled || v.driver || !v.behavior.body) continue;
     const vt = v.behavior.body.translation();
     const d = Math.hypot(vt.x - t.x, vt.z - t.z);
     if (d < bd) { bd = d; best = v; }
   }
-  if (!best) {
-    if (spawnedBy(sim, player.id) >= MAX_SPAWN_PER_PLAYER) return reply(`Tu as déjà invoqué ${MAX_SPAWN_PER_PLAYER} véhicules ! Fais-en exploser un avant d'en demander un autre.`);
-    const f = frontOf(player, 8);
-    best = sim.spawnExtraVehicle(def, f.x, f.z, f.yaw, 1.5, player.id);
-    if (!best) return reply('Trop de véhicules en jeu !');
-  }
-  if (!sim.enterVehicle(player, best, 0)) reply('Impossible de monter dedans.');
-}, '/drive <type> : monte dans un véhicule de ce type');
+  if (!best) return reply('Aucun véhicule libre de ce type pour le moment.');
+  if (!sim.enterVehicle(player, best, 0, true)) reply('Impossible de monter dedans.');
+}, '/drive <type> : monte dans le véhicule libre le plus proche de ce type');
 
 registerCommand('tp', ({ sim, player, args, reply }) => {
   const word = args.join(' ');
@@ -135,7 +109,7 @@ registerCommand('tp', ({ sim, player, args, reply }) => {
     const t = player.body.translation();
     let bd = Infinity;
     for (const v of sim.vehicles) {
-      if (!def || v.def !== def || v.dead || !v.behavior.body) continue;
+      if (!def || v.def !== def || v.dead || v.pooled || !v.behavior.body) continue;
       const vt = v.behavior.body.translation();
       const d = Math.hypot(vt.x - t.x, vt.z - t.z);
       if (d < bd) { bd = d; target = vt; }
@@ -144,36 +118,3 @@ registerCommand('tp', ({ sim, player, args, reply }) => {
   if (!target) return reply(`Personne ni rien de tel : « ${word} ».`);
   sim.teleportPlayer(player, target.x + 3, target.y + 2, target.z);
 }, '/tp <pseudo|type> : se téléporter');
-
-registerCommand('clear', ({ sim, player, reply }) => {
-  let n = 0;
-  for (const p of [...sim.props.values()]) if (p.owner === player.id) { sim.removeProp(p); n++; }
-  reply(n ? `${n} objet(s) supprimé(s).` : 'Tu n\'as rien posé.');
-}, 'supprime tes objets');
-
-registerCommand('gravite', ({ sim, player, args, reply, announce }) => {
-  if (!requireHost({ sim, player, reply })) return;
-  const raw = (args[0] ?? '').replace(',', '.');
-  if (raw === '' ) return reply('Usage : /gravite <valeur> (normal : -9.81, lune : -1.6, 0 = apesanteur ; « normal » remet tout d\'équerre)');
-  const v = raw === 'normal' ? -9.81 : Number(raw);
-  if (!Number.isFinite(v)) return reply('Ce n\'est pas un nombre.');
-  const g = v === 0 ? 0 : -Math.min(40, Math.abs(v)); // même plafond que le cœur : on annonce la valeur réellement appliquée
-  sim.setGravity(g);
-  announce(`${player.name} a réglé la gravité à ${Math.abs(g).toFixed(1)} m/s²${g === 0 ? ' (on flotte !)' : ''}`);
-}, '/gravite <valeur>');
-
-registerCommand('taille', ({ sim, player, args, reply, announce }) => {
-  const v = Number((args[0] ?? '').replace(',', '.'));
-  if (!Number.isFinite(v)) return reply('Usage : /taille <0.5 à 3> [pseudo]');
-  const s = Math.max(0.5, Math.min(3, v));
-  let who = player;
-  const other = args.slice(1).join(' ').trim().toLowerCase();
-  if (other && other !== player.name.toLowerCase()) {
-    if (!requireHost({ sim, player, reply })) return; // changer la taille d'un autre : réservé au chef
-    const q = [...sim.players.values()].find((x) => x.name.toLowerCase() === other);
-    if (!q) return reply(`Personne ne s'appelle « ${args.slice(1).join(' ')} ».`);
-    who = q;
-  }
-  sim.applyMod(who, { scale: s }, 120);
-  announce(`${who.name} est maintenant ${s > 1 ? 'géant' : s < 1 ? 'minuscule' : 'normal'} (×${s})`);
-}, '/taille <0.5-3> [pseudo]');

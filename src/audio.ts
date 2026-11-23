@@ -28,7 +28,7 @@ const DEFAULT_ENGINE: EngineParams = { base: 40, speedK: 3, level: 0.14 };
 const NOTE = (n: number) => 261.63 * 2 ** (n / 12); // n = demi-tons depuis le do central
 
 export interface SoundOpts { size?: number }
-type SoundFn = (a: GameAudio, o: SoundOpts) => void;
+export type SoundFn = (a: GameAudio, o: SoundOpts) => void;
 
 /** Sons nommés (fx `sound`). Les horn_1..5 sont des klaxons de caractères différents. */
 export const SOUNDS: Record<string, SoundFn> = {
@@ -75,6 +75,15 @@ export const SOUNDS: Record<string, SoundFn> = {
   cluck: (a) => { for (let i = 0; i < 3; i++) a.tone(520 + i * 30, 380, 0.05, 0.18, 'square', i * 0.07); },
   note: (a) => { const f = [523, 587, 659, 784, 880][Math.floor(Math.random() * 5)]; a.tone(f, f, 0.5, 0.22, 'triangle'); a.tone(f * 2, f * 2, 0.3, 0.06, 'sine'); },
 };
+
+/**
+ * Enregistre (ou remplace) un son nommé, utilisable ensuite par `api.fx({k:'sound', s:name})` et `audio.fx(name, pos)`.
+ * Chaque système/mini-jeu déclare ses sons ainsi, sans toucher à SOUNDS. Noms : lettres, chiffres, « _ », 40 max.
+ */
+export function registerSound(name: string, fn: SoundFn): void {
+  if (!/^[a-z0-9_]{1,40}$/i.test(name) || name === '__proto__' || name === 'constructor' || name === 'prototype') return;
+  SOUNDS[name] = fn;
+}
 
 export class GameAudio {
   private ctx: AudioContext | null = null;
@@ -263,7 +272,7 @@ export class GameAudio {
   /** Joue un son nommé à une position du monde ; volume atténué par la distance à la caméra. Nom inconnu : ignoré. */
   fx(name: string, p: Vec3, o: SoundOpts = {}) {
     this.played[name] = (this.played[name] ?? 0) + 1;
-    const fn = SOUNDS[name];
+    const fn = Object.prototype.hasOwnProperty.call(SOUNDS, name) ? SOUNDS[name] : undefined;
     const ctx = this.ctx;
     if (!fn || !ctx || !this.ready) return;
     const d = Math.hypot(p[0] - this.listener[0], p[1] - this.listener[1], p[2] - this.listener[2]);
