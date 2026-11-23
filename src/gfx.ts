@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 // Rendu cel-shading BD : matériaux toon à 3 bandes (gradientMap partagé), contours noirs par coque inversée, sans ombres.
 // Bandes : ombre franche / ton moyen / lumière pleine (valeurs du gradientMap, lues en "Nearest" donc sans dégradé).
@@ -119,4 +120,68 @@ export function canvasTexture(size: [number, number], draw: (g: CanvasRenderingC
   t.anisotropy = 4;
   t.repeat.set(...repeat);
   return t;
+}
+
+// ---------- Vague 2 : matériaux à couleurs de sommets, contours de boîtes instanciées, assemblage de pièces ----------
+
+/** Matériau toon partagé pour les géométries à couleurs de sommets (et/ou `instanceColor`). Ne jamais le modifier. */
+export const toonVC = toonRaw({ vertexColors: true });
+
+/**
+ * Contour des boîtes UNITAIRES instanciées (bâtiments, toits, trottoirs) : chaque sommet est d'abord placé par la matrice d'instance
+ * (échelle comprise), PUIS repoussé de `±t` sur chaque axe (signe de la position locale) : épaisseur uniforme quelle que soit la taille de la boîte.
+ * Modulée par la distance comme `outlineMat`. À utiliser avec `new InstancedMesh(boxGeo(1,1,1), boxHullMat, n)` partageant `instanceMatrix`.
+ */
+export const BOX_HULL_BASE = 0.14;
+export const boxHullMat = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide });
+boxHullMat.onBeforeCompile = (sh) => {
+  sh.vertexShader = sh.vertexShader.replace(
+    '#include <project_vertex>',
+    `vec4 bp = vec4(position, 1.0);
+    #ifdef USE_INSTANCING
+      bp = instanceMatrix * bp;
+    #endif
+    float bz = -(modelViewMatrix * bp).z;
+    bp.xyz += sign(position) * (${BOX_HULL_BASE.toFixed(3)} * clamp(bz / ${OUTLINE_NEAR.toFixed(1)}, 1.0, ${OUTLINE_MAX_GROWTH.toFixed(1)}));
+    vec4 mvPosition = modelViewMatrix * bp;
+    gl_Position = projectionMatrix * mvPosition;`,
+  );
+};
+boxHullMat.customProgramCacheKey = () => 'box-hull';
+
+/** Assemble des boîtes colorées en UNE géométrie (couleurs de sommets) : un seul appel de dessin au lieu d'un par pièce. `paint` marque les sommets repeignables. */
+export class PartBuilder {
+  private parts: THREE.BufferGeometry[] = [];
+  private col = new THREE.Color();
+  add(geo: THREE.BufferGeometry, color: number, x = 0, y = 0, z = 0, paint = false, rotY = 0): this {
+    const g = geo.index ? geo.toNonIndexed() : geo.clone();
+    if (rotY) g.rotateY(rotY);
+    g.translate(x, y, z);
+    g.deleteAttribute('uv');
+    this.col.setHex(punch(color));
+    const n = g.getAttribute('position').count;
+    const c = new Float32Array(n * 3), p = new Float32Array(n);
+    for (let i = 0; i < n; i++) { c[i * 3] = this.col.r; c[i * 3 + 1] = this.col.g; c[i * 3 + 2] = this.col.b; p[i] = paint ? 1 : 0; }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    g.setAttribute('paint', new THREE.BufferAttribute(p, 1));
+    this.parts.push(g);
+    return this;
+  }
+  box(w: number, h: number, d: number, color: number, x: number, y: number, z: number, paint = false): this {
+    return this.add(new THREE.BoxGeometry(w, h, d), color, x, y, z, paint);
+  }
+  build(): THREE.BufferGeometry {
+    const g = mergeGeometries(this.parts, false)!;
+    for (const p of this.parts) p.dispose();
+    this.parts = [];
+    return g;
+  }
+}
+
+/** Réécrit la couleur des sommets repeignables (attribut `paint` = 1) d'une géométrie construite par PartBuilder. */
+export function repaint(geo: THREE.BufferGeometry, color: number) {
+  const c = new THREE.Color().setHex(punch(color));
+  const col = geo.getAttribute('color') as THREE.BufferAttribute, paint = geo.getAttribute('paint');
+  for (let i = 0; i < col.count; i++) if (paint.getX(i) > 0.5) col.setXYZ(i, c.r, c.g, c.b);
+  col.needsUpdate = true;
 }

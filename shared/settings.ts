@@ -14,7 +14,7 @@ export const ACTIONS = [
   { id: 'back', label: 'Reculer', group: 'À pied', default: 'KeyS' },
   { id: 'left', label: 'Gauche', group: 'À pied', default: 'KeyA' },
   { id: 'right', label: 'Droite', group: 'À pied', default: 'KeyD' },
-  { id: 'jump', label: 'Sauter / frein à main', group: 'À pied', default: 'Space' },
+  { id: 'jump', label: 'Roulade / frein à main', group: 'À pied', default: 'Space' },
   { id: 'sprint', label: 'Courir', group: 'À pied', default: 'ShiftLeft' },
   { id: 'horn', label: 'Klaxon / sirène', group: 'Véhicules', default: 'KeyH' },
   { id: 'interact', label: 'Monter / descendre', group: 'Général', default: 'KeyE' },

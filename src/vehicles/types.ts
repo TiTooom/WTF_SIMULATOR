@@ -26,7 +26,8 @@ export interface EngineParams {
 export interface VehicleViewDef {
   name?: string; // « le tank » (avec article)
   enterRadius?: number; // rayon de l'aide « E : monter dans… » (défaut 6)
-  build(): VehicleView;
+  /** `seed` : index du véhicule dans le snapshot (varie la couleur de façon identique chez tous les clients). */
+  build(seed?: number): VehicleView;
   cam: { height: number; distance: number; pitch: number };
   /** Texte d'aide à l'écran pendant la conduite ; L('forward') = nom de la touche. */
   hud(snap: VehicleSnap, L: (a: ActionId) => string): string;

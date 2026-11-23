@@ -55,6 +55,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 
 /** Bus par simulation, pour les commandes de debug (qui n'ont accès qu'au Sim). */
 const busOf = new WeakMap<Sim, GameBus>();
+const ctxOf = new WeakMap<Sim, GameCtx>();
 
 registerCommand('debug', ({ sim, player, args, reply }) => {
   if (!requireHost({ sim, player, reply })) return;
@@ -63,7 +64,8 @@ registerCommand('debug', ({ sim, player, args, reply }) => {
   const bus = busOf.get(sim);
   if (!bus) return reply('Le jeu n\'est pas prêt.');
   bus.emit('debug', { p: player, what, arg: String(args[1] ?? '').slice(0, 32) });
-  reply(`debug ${what} transmis aux systèmes (aucun ne l'écoute encore en vague 1).`);
+  const listening = what === 'mg' ? !!ctxOf.get(sim)?.get('minigames') : false; // vague 2 : seul le système des mini-jeux écoute (stars/money : vague 3)
+  reply(listening ? `debug ${what} transmis : le système des mini-jeux écoute (/debug mg <kind>).` : `debug ${what} transmis (aucun système ne l'écoute encore : prévu en vague 3).`);
 }, '/debug stars|money|mg <valeur> : outils de mise au point (chef de la bande)');
 
 export function installGame(sim: Sim, opts: GameOptions): Game {
@@ -102,6 +104,7 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
     }
   };
 
+  ctxOf.set(sim, ctx);
   for (const make of SYSTEMS) {
     try {
       const s = make(ctx);

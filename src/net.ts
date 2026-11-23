@@ -145,6 +145,9 @@ export class Net {
     return q;
   }
 
+  /** Temps de simulation (ms) du dernier snapshot reçu. */
+  get simTime(): number { return this.snaps.length ? this.snaps[this.snaps.length - 1].s.t : 0; }
+
   sample(now: number): Sampled | null {
     const n = this.snaps.length;
     if (n === 0) return null;

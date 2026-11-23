@@ -13,6 +13,7 @@ import { wedgeVertices, type PropKind } from './props';
 import { PROP_INDEX, propKindById } from './registry';
 import { VEHICLES } from './vehicles';
 import { bodyOk, isPoison } from './guard';
+import { ONFOOT, newRoll, rollVelocity, startRoll, type RollState } from './onfoot';
 
 // ---------- Réglages ----------
 const PLAYER_HP = 100;
@@ -27,10 +28,10 @@ const MIN_SESSION_MS = 30_000; // un joueur resté moins longtemps n'est pas mé
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const PARK: Vec3 = [0, -200, 0]; // où l'on range un véhicule du pool (corps désactivé, jamais lu ni simulé)
 const VEH_HALF: Vec3 = [0.8, 0.5, 1.2]; // boîte (demi-dimensions, volontairement étroite) du test anti-enclavement des véhicules
-const WALK = 6;
-const RUN = 10;
-const JUMP = 6;
+const WALK = ONFOOT.walk;
+const RUN = ONFOOT.run;
 
+const civilLivery = (id: number) => 1 + ((Math.imul(id + 1, 2654435761) >>> 16) % 250);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const fin = (n: unknown, d = 0) => (typeof n === 'number' && Number.isFinite(n) ? n : d);
 const clamp1 = (n: unknown) => Math.max(-1, Math.min(1, fin(n)));
@@ -973,8 +974,14 @@ export class Sim implements SimApi {
     dir.multiplyScalar(i.run ? RUN : WALK);
     const v = p.body.linvel();
     const ground = this.grounded(p);
-    let vy = v.y;
-    if (i.jump && ground) vy = JUMP;
+    const vy = v.y;
+    // Roulade d'esquive : `jump` à pied (front montant, au sol), courte invulnérabilité ; `an` = 2 dans le snapshot pendant la roulade
+    const roll = (p.scratch.roll ??= newRoll()) as RollState;
+    if (i.jump && !p.prevInput.jump && ground && startRoll(roll, this.time, i.f, i.s, i.yaw))
+      p.invulnUntil = Math.max(p.invulnUntil, this.time + ONFOOT.rollMs * 0.8);
+    const rv = rollVelocity(roll, this.time);
+    const px = this.pinfo.get(p.id);
+    if (px) px.an = rv ? 2 : px.an === 2 ? 0 : px.an;
     const kb = p.scratch.kb as [number, number] | undefined;
     let kx = 0, kz = 0;
     if (kb) {
@@ -985,7 +992,7 @@ export class Sim implements SimApi {
       kb[1] *= decay;
       if (Math.hypot(kb[0], kb[1]) < 0.2) p.scratch.kb = undefined;
     }
-    p.body.setLinvel({ x: dir.x + kx, y: vy, z: dir.z + kz }, true);
+    p.body.setLinvel({ x: (rv ? rv[0] : dir.x) + kx, y: vy, z: (rv ? rv[1] : dir.z) + kz }, true);
   }
 
   // ---------- Véhicules ----------
@@ -1159,7 +1166,8 @@ export class Sim implements SimApi {
         drv: v.driver?.id ?? '', sp: round(fin(a.sp)), st: round(fin(a.st)), a: (a.a ?? []).map((n) => round(fin(n), 1000)),
         hp: round(clamp(v.hp / v.def.maxHp, 0, 1)), dead: v.pooled ? 2 : v.dead ? 1 : 0,
       };
-      if (v.livery) vs.lv = v.livery;
+      const lvy = v.livery || (v.def.type === 'police' ? 0 : civilLivery(v.id)); // civils : couleur déterminée par l'id, identique chez tous les clients
+      if (lvy) vs.lv = lvy;
       if (v.locked) vs.lk = 1;
       if (v.ai) vs.ai = 1;
       if (delta) {

@@ -4,13 +4,16 @@ import * as THREE from 'three';
 import type { ActionId } from '../../shared/settings';
 import { box } from '../gfx';
 import type { VehicleViewDef } from './types';
-import { view as citadine } from './car';
+import { view as berline } from './berline';
+import { view as camionnette } from './camionnette';
+import { view as citadine } from './citadine';
+import { view as police } from './police';
 
 // Même liste/ordre que VEHICLE_TYPES (shared/vehicles) ; recopiée pour ne pas embarquer le code serveur dans le client.
-export const VIEW_TYPES = ['citadine'] as const;
+export const VIEW_TYPES = ['citadine', 'berline', 'camionnette', 'police'] as const;
 
 /** Vues disponibles. */
-export const VIEWS: Record<string, VehicleViewDef> = { citadine };
+export const VIEWS: Record<string, VehicleViewDef> = { citadine, berline, camionnette, police };
 
 function hashColor(s: string) {
   let h = 0;

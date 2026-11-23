@@ -1,18 +1,24 @@
 import * as THREE from 'three';
-import type { Input, PlayerSnap, PrivateState } from '../shared/protocol';
+import { PED_KINDS } from '../shared/ids';
+import { PED_STRIDE, type Input, type PlayerSnap, type PrivateState } from '../shared/protocol';
 import { defaultSettings, type ActionId, type Settings } from '../shared/settings';
-import { GameAudio } from './audio';
+import { AutoLock, computeAim, type AimTarget } from './aim';
+import { GameAudio, SOUNDS, registerSound } from './audio';
 import { CameraRig } from './camera';
 import { createChat } from './chat';
 import { Fx } from './fx';
 import { createHud } from './hud';
 import { buildAvatar, disposeAvatar } from './models';
+import { MarkersView } from './markers';
+import { createMinigames } from './minigames';
 import { Net } from './net';
 import { PedsView } from './peds';
 import { ProjectilesView } from './projectiles';
 import { PropsView } from './props';
 import { buildEnvironment } from './scene';
 import { launcher, loadSettings, saveSettings } from './settings';
+import { Pda } from './ui/pda';
+import { showVignettes } from './ui/comic';
 import { getLayout, keyLabel, openSettings } from './ui/settingsPanel';
 import { viewFor } from './vehicles';
 import type { VehicleView } from './vehicles/types';
@@ -23,7 +29,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
-buildEnvironment(scene);
+const city = buildEnvironment(scene);
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 1, 600);
 const rig = new CameraRig(camera);
 addEventListener('resize', () => {
@@ -43,6 +49,13 @@ const fx = new Fx(scene, audio);
 const propsView = new PropsView(scene);
 const projView = new ProjectilesView(scene, fx);
 const pedsView = new PedsView(scene);
+const markers = new MarkersView(scene, camera);
+const autoLock = new AutoLock();
+let lockPos: [number, number, number] | null = null; // cible verrouillée (monde) : le réticule s'y place
+// Sons de la voiture de police et du klaxon civil (le serveur envoie `siren`, `siren_off`, `horn_car`) : enregistrés s'ils manquent
+if (!SOUNDS.horn_car) registerSound('horn_car', (a) => SOUNDS.horn_1(a, {}));
+if (!SOUNDS.siren) registerSound('siren', (a) => { for (let i = 0; i < 4; i++) a.tone(i % 2 ? 640 : 960, i % 2 ? 640 : 960, 0.22, 0.2, 'square', i * 0.22); });
+if (!SOUNDS.siren_off) registerSound('siren_off', (a) => a.tone(700, 300, 0.18, 0.15, 'square'));
 const hud = createHud();
 hud.setVisible(false);
 const applySettings = (s: Settings) => {
@@ -66,6 +79,7 @@ document.addEventListener('click', (e) => {
 
 // ---------- Entrées ----------
 const keys = new Set<string>();
+const blockedAim = () => chat.isOpen() || settingsOpen || pda.isOpen() || mg.active();
 /** Les touches sont lues par code physique (event.code) : le même réglage marche en AZERTY et en QWERTY. */
 const isDown = (a: ActionId) => !!settings.keys[a] && keys.has(settings.keys[a]);
 const axis = (pos: ActionId, neg: ActionId) => (isDown(pos) ? 1 : 0) - (isDown(neg) ? 1 : 0);
@@ -91,7 +105,7 @@ const grab = () => {
   renderer.domElement.requestPointerLock()?.catch?.(() => {});
 };
 addEventListener('wheel', (e) => {
-  if (!playing || chat.isOpen() || settingsOpen) return;
+  if (!playing || chat.isOpen() || settingsOpen || pda.isOpen() || mg.active()) return;
   if (inVehicle) rig.zoomBy(e.deltaY); // zoom des véhicules, au choix du joueur
 }, { passive: true });
 
@@ -118,7 +132,7 @@ document.addEventListener('pointerlockchange', () => { if (!locked()) m1 = m2 = 
 
 let settingsOpen = false;
 addEventListener('keydown', (e) => {
-  if ((e.target as HTMLElement).tagName === 'INPUT' || settingsOpen || !playing) return;
+  if ((e.target as HTMLElement).tagName === 'INPUT' || settingsOpen || !playing || pda.isOpen() || mg.active()) return;
   keys.add(e.code);
   if (!e.repeat) {
     if (e.code === settings.keys.interact) net.send({ type: 'interact' });
@@ -135,7 +149,7 @@ addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => { keys.clear(); m1 = m2 = 0; });
 
 const readInput = (): Input => {
-  const blocked = chat.isOpen() || settingsOpen;
+  const blocked = chat.isOpen() || settingsOpen || pda.isOpen() || mg.active();
   // En véhicule : commandes relatives au véhicule. À pied : relatives à l'écran (haut = avant), converties pour le serveur
   // (qui attend avant/côté par rapport à la direction `yaw` du personnage) en tenant compte du pivot de la caméra.
   const mv = { f: axis('forward', 'back'), s: axis('right', 'left') };
@@ -160,11 +174,24 @@ const readInput = (): Input => {
 
 // ---------- Réseau, menu, pause, chat ----------
 const net = new Net();
-let me_: PrivateState | null = null; // dernier état privé (argent, étoiles, repères…) ; le PDA et les marqueurs le liront en vague 2
-net.onMe = (s) => { me_ = s; };
+let curMe: PlayerSnap | null = null; // moi dans le dernier snapshot échantillonné (carte du PDA)
+let mates: { name: string; x: number; z: number }[] = [];
+let me_: PrivateState | null = null; // dernier état privé (argent, étoiles, repères…)
+let simT = 0; // temps de simulation du dernier snapshot échantillonné (ms) : compte à rebours du PDA
+net.onMe = (s) => { me_ = s; pda.setState(s); };
+const mg = createMinigames({ send: (r) => net.send({ type: 'game', m: { k: 'mg', r } }) });
+// Échap pendant un mini-jeu ou le PDA : le navigateur libère la souris ; on ne veut pas l'écran de pause pour autant
+let quietUntil = 0;
+addEventListener('keydown', (e) => { if (e.code === 'Escape' && (mg.active() || pda.isOpen())) quietUntil = performance.now() + 600; }, true);
 net.onGame = (e) => {
-  // Vague 1 : seuls les toasts sont affichés (dans le chat) ; SMS, mini-jeux, missions… seront branchés en vague 2 (PDA, minigames).
-  if (e.k === 'toast') chat.add({ from: '', text: e.text, sys: true });
+  if (e.k === 'toast') { hud.toast(e.text); chat.add({ from: '', text: e.text, sys: true }); }
+  else if (e.k === 'sms') { hud.toast(`SMS · ${e.sms.from} : ${e.sms.text}`, 5000); audio.play('chat'); }
+  else if (e.k === 'vignettes') { keys.clear(); m1 = m2 = 0; void showVignettes(e.id); }
+  else if (e.k === 'mg_start') { keys.clear(); m1 = m2 = 0; mg.start(e.s); }
+  else if (e.k === 'mg_end') mg.end(e.sid);
+  else if (e.k === 'mort') hud.toast('Tu es K.O. !');
+  else if (e.k === 'arrete') hud.toast('Arrêté par la police !');
+  else if (e.k === 'mission') { if (e.text) hud.toast(e.text); }
 };
 const $ = (id: string) => document.getElementById(id)!;
 const hudText = $('hud');
@@ -187,6 +214,21 @@ const chat = createChat({
     updatePause();
   },
 });
+const pda = new Pda(document.body, {
+  send: (m) => net.send({ type: 'game', m }),
+  now: () => simT,
+  key: () => settings.keys.pda,
+  canOpen: () => playing && !chat.isOpen() && !settingsOpen && !mg.active(),
+  onToggle: (open) => {
+    keys.clear();
+    m1 = m2 = 0;
+    if (open) document.exitPointerLock();
+    else { quietUntil = Math.max(quietUntil, performance.now() + 300); grab(); }
+    updatePause();
+  },
+  player: () => (curMe ? { x: curMe.p[0], z: curMe.p[2], yaw: curMe.yaw } : null),
+  mates: () => mates,
+});
 net.onChat = (m) => {
   chat.add(m);
   if (!m.sys && m.from !== ownName) audio.play('chat');
@@ -200,7 +242,9 @@ let playing = false;
 const updatePause = () => {
   // ?nopause : cache l'écran de pause (captures et tests automatisés en navigateur sans capture de souris)
   const noPause = new URLSearchParams(location.search).has('nopause');
-  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen ? 'flex' : 'none';
+  const quiet = performance.now() < quietUntil;
+  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !pda.isOpen() && !mg.active() && !quiet ? 'flex' : 'none';
+  if (quiet && playing && !locked() && !pda.isOpen() && !mg.active()) { grab(); setTimeout(updatePause, quietUntil - performance.now() + 20); }
 };
 document.addEventListener('pointerlockchange', updatePause);
 pauseEl.addEventListener('click', () => {
@@ -329,6 +373,11 @@ const stats = {
   get input() { return readInput(); },
   get me() { return me_; },
   get peds() { return pedsView.count; },
+  get drawCalls() { return renderer.info.render.calls; },
+  get cityDrawCalls() { return city.drawCalls; },
+  get lock() { return lockPos; },
+  get pda() { return pda; },
+  mg,
 };
 Object.assign(window, { __wtf: stats });
 
@@ -343,7 +392,9 @@ let prevPos: [number, number] | null = null;
 let walkSpeed = 0;
 let prevHp = 100;
 const tmpV = new THREE.Vector3();
+const tmpQ = new THREE.Quaternion();
 const smokeT: number[] = [];
+const driftT: number[] = [];
 const prevDead: boolean[] = [];
 const FALLBACK_ME: PlayerSnap = { id: '', name: '', p: [0, 2, 5], yaw: 0, veh: -1, seat: 0, hp: 100 };
 
@@ -356,6 +407,7 @@ function frame(now: number) {
     renderer.render(scene, camera);
     return;
   }
+  simT = net.simTime;
 
   // Événements visuels et sonores (chacun une seule fois), props et projectiles
   for (const ev of net.drainFx()) fx.handle(ev);
@@ -368,7 +420,7 @@ function frame(now: number) {
     let e = vehicleViews[i];
     if (!e || e.type !== v.type) {
       if (e) scene.remove(e.view.group);
-      e = vehicleViews[i] = { type: v.type, view: viewFor(v.type).build() };
+      e = vehicleViews[i] = { type: v.type, view: viewFor(v.type).build(i) };
       scene.add(e.view.group);
     }
     const g = e.view.group;
@@ -382,6 +434,15 @@ function frame(now: number) {
     g.position.set(...v.p);
     g.quaternion.set(...v.q);
     e.view.update(v, dt);
+    // Fumée de pneus en dérapage (a[1] = 1, envoyé par le serveur)
+    if (v.a[1] > 0.5 && Math.abs(v.sp) > 4) {
+      driftT[i] = (driftT[i] ?? 0) - dt;
+      if (driftT[i] <= 0) {
+        driftT[i] = 0.07;
+        const f = new THREE.Vector3(0, 0, 1).applyQuaternion(tmpQ.set(...v.q)); // arrière du véhicule
+        fx.puff([v.p[0] + f.x * 1.4 + (Math.random() - 0.5) * 0.8, v.p[1] + 0.2, v.p[2] + f.z * 1.4 + (Math.random() - 0.5) * 0.8], 0.8, false);
+      }
+    }
     // Fumée sous 30 % de vie, flammes sous 15 %
     if (v.hp < 0.3) {
       smokeT[i] = (smokeT[i] ?? 0) - dt;
@@ -411,6 +472,7 @@ function frame(now: number) {
     av.visible = p.veh < 0 && p.hp > 0;
     av.position.set(...p.p);
     av.rotation.y = p.yaw;
+    av.rotation.x = p.an === 2 ? -((now / 90) % (Math.PI * 2)) : 0; // roulade : le personnage fait des tonneaux
   }
   for (const [id, av] of avatars) if (!seen.has(id)) { scene.remove(av); disposeAvatar(av); avatars.delete(id); }
 
@@ -424,6 +486,8 @@ function frame(now: number) {
     if (me.veh < 0 && pendingCmd.startsWith('/drive')) net.send({ type: 'chat', text: pendingCmd });
   }
   if (!me) me = { ...FALLBACK_ME, id: net.id };
+  curMe = me;
+  mates = s.players.filter((p) => p.id !== net.id).map((p) => ({ name: p.name, x: p.p[0], z: p.p[2] }));
   const veh = me.veh >= 0 ? s.vehicles[me.veh] : undefined;
   const vdef = veh ? viewFor(veh.type) : null;
   inVehicle = !!veh;
@@ -458,31 +522,56 @@ function frame(now: number) {
       if (Math.hypot(me!.p[0] - v.p[0], me!.p[2] - v.p[2]) < (d.enterRadius ?? 6)) hint = `
 ${L('interact')} : monter dans ${d.name ?? v.type}`;
     });
-    hudText.textContent = `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : sauter · ${L('sprint')} : courir`
+    hudText.textContent = `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : roulade · ${L('sprint')} : courir · ${L('pda')} : PDA`
       + (multi ? ` · ${L('chat')} : chat` : '') + hint;
   }
-  rig.update(dt, { pos: focus, veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance } : undefined });
+  const frozen = mg.active(); // mini-jeu ouvert : caméra et visée figées, entrées nulles
+  if (!frozen) rig.update(dt, { pos: focus, veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance } : undefined });
+  city.update(focus);
+  markers.update(me_?.marks ?? [], dt, focus);
 
   // Visée : le curseur est projeté sur un plan horizontal à hauteur d'épaule
-  const shoulderY = (veh ? veh.p[1] : me.p[1]) + 1.2;
-  ndc.set((cursorX / innerWidth) * 2 - 1, -(cursorY / innerHeight) * 2 + 1);
-  ray.setFromCamera(ndc, camera);
-  const o = ray.ray.origin, d = ray.ray.direction;
-  if (d.y < -0.01) {
-    const t = (shoulderY - o.y) / d.y;
-    aimPoint.set(o.x + d.x * t, shoulderY, o.z + d.z * t);
-  } else {
-    aimPoint.set(o.x + d.x * 30, shoulderY, o.z + d.z * 30);
+  if (!frozen) {
+    const shoulderY = (veh ? veh.p[1] : me.p[1]) + 1.2;
+    ndc.set((cursorX / innerWidth) * 2 - 1, -(cursorY / innerHeight) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    const o = ray.ray.origin, d = ray.ray.direction;
+    if (d.y < -0.01) {
+      const t = (shoulderY - o.y) / d.y;
+      aimPoint.set(o.x + d.x * t, shoulderY, o.z + d.z * t);
+    } else {
+      aimPoint.set(o.x + d.x * 30, shoulderY, o.z + d.z * 30);
+    }
+    const ox = veh ? veh.p[0] : me.p[0], oz = veh ? veh.p[2] : me.p[2];
+    aimO = [ox, shoulderY, oz];
+    tmpV.set(aimPoint.x - ox, 0, aimPoint.z - oz);
+    if (tmpV.lengthSq() < 0.04) tmpV.set(-Math.sin(yaw), 0, -Math.cos(yaw));
+    tmpV.normalize();
+    aimD = [tmpV.x, 0, tmpV.z];
+    const cursorYaw = Math.atan2(-tmpV.x, -tmpV.z);
+    // Verrouillage automatique à pied : flics et gangs debout, sauf visée libre (bouton secondaire)
+    lockPos = null;
+    if (!veh && me.hp > 0) {
+      const targets: AimTarget[] = [];
+      const pd = s.peds;
+      for (let o2 = 0; o2 + PED_STRIDE <= pd.length; o2 += PED_STRIDE) {
+        const kind = PED_KINDS[pd[o2 + 1]];
+        if ((kind === 'flic' || kind === 'gang') && pd[o2 + 5] !== 2) targets.push({ id: pd[o2], pos: [pd[o2 + 2], me.p[1], pd[o2 + 3]], aimHeight: 1.2 });
+      }
+      const t = autoLock.update(me.p, cursorYaw, targets, !blockedAim() && !m2);
+      const aim = computeAim(me.p, cursorYaw, t?.pos ?? null);
+      if (t) { lockPos = t.pos; aimO = aim.origin; aimD = aim.dir; yaw = aim.yaw; } else yaw = cursorYaw;
+    } else { autoLock.reset(); if (!veh) yaw = cursorYaw; }
   }
-  const ox = veh ? veh.p[0] : me.p[0], oz = veh ? veh.p[2] : me.p[2];
-  aimO = [ox, shoulderY, oz];
-  tmpV.set(aimPoint.x - ox, 0, aimPoint.z - oz);
-  if (tmpV.lengthSq() < 0.04) tmpV.set(-Math.sin(yaw), 0, -Math.cos(yaw));
-  tmpV.normalize();
-  aimD = [tmpV.x, 0, tmpV.z];
-  if (!veh) yaw = Math.atan2(-tmpV.x, -tmpV.z);
-  crosshairEl.style.left = `${cursorX}px`;
-  crosshairEl.style.top = `${cursorY}px`;
+  if (lockPos) {
+    tmpV.set(lockPos[0], lockPos[1], lockPos[2]).project(camera);
+    crosshairEl.style.left = `${(tmpV.x * 0.5 + 0.5) * innerWidth}px`;
+    crosshairEl.style.top = `${(-tmpV.y * 0.5 + 0.5) * innerHeight}px`;
+  } else {
+    crosshairEl.style.left = `${cursorX}px`;
+    crosshairEl.style.top = `${cursorY}px`;
+  }
+  crosshairEl.classList.toggle('lock', !!lockPos);
 
   // Son : moteurs (selon vitesse et distance), pas à pied, vent
   const dtSafe = Math.max(dt, 0.001);
@@ -507,7 +596,9 @@ ${L('interact')} : monter dans ${d.name ?? v.type}`;
 
   hud.update({
     hp: me.hp, vehHp: veh ? veh.hp : null, vehName: vdef?.name ?? '', inVehicle: !!veh,
-  });
+    x: focus[0], z: focus[2], yaw: veh ? Math.atan2(2 * (veh.q[3] * veh.q[1] + veh.q[0] * veh.q[2]), 1 - 2 * (veh.q[1] * veh.q[1] + veh.q[2] * veh.q[2])) : me.yaw,
+    mates,
+  }, me_);
 
   playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');
   renderer.render(scene, camera);

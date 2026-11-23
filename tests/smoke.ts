@@ -38,7 +38,7 @@ const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 
 async function main() {
   console.log(`Véhicules enregistrés : ${VEHICLES.map((d) => d.type).join(', ')}`);
-  check('un seul type de véhicule défini (vague 1, temporaire) : citadine', VEHICLES.length === 1 && VEHICLES[0].type === 'citadine');
+  check('4 types de véhicules définis : citadine, berline, camionnette, police', VEHICLES.map((d) => d.type).join() === 'citadine,berline,camionnette,police');
 
   // ---------- 1. Dégâts de choc ----------
   {
@@ -55,6 +55,32 @@ async function main() {
     car2.behavior.body.setLinvel({ x: 0, y: 0, z: -3 }, true);
     run(sim, 1);
     check('choc : rouler doucement ne coûte rien', car2.hp === car2.def.maxHp, `hp=${car2.hp}`);
+  }
+
+  // ---------- 1b. Roulade à pied ----------
+  {
+    const sim = await fresh();
+    sim.addPlayer('r1', 'Rolf');
+    run(sim, 3.5); // fin de l'invulnérabilité de départ
+    const pl = sim.players.get('r1')!;
+    const y0 = pl.body.translation().y, x0 = pl.body.translation().x, z0 = pl.body.translation().z;
+    sim.setInput('r1', { f: 1, yaw: 0, jump: 0 });
+    run(sim, 0.2);
+    sim.setInput('r1', { f: 1, yaw: 0, jump: 1 });
+    let maxY = y0, maxSp = 0, an = 0, inv = false;
+    run(sim, 0.4, () => {
+      const lv = pl.body.linvel();
+      maxY = Math.max(maxY, pl.body.translation().y);
+      maxSp = Math.max(maxSp, Math.hypot(lv.x, lv.z));
+      if (sim.snapshotFull().players[0].an === 2) an = 2;
+      if (sim.time < pl.invulnUntil) inv = true;
+    });
+    const dz = pl.body.translation().z - z0;
+    check('roulade : vitesse > marche, cap vers -z (yaw 0), pas de saut', maxSp > 10 && dz < -3 && Math.abs(pl.body.translation().x - x0) < 0.5 && maxY - y0 < 0.3, `v=${maxSp.toFixed(1)} dz=${dz.toFixed(1)} dy=${(maxY - y0).toFixed(2)}`);
+    check('roulade : an = 2 dans le snapshot et invulnérabilité courte', an === 2 && inv);
+    sim.setInput('r1', { f: 0, jump: 0 });
+    run(sim, 0.6);
+    check('roulade : an revient à 0 ensuite', (sim.snapshotFull().players[0].an ?? 0) === 0);
   }
 
   // ---------- 2. Explosion de véhicule + réapparition ----------
@@ -250,7 +276,7 @@ async function main() {
   {
     const sim = await fresh();
     const total = sim.vehicles.length;
-    check('pool : taille = VEHICLE_POOL des types définis', total === VEHICLE_POOL.citadine, `${total}`);
+    check('pool : taille = VEHICLE_POOL des types définis', total === Object.values(VEHICLE_POOL).reduce((a, b) => a + b, 0), `${total}`);
     check('pool : 2 voitures prises pour le monde de départ, le reste rangé', sim.vehicles.filter((v) => v.pooled).length === total - 2);
     const t0 = performance.now();
     const bodies0 = sim.world.bodies.len();
@@ -304,7 +330,7 @@ async function main() {
     const ws = snap.vehicles[(sim.vehicles as SimVehicle[]).indexOf(w)];
     check('snapshot : rangé = dead 2 ; livrée / verrou / IA exposés', snap.vehicles.some((q) => q.dead === 2) && ws.lv === 2 && ws.lk === 1 && ws.ai === 1 && ws.dead === 0);
     const plain = snap.vehicles[sim.vehicles.indexOf(keep)];
-    check('snapshot : champs optionnels absents par défaut', plain.lv === undefined && plain.lk === undefined && plain.ai === undefined);
+    check('snapshot : civil sans livrée = lv déduit de l’id (stable), verrou / IA absents', typeof plain.lv === 'number' && plain.lv === sim.snapshotFull().vehicles[sim.vehicles.indexOf(keep)].lv && plain.lk === undefined && plain.ai === undefined);
 
     // ai.input : mène le véhicule ; un conducteur humain a priorité
     const p = (sim.addPlayer('d1', 'Dan'), sim.players.get('d1')!);
@@ -465,7 +491,7 @@ async function main() {
     let threw = false;
     try { for (const m of bad) g.onMessage(pl, m); g.onMessage(pl, ok); } catch { threw = true; }
     check('game.onMessage : messages invalides sans effet ni exception', !threw && g.drainOutbox().length === 0);
-    check('game.pedsFlat : vide sans système de piétons (stride 6)', g.pedsFlat().length === 0 && PED_STRIDE === 6);
+    check('game.pedsFlat : multiple de PED_STRIDE (6)', g.pedsFlat().length % PED_STRIDE === 0 && PED_STRIDE === 6);
     // bus : un écouteur qui lève n'empêche pas les autres
     const bus = new GameBus();
     let hits = 0;
