@@ -20,6 +20,7 @@ Vrai jeu à télécharger (application Windows Electron, `.exe` portable + insta
 
 - **Réglages** (`shared/settings.ts`) : touches (event.code, une touche = une action, échange en cas de conflit), sensibilité, volumes. Stockés par l'app dans `settings.json` (IPC `settings:get/save`, toujours revalidés par `sanitizeSettings`), sinon localStorage en navigateur. Le panneau `src/ui/settingsPanel.ts` est partagé entre le menu (`electron/menu.ts`, bundle iife) et le jeu.
 - **Chat** : `chat` dans le protocole, historique/anti-spam/nettoyage dans `server/server.ts`, UI `src/chat.ts` (toujours `textContent`). **Son** : `src/audio.ts`, synthèse Web Audio, aucun fichier audio.
+- **Mobile / tactile** : `src/touch.ts` (détection `pointer: coarse` ou `?touch=1`) ajoute joystick, regard au doigt et boutons en simulant les touches/boutons existants ; aucune logique serveur. Un téléphone ouvre l'adresse de l'hôte (`http://IP:3000`, affichée dans la pause) dans son navigateur : même monde que les PC. Pas de plein écran sur iPhone (Safari).
 - `window.__wtf` expose l'audio pour les tests CDP.
 
 ## Contenu v2 (voir docs/ARCHITECTURE.md, docs/CONTENT-BRIEF.md, docs/wtf-ideas.md)

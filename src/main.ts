@@ -14,6 +14,7 @@ import { PropsView } from './props';
 import { buildEnvironment } from './scene';
 import { launcher, loadSettings, saveSettings } from './settings';
 import { getLayout, keyLabel, openSettings } from './ui/settingsPanel';
+import { createTouch, goImmersive, isTouchDevice } from './touch';
 import { viewFor } from './vehicles';
 import type { VehicleView } from './vehicles/types';
 
@@ -102,7 +103,15 @@ let zoom = 1;
 try {
   zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Number(localStorage.getItem('zoom')) || 1));
 } catch { /* stockage indisponible : zoom par défaut */ }
-const locked = () => document.pointerLockElement === renderer.domElement;
+const touchMode = isTouchDevice();
+let touchPaused = false;
+/** Souris capturée (PC) ou, au toucher, partie en cours et non en pause. */
+const locked = () => (touchMode ? playing && !touchPaused : document.pointerLockElement === renderer.domElement);
+/** Reprend la main sur le jeu : capture de la souris (PC) ; rien à faire au toucher. */
+const grab = () => {
+  if (touchMode) return;
+  renderer.domElement.requestPointerLock()?.catch?.(() => {});
+};
 addEventListener('wheel', (e) => {
   if (!playing || chat.isOpen() || settingsOpen || inventory.isOpen()) return;
   if (inVehicle) {
@@ -115,7 +124,7 @@ addEventListener('wheel', (e) => {
   }
 }, { passive: true });
 
-renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+renderer.domElement.addEventListener('click', () => { if (!touchMode) renderer.domElement.requestPointerLock(); });
 addEventListener('mousemove', (e) => {
   if (!locked()) return;
   lastMouseMove = performance.now();
@@ -194,10 +203,11 @@ const chat = createChat({
     keys.clear();
     m1 = m2 = 0;
     document.exitPointerLock();
+    touch?.releaseAll();
     updatePause();
   },
   onClose: () => {
-    renderer.domElement.requestPointerLock()?.catch?.(() => {});
+    grab();
     updatePause();
   },
 });
@@ -214,10 +224,11 @@ const inventory = createInventory({
     keys.clear();
     m1 = m2 = 0;
     document.exitPointerLock();
+    touch?.releaseAll();
     updatePause();
   },
   onClose: () => {
-    renderer.domElement.requestPointerLock()?.catch?.(() => {});
+    grab();
     updatePause();
   },
 });
@@ -226,6 +237,27 @@ net.onChat = (m) => {
   if (!m.sys && m.from !== ownName) audio.play('chat');
 };
 let ownName = '';
+
+// ---------- Commandes tactiles ----------
+const touch = touchMode ? createTouch({
+  press: (a, down) => {
+    const code = settings.keys[a];
+    if (!code) return;
+    if (down) { keys.add(code); if (a === 'jump') audio.play('jump'); } else keys.delete(code);
+  },
+  look: (dx, dy) => {
+    lastMouseMove = performance.now();
+    yaw -= dx * 0.002 * settings.sensitivity;
+    pitch = Math.max(-1.45, Math.min(1.45, pitch - dy * 0.002 * settings.sensitivity));
+  },
+  fire: (b, down) => { if (b === 1) m1 = down ? 1 : 0; else m2 = down ? 1 : 0; },
+  interact: () => net.send({ type: 'interact' }),
+  chat: () => chat.open(),
+  inventory: () => inventory.toggle(),
+  pause: () => { touch?.releaseAll(); keys.clear(); touchPaused = true; updatePause(); },
+  selectSlot: (i) => { selected = i; },
+  wheel: (n) => net.addWheel(n),
+}) : null;
 
 // Écran de pause : visible dès que la souris n'est plus capturée (Échap)
 const pauseEl = $('pause');
@@ -237,7 +269,9 @@ const updatePause = () => {
   pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !inventory.isOpen() ? 'flex' : 'none';
 };
 document.addEventListener('pointerlockchange', updatePause);
-pauseEl.addEventListener('click', () => renderer.domElement.requestPointerLock());
+pauseEl.addEventListener('click', () => {
+  if (touchMode) { touchPaused = false; updatePause(); } else renderer.domElement.requestPointerLock();
+});
 $('back').addEventListener('click', (e) => {
   e.stopPropagation();
   const l = launcher();
@@ -293,7 +327,8 @@ function join() {
     playing = true;
     hud.setVisible(true);
     chat.setEnabled(net.mode === 'multi');
-    renderer.domElement.requestPointerLock()?.catch?.(() => {});
+    if (touchMode) goImmersive();
+    grab();
     updatePause();
     // ?cmd=/drive%20tank : commande de chat envoyée après la connexion (tests automatisés)
     // (envoyée dans la boucle de rendu dès que le premier snapshot contenant le joueur est reçu)
@@ -506,7 +541,7 @@ function frame(now: number) {
       const d = viewFor(v.type);
       if (Math.hypot(me!.p[0] - v.p[0], me!.p[2] - v.p[2]) < (d.enterRadius ?? 6)) hint = `\n${L('interact')} : monter dans ${d.name ?? v.type}`;
     });
-    hudText.textContent = `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : sauter · ${L('inventory')} : inventaire`
+    hudText.textContent = touchMode ? hint.trim() : `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : sauter · ${L('inventory')} : inventaire`
       + (multi ? ` · ${L('chat')} : chat` : '') + hint;
   }
 
@@ -541,6 +576,9 @@ function frame(now: number) {
     hp: me.hp, vehHp: veh ? veh.hp : null, vehName: vdef?.name ?? '', hotbar: hotbar(), selected, keyLabels: slotLabels(), inVehicle: !!veh,
   });
 
+  touch?.setContext({
+    playing: playing && !touchPaused, inVehicle: !!veh, vehicleType: veh?.type ?? '', physgun: selectedItem() === 'physgun', chat: net.mode === 'multi',
+  });
   playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');
   renderer.render(scene, camera);
 }

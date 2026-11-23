@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
 <title>WTF SIMULATOR</title>
 <link rel="icon" href="data:," />
 <style>
@@ -10,7 +10,7 @@
   #hud, #players { position: fixed; color: #fff; text-shadow: 0 1px 3px #000; pointer-events: none; white-space: pre; }
   #hud { top: 12px; left: 12px; white-space: pre-wrap; max-width: calc(100vw - 190px); }
   #players { top: 12px; right: 12px; text-align: right; max-height: 40vh; overflow: hidden; }
-  #pause { position: fixed; inset: 0; align-items: center; justify-content: center; background: rgba(20, 40, 70, 0.55); cursor: pointer; }
+  #pause { z-index: 300; position: fixed; inset: 0; align-items: center; justify-content: center; background: rgba(20, 40, 70, 0.55); cursor: pointer; }
   #pause #card { cursor: default; width: 440px; max-width: 94vw; }
   #pauseInfo { font-size: 14px; color: #2c3e50; margin: 0 0 14px; }
   #pauseInfo .addr { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 8px; }
@@ -18,7 +18,7 @@
   #pause #pauseInfo button { width: auto; margin: 0; padding: 7px 10px; font-size: 13px; background: #3498db; }
   #pause #options { background: #3498db; margin-bottom: 10px; }
   #pause #back { background: #7f8c8d; }
-  #menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(40, 90, 140, 0.55); }
+  #menu { z-index: 300; position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(40, 90, 140, 0.55); }
   #card { background: #fff; padding: 28px 32px; border-radius: 14px; text-align: center; width: 300px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
   #card h1 { margin: 0 0 6px; font-size: 26px; color: #2c3e50; }
   #card p { margin: 0 0 16px; color: #667; font-size: 14px; }
