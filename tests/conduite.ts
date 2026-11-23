@@ -6,8 +6,10 @@ import { STEP } from '../shared/constants';
 import { getCity, CITY } from '../shared/city/layout';
 import { lanesOf, nextLane, routeLanes, laneWaypoints, lanesFrom, nearestLane, turnKind } from '../shared/city/lanes';
 import { steerTo, advanceWaypoint, newDriveMem } from '../shared/ai/drive';
-import { ONFOOT, newRoll, startRoll, rollVelocity, rollDirection, rolling } from '../shared/onfoot';
-import { AutoLock, computeAim, pickTarget } from '../src/aim';
+import { ONFOOT, FOOT, newRoll, startRoll, rollVelocity, rollDirection, rolling, wishVelocity, approachVelocity, turnToward } from '../shared/onfoot';
+import { AutoLock, AIM_DEFAULTS, computeAim, pickTarget } from '../src/aim';
+import { CameraRig } from '../src/camera';
+import * as THREE from 'three';
 import type { Input } from '../shared/protocol';
 import type { SimPlayer, SimVehicle } from '../shared/api';
 
@@ -280,6 +282,270 @@ function visee() {
   check('visée : dir unitaire vers la cible, lockedOn', a.lockedOn && Math.abs(Math.hypot(...a.dir) - 1) < 1e-9 && a.dir[2] < -0.99);
 }
 
+// ======================================================================================================================
+// RESSENTI : mesures chiffrées par voiture (temps 0-90 %, freinage, rayon, marche arrière, dérapage, frottement de mur, ville de 640 m)
+// ======================================================================================================================
+const FEEL: Record<string, { t90: [number, number]; brake18: [number, number]; r10: [number, number]; rev: [number, number] }> = {
+  citadine: { t90: [2.5, 3.5], brake18: [7.5, 11], r10: [5, 7.5], rev: [6, 10] },
+  berline: { t90: [3.4, 4.6], brake18: [8.5, 12.5], r10: [5.5, 8.5], rev: [6.5, 11] },
+  camionnette: { t90: [3.9, 5.3], brake18: [11, 16], r10: [7, 10.5], rev: [4.5, 8] },
+  police: { t90: [2.9, 4.0], brake18: [7, 10.5], r10: [5.5, 8.5], rev: [7, 11.5] },
+};
+async function ressenti() {
+  const out: Record<string, Record<string, number>> = {};
+  for (const type of Object.keys(FEEL)) {
+    const F = FEEL[type], m: Record<string, number> = {};
+    // accélération pleine : 0-60 %, 0-90 %, 0-98 % de la vitesse de pointe, 600 m de ligne droite
+    let r = await setup(type, -126, 300, 0);
+    let vm = 0; const series: number[] = [];
+    for (let k = 0; k < 60 * 40; k++) { drive(r, { f: 1 }); const t = pose(r).total; series.push(t); vm = Math.max(vm, t); if (pose(r).z < -312) break; }
+    const timeTo = (frac: number) => { const i = series.findIndex((v) => v >= frac * vm); return i < 0 ? Infinity : (i + 1) * STEP; };
+    m.vmax = vm; m.t60 = timeTo(0.6); m.t90 = timeTo(0.9); m.t98 = timeTo(0.98); m.run600 = series.length * STEP;
+    r.sim.dispose();
+    // freinage franc (f = -1) depuis 18 m/s
+    r = await setup(type, -126, 300, 0, 18);
+    const z0 = pose(r).z;
+    for (let k = 0; k < 400; k++) { drive(r, { f: -1 }); if (pose(r).total < 0.3) break; }
+    m.brake18 = z0 - pose(r).z;
+    r.sim.dispose();
+    // rayon de braquage à 10 m/s (vitesse tenue par le gaz)
+    r = await setup(type, -126, 200, 0, 10);
+    for (let k = 0; k < 40; k++) drive(r, { f: 0.4 });
+    const p0 = pose(r);
+    for (let k = 0; k < 40; k++) drive(r, { f: 0.4, s: 1 });
+    const p1 = pose(r);
+    m.r10 = Math.abs(p1.speed) / (Math.abs(wrap(p1.yaw - p0.yaw)) / (40 * STEP));
+    r.sim.dispose();
+    // marche arrière
+    r = await setup(type, -126, 250, 0);
+    let rev = 0; for (let k = 0; k < 600; k++) { drive(r, { f: -1 }); rev = Math.max(rev, -pose(r).speed); }
+    m.rev = rev;
+    r.sim.dispose();
+    // dérapage : 18 m/s, frein à main + braquage 0,67 s, puis on relâche 1 s
+    r = await setup(type, -126, 250, 0, 18);
+    for (let k = 0; k < 20; k++) drive(r, { f: 1 });
+    const s0 = pose(r).total; let slip = 0;
+    for (let k = 0; k < 40; k++) { drive(r, { f: 1, s: 1, jump: 1 }); const p = pose(r); if (p.total > 4) slip = Math.max(slip, Math.abs(wrap(Math.atan2(-p.vx, -p.vz) - p.yaw))); }
+    m.slip = slip; m.keep = pose(r).total / s0;
+    for (let k = 0; k < 60; k++) drive(r, { f: 1 });
+    const pr = pose(r); m.rec = Math.abs(wrap(Math.atan2(-pr.vx, -pr.vz) - pr.yaw));
+    r.sim.dispose();
+    // choc de plein fouet contre le mur nord : arrêt, pas de rebond
+    r = await setup(type, 2, -250, 0, 20);
+    for (let k = 0; k < 400 && pose(r).z > -325; k++) drive(r, { f: 1 });
+    for (let k = 0; k < 40; k++) drive(r, { f: 1 });
+    m.headOn = pose(r).total;
+    r.sim.dispose();
+    // frottement : voiture en travers du mur nord (~40° d'incidence), on garde de l'élan et on repart le long du mur
+    r = await setup(type, -100, -314, -Math.PI / 2 + 0.7, 20);
+    let before = 0, hit = false;
+    for (let k = 0; k < 300; k++) { drive(r, { f: 1 }); if (pose(r).z < -324.5) { before = pose(r).total; hit = true; for (let j = 0; j < 45; j++) drive(r, { f: 1 }); break; } }
+    m.scrape = hit ? pose(r).total / before : 0; m.scrapeYaw = Math.abs(wrap(pose(r).yaw + Math.PI / 2));
+    r.sim.dispose();
+    out[type] = m;
+    console.log(`  # ${type.padEnd(11)} vmax ${vm.toFixed(1)} | 0-60% ${m.t60.toFixed(2)} s 0-90% ${m.t90.toFixed(2)} s 0-98% ${m.t98.toFixed(2)} s | frein 18 m/s ${m.brake18.toFixed(1)} m | R(10 m/s) ${m.r10.toFixed(1)} m | arrière ${m.rev.toFixed(1)} m/s | dérapage ${(m.slip * 57.3).toFixed(0)}° garde ${(m.keep * 100).toFixed(0)} % sortie ${(m.rec * 57.3).toFixed(0)}° | mur frontal ${m.headOn.toFixed(1)} m/s, frottement ${(m.scrape * 100).toFixed(0)} % cap ±${(m.scrapeYaw * 57.3).toFixed(0)}°`);
+    const rng = (v: number, [lo, hi]: [number, number]) => v >= lo && v <= hi;
+    check(`${type} : 0-90 % en ${F.t90[0]}-${F.t90[1]} s`, rng(m.t90, F.t90), `${m.t90.toFixed(2)} s`);
+    check(`${type} : atteint 98 % de sa pointe en < 8 s (la pointe est réellement atteinte)`, m.t98 < 8, `${m.t98.toFixed(2)} s`);
+    check(`${type} : freinage franc depuis 18 m/s en ${F.brake18[0]}-${F.brake18[1]} m`, rng(m.brake18, F.brake18), `${m.brake18.toFixed(1)} m`);
+    check(`${type} : rayon à 10 m/s en ${F.r10[0]}-${F.r10[1]} m`, rng(m.r10, F.r10), `${m.r10.toFixed(1)} m`);
+    check(`${type} : marche arrière ${F.rev[0]}-${F.rev[1]} m/s (≈ 1/3 de la pointe)`, rng(m.rev, F.rev), `${m.rev.toFixed(1)} m/s`);
+    check(`${type} : dérapage lisible (20-50° d'angle, jamais de toupie)`, m.slip > 0.35 && m.slip < 0.87, `${(m.slip * 57.3).toFixed(0)}°`);
+    check(`${type} : le dérapage garde l'élan (>= 75 % de la vitesse)`, m.keep >= 0.75, `${(m.keep * 100).toFixed(0)} %`);
+    check(`${type} : sortie de dérapage : cap rattrapé en 1 s (< 26°)`, m.rec < 0.45, `${(m.rec * 57.3).toFixed(0)}°`);
+    check(`${type} : choc de plein fouet : arrêt sans rebond`, m.headOn < 1, `${m.headOn.toFixed(1)} m/s`);
+    check(`${type} : frottement contre un mur : garde >= 60 % de la vitesse et se range le long du mur (±20°)`, m.scrape >= 0.6 && m.scrapeYaw < 0.35, `${(m.scrape * 100).toFixed(0)} %, ±${(m.scrapeYaw * 57.3).toFixed(0)}°`);
+  }
+  check('0-90 % : citadine la plus vive, camionnette la plus lente', out.citadine.t90 < out.police.t90 && out.police.t90 < out.berline.t90 && out.berline.t90 < out.camionnette.t90);
+  check('rayon : camionnette > berline > citadine', out.camionnette.r10 > out.berline.r10 && out.berline.r10 > out.citadine.r10);
+  check('freinage : camionnette freine plus long que la citadine', out.camionnette.brake18 > out.citadine.brake18 * 1.3);
+  check('dérapage : la citadine glisse plus que la camionnette', out.citadine.slip > out.camionnette.slip);
+  // ville de 640 m : 600 m de ligne droite en 22-34 s pour la citadine, la police traverse plus vite
+  check('ville de 640 m : traversée en ligne droite citadine 22-34 s', out.citadine.run600 >= 22 && out.citadine.run600 <= 34, `${out.citadine.run600.toFixed(1)} s`);
+  check('ville de 640 m : la police traverse en moins de 24 s et plus vite que la citadine', out.police.run600 < 24 && out.police.run600 < out.citadine.run600, `${out.police.run600.toFixed(1)} s`);
+  // un bloc de 64 m à l'arrêt : ni trop long ni trop court
+  const r = await setup('citadine', -126, 300, 0);
+  let tBlock = 0;
+  for (let k = 0; k < 60 * 15; k++) { drive(r, { f: 1 }); if (300 - pose(r).z >= 64) { tBlock = (k + 1) * STEP; break; } }
+  check('un bloc de 64 m départ arrêté : 3,5 à 7 s (citadine)', tBlock > 3.5 && tBlock < 7, `${tBlock.toFixed(2)} s`);
+  r.sim.dispose();
+}
+
+// ======================================================================================================================
+// CAMÉRA (CameraRig) : avance, zoom selon la vitesse, pas de tremblement, entrée au volant, téléportation
+// ======================================================================================================================
+function camera() {
+  const mk = () => new CameraRig(new THREE.PerspectiveCamera(50, 16 / 9, 0.5, 400));
+  const qy = (yaw: number): [number, number, number, number] => [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
+  const dt = 1 / 60;
+  const veh = (sp: number, yaw = 0) => ({ q: qy(yaw), sp, camDistance: 9, vmax: 25 }); // 9 m : distance typique d'une vue de voiture
+  const fr = mk(); fr.zoom = 1;
+  for (let i = 0; i < 120; i++) fr.update(dt, { pos: [0, 1, 0] });
+  const foot = { lead: fr.lead, dist: fr.distance, pitch: fr.pitchDeg };
+  const at = (sp: number) => {
+    const c = mk(); c.zoom = 1; let z = 0;
+    for (let i = 0; i < 360; i++) { z -= sp * dt; c.update(dt, { pos: [0, 0.7, z], veh: veh(sp) }); }
+    // retard du ressort : la voiture est `z - focusZ` devant le point suivi ; le point regardé est `lead` devant lui
+    return { lead: c.lead, dist: c.distance, pitch: c.pitchDeg, offCentre: Math.abs(c.lead - (c.focusZ - z)) };
+  };
+  const s0 = at(0), s10 = at(10), s25 = at(25);
+  console.log(`  # caméra : à pied ${foot.dist.toFixed(1)} m ${foot.pitch.toFixed(0)}° | arrêtée avance ${s0.lead.toFixed(1)} m, dist ${s0.dist.toFixed(1)} m ${s0.pitch.toFixed(0)}° | 10 m/s avance ${s10.lead.toFixed(1)} m, dist ${s10.dist.toFixed(1)} m ${s10.pitch.toFixed(0)}° | 25 m/s avance ${s25.lead.toFixed(1)} m, dist ${s25.dist.toFixed(1)} m ${s25.pitch.toFixed(0)}°, voiture à ${s25.offCentre.toFixed(1)} m du centre`);
+  check('caméra : pas d\'avance à pied ni à l\'arrêt', foot.lead < 0.05 && s0.lead < 0.05);
+  check('caméra : l\'avance croît avec la vitesse (4-8 m à 10 m/s, 12-15 m à 25 m/s)', s10.lead > 4 && s10.lead < 8 && s25.lead > 12 && s25.lead <= 15.01, `${s10.lead.toFixed(1)} / ${s25.lead.toFixed(1)} m`);
+  check('caméra : plus proche à pied, plus loin à haute vitesse', foot.dist < s0.dist && s0.dist < s10.dist && s10.dist < s25.dist, `${foot.dist.toFixed(1)} < ${s0.dist.toFixed(1)} < ${s10.dist.toFixed(1)} < ${s25.dist.toFixed(1)}`);
+  check('caméra : inclinaison 50-65°, plus rasante à haute vitesse', foot.pitch <= 65 && s25.pitch >= 50 && s25.pitch < s0.pitch, `${foot.pitch.toFixed(0)}° / ${s0.pitch.toFixed(0)}° / ${s25.pitch.toFixed(0)}°`);
+  check('caméra : la voiture reste à l\'écran à 25 m/s (< 12 m du point regardé)', s25.offCentre < 12, `${s25.offCentre.toFixed(1)} m`);
+  // tremblement : lacet interpolé à 30 Hz bruité (±0,6° d'un snapshot à l'autre) en ligne droite
+  const lcg = (() => { let s = 7; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296) - 0.5; })();
+  const jit = mk(); jit.zoom = 1;
+  let yawA = 0, yawB = 0, z = 0, minY = 1e9, maxY = -1e9, legacy = 0, legMin = 1e9, legMax = -1e9, lastYaw = 0;
+  for (let i = 0; i < 600; i++) {
+    if (i % 2 === 0) { yawA = yawB; yawB = lcg() * 0.021; }
+    const yaw = yawA + (yawB - yawA) * ((i % 2) / 2);
+    z -= 20 * dt;
+    jit.update(dt, { pos: [0, 0.7, z], veh: veh(20, yaw) });
+    if (i > 120) { minY = Math.min(minY, jit.yaw); maxY = Math.max(maxY, jit.yaw); }
+    const raw = Math.max(-0.26, Math.min(0.26, ((yaw - lastYaw) / dt) * 0.2)); lastYaw = yaw; // ancienne formule : lacet brut
+    legacy += (raw - legacy) * (1 - Math.exp(-4 * dt));
+    if (i > 120) { legMin = Math.min(legMin, legacy); legMax = Math.max(legMax, legacy); }
+  }
+  console.log(`  # tremblement du pivot en ligne droite (bruit ±0,6°) : avant ${((legMax - legMin) * 57.3).toFixed(1)}° crête à crête, après ${((maxY - minY) * 57.3).toFixed(2)}°`);
+  check('caméra : lacet bruité en ligne droite -> pivot stable (< 0,6° crête à crête)', (maxY - minY) * 57.3 < 0.6, `${((maxY - minY) * 57.3).toFixed(2)}°`);
+  // virage soutenu : le pivot se penche (jusqu'à ±15°) dans le bon sens
+  const tr = mk(); let yaw = 0, tz = 0;
+  for (let i = 0; i < 180; i++) { yaw += 1.5 * dt; tz -= 15 * dt; tr.update(dt, { pos: [0, 0.7, tz], veh: veh(15, yaw) }); }
+  check('caméra : virage à gauche soutenu -> pivot positif, <= 15°', tr.yaw > 0.1 && tr.yaw <= 0.2618, `${(tr.yaw * 57.3).toFixed(1)}°`);
+  // montée au volant : cap de la voiture quelconque, pas de coup de pivot
+  const en = mk(); en.lastVehYaw = 2.9;
+  for (let i = 0; i < 30; i++) en.update(dt, { pos: [0, 1, 0] });
+  en.onEnterVehicle();
+  let maxLean = 0;
+  for (let i = 0; i < 60; i++) { en.update(dt, { pos: [0, 0.7, 0], veh: veh(0, 0.4) }); maxLean = Math.max(maxLean, Math.abs(en.yaw)); }
+  check('caméra : entrée dans un véhicule sans coup de pivot', maxLean < 0.01, `${(maxLean * 57.3).toFixed(2)}°`);
+  // téléportation de 30 m, 200 m : saute tout de suite, sans avance résiduelle
+  for (const jump of [30, 200]) {
+    const t = mk(); let z2 = 0;
+    for (let i = 0; i < 240; i++) { z2 -= 25 * dt; t.update(dt, { pos: [0, 0.7, z2], veh: veh(25) }); }
+    z2 -= jump; t.update(dt, { pos: [0, 0.7, z2], veh: veh(25) });
+    const err = Math.abs(t.focusZ - z2);
+    check(`caméra : téléportation de ${jump} m -> la caméra saute sur la cible dès l'image suivante`, err < 0.5, `écart ${err.toFixed(2)} m`);
+    check(`caméra : téléportation de ${jump} m -> l'avance de l'ancien endroit est effacée`, t.lead < 1, `avance ${t.lead.toFixed(2)} m`);
+  }
+  const t2 = mk(); for (let i = 0; i < 60; i++) t2.update(dt, { pos: [0, 1, 0] });
+  t2.teleported(); t2.update(dt, { pos: [10, 1, 10] });
+  check('caméra : teleported() saute même sous le seuil', Math.hypot(t2.focusX - 10, t2.focusZ - 10) < 0.5);
+  const nn = mk(); nn.update(NaN, { pos: [0, 1, 0] }); nn.update(5, { pos: [1, 1, 1] });
+  check('caméra : dt invalide sans NaN', Number.isFinite(nn.camera.position.x + nn.camera.position.y + nn.camera.position.z));
+}
+
+function aPiedRessenti() {
+  const dt = 1 / 60;
+  let v: [number, number] = [0, 0]; const want = wishVelocity(1, 0, 0, false);
+  let t = 0; while (Math.hypot(...v) < 0.9 * ONFOOT.walk && t < 2) { v = approachVelocity(v, want, dt); t += dt; }
+  const tWalk = t;
+  v = [0, 0]; const wr = wishVelocity(1, 0, 0, true); t = 0; while (Math.hypot(...v) < 0.9 * ONFOOT.run && t < 2) { v = approachVelocity(v, wr, dt); t += dt; }
+  const tRun = t;
+  t = 0; while (Math.hypot(...v) > 0.3 && t < 2) { v = approachVelocity(v, [0, 0], dt); t += dt; }
+  const tStop = t;
+  v = [0, -ONFOOT.run]; t = 0; const back = wishVelocity(-1, 0, 0, true); while (v[1] < 0.9 * ONFOOT.run && t < 2) { v = approachVelocity(v, back, dt); t += dt; }
+  const tTurn = t;
+  console.log(`  # à pied : 90 % de la marche en ${tWalk.toFixed(2)} s, de la course en ${tRun.toFixed(2)} s, arrêt en ${tStop.toFixed(2)} s, demi-tour en course ${tTurn.toFixed(2)} s (avant : tout instantané)`);
+  check('à pied : marche à 90 % en 0,06-0,2 s (vif, pas instantané)', tWalk >= 0.06 && tWalk <= 0.2, `${tWalk.toFixed(2)} s`);
+  check('à pied : course à 90 % en 0,12-0,35 s', tRun >= 0.12 && tRun <= 0.35, `${tRun.toFixed(2)} s`);
+  check('à pied : arrêt net en < 0,2 s', tStop < 0.2, `${tStop.toFixed(2)} s`);
+  check('à pied : demi-tour en course en < 0,45 s', tTurn < 0.45, `${tTurn.toFixed(2)} s`);
+  const d = wishVelocity(1, 1, 0, true);
+  check('à pied : diagonale pas plus rapide que la course', Math.abs(Math.hypot(...d) - ONFOOT.run) < 1e-9);
+  check('à pied : sans entrée -> vitesse nulle ; NaN toléré', wishVelocity(0, 0, 1, true).every((x) => x === 0) && wishVelocity(NaN, NaN, 0, false).every((x) => x === 0));
+  const w = wishVelocity(1, 0, Math.PI / 2, false); // lacet 90° : l'avant est l'ouest
+  check('à pied : vitesse voulue suit le cap', Math.abs(w[0] + ONFOOT.walk) < 1e-9 && Math.abs(w[1]) < 1e-9);
+  let cur: [number, number] = [0, 0], over = 0;
+  for (let i = 0; i < 120; i++) { cur = approachVelocity(cur, want, dt); over = Math.max(over, Math.hypot(...cur) - ONFOOT.walk); }
+  check('à pied : aucun dépassement de la vitesse voulue', over < 1e-9);
+  let yaw = 0; t = 0; while (Math.abs(wrap(Math.PI - yaw)) > 0.05 && t < 2) { yaw = turnToward(yaw, Math.PI, dt); t += dt; }
+  const t180 = t;
+  yaw = 0; t = 0; while (Math.abs(wrap(0.5 - yaw)) > 0.02 && t < 2) { yaw = turnToward(yaw, 0.5, dt); t += dt; }
+  const t30 = t;
+  console.log(`  # rotation vers le curseur : 180° en ${t180.toFixed(2)} s, 29° en ${t30.toFixed(2)} s`);
+  check('à pied : demi-tour vers le curseur en 0,1-0,35 s', t180 > 0.1 && t180 < 0.35, `${t180.toFixed(2)} s`);
+  check('à pied : petit écart rattrapé en < 0,3 s', t30 < 0.3, `${t30.toFixed(2)} s`);
+  let y2 = 3.0, finite = true; for (let i = 0; i < 30; i++) { y2 = turnToward(y2, -3.0, dt); if (!Number.isFinite(y2)) finite = false; }
+  check('à pied : tourne par le plus court chemin (3,0 -> -3,0 passe par π)', finite && Math.abs(wrap(y2 + 3.0)) < 0.02);
+  check('à pied : turnToward tolère NaN', turnToward(NaN, 1, dt) === 1 && turnToward(1, NaN, dt) === 1 && turnToward(1, 2, 0) === 1);
+  check('à pied : constantes cohérentes (arrêt plus franc que le démarrage)', FOOT.brake > FOOT.accel && FOOT.accel > FOOT.runAccel);
+}
+
+/** Ancien verrouillage (vague 3) : plus proche dans le cône, bascule si < 70 % de la distance courante. */
+function legacyLock() {
+  let id: number | null = null;
+  type T = { id: number; pos: [number, number, number] };
+  return (from: [number, number, number], yaw: number, targets: T[]) => {
+    const o = AIM_DEFAULTS;
+    const dist = (t: T) => Math.hypot(t.pos[0] - from[0], t.pos[2] - from[2]);
+    const cur = id === null ? null : targets.find((t) => t.id === id) ?? null;
+    const curOk = cur !== null && dist(cur) <= o.range * o.keep;
+    let best: T | null = null, bd = Infinity;
+    for (const t of targets) { const dx = t.pos[0] - from[0], dz = t.pos[2] - from[2], d = Math.hypot(dx, dz); if (!(d > 0.3) || d > o.range || Math.abs(wrap(Math.atan2(-dx, -dz) - yaw)) > o.cone) continue; if (d < bd) { bd = d; best = t; } }
+    let chosen: T | null = curOk ? cur : null;
+    if (best && (!chosen || (best.id !== chosen.id && dist(best) < dist(chosen) * o.switchGain))) chosen = best;
+    id = chosen ? chosen.id : null;
+    return id;
+  };
+}
+
+function viseeStabilite() {
+  const mk = () => ({ lock: new AutoLock(), old: legacyLock() });
+  type TG = { id: number; pos: [number, number, number]; vx: number; vz: number };
+  const crowd = (n: number, seed: number): TG[] => {
+    let s = seed; const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+    return Array.from({ length: n }, (_, i) => ({ id: i + 1, pos: [(rnd() - 0.5) * 30, 0, -4 - rnd() * 20] as [number, number, number], vx: (rnd() - 0.5) * 3, vz: (rnd() - 0.5) * 3 }));
+  };
+  const wander = (tg: TG[]) => { for (const t of tg) { t.pos[0] += t.vx / 60; t.pos[2] += t.vz / 60; if (Math.abs(t.pos[0]) > 18) t.vx = -t.vx; if (t.pos[2] > -3 || t.pos[2] < -24) t.vz = -t.vz; } };
+  // A. main qui tremble : curseur ±8° autour d'une direction, 12 cibles qui errent, 30 s -> combien de changements de cible ?
+  const jitter = (useNew: boolean) => {
+    let s = 5; const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296) - 0.5;
+    const tg = crowd(12, 99), { lock, old } = mk();
+    let last: number | string | null = null, switches = 0;
+    for (let f = 0; f < 60 * 30; f++) {
+      wander(tg);
+      const yaw = 0.1 + rnd() * 0.28; // ±8° de bruit à 60 Hz
+      const id = useNew ? (lock.update([0, 0, 0], yaw, tg, true, f * (1000 / 60))?.id ?? null) : old([0, 0, 0], yaw, tg);
+      if (id !== last) { if (id !== null && last !== null) switches++; last = id; }
+    }
+    return switches;
+  };
+  const ja = jitter(false), jb = jitter(true);
+  console.log(`  # verrouillage, main qui tremble (±8°, 12 cibles mobiles, 30 s) : changements de cible ${ja} -> ${jb}`);
+  check('verrouillage : main qui tremble -> au plus 1 changement par 3 s, à peine plus qu\'avant', jb <= ja + 2 && jb <= 10, `${ja} -> ${jb}`);
+  // B. visée voulue : le curseur passe de la cible 1 à la cible 2 (60° d'écart, même distance) et s'y pose : combien de temps pour verrouiller la 2 ?
+  const aim = (useNew: boolean) => {
+    const tg: TG[] = [{ id: 1, pos: [-7, 0, -12], vx: 0, vz: 0 }, { id: 2, pos: [7, 0, -12.5], vx: 0, vz: 0 }];
+    const { lock, old } = mk(); const y1 = Math.atan2(7, 12), y2 = -Math.atan2(7, 12.5); // cap vers 1 (ouest) puis 2 (est)
+    let tAcq = Infinity;
+    for (let f = 0; f < 60 * 3; f++) {
+      const t = f / 60, yaw = t < 1 ? y1 : t < 1.4 ? y1 + (y2 - y1) * ((t - 1) / 0.4) : y2;
+      const id = useNew ? (lock.update([0, 0, 0], yaw, tg, true, f * (1000 / 60))?.id ?? null) : old([0, 0, 0], yaw, tg);
+      if (id === 2 && tAcq === Infinity) tAcq = t - 1.4;
+    }
+    return tAcq;
+  };
+  const oa = aim(false), ob = aim(true);
+  console.log(`  # verrouillage, le joueur passe d'une cible à l'autre (60° d'écart) : cible 2 verrouillée ${Number.isFinite(oa) ? oa.toFixed(2) + ' s' : 'jamais'} après la fin du geste -> ${ob.toFixed(2)} s`);
+  check('verrouillage : viser une autre cible la verrouille en < 0,5 s (avant : jamais)', ob < 0.5, `${Number.isFinite(oa) ? oa.toFixed(2) : 'jamais'} -> ${ob.toFixed(2)} s`);
+  const lock = new AutoLock();
+  const T = (id: number, x: number, z: number) => ({ id, pos: [x, 0, z] as [number, number, number] });
+  lock.update([0, 0, 0], 0, [T(1, 0, -12)], true, 0);
+  const early = lock.update([0, 0, 0], 0, [T(1, 0, -12), T(2, 0, -3)], true, 100);
+  const late = lock.update([0, 0, 0], 0, [T(1, 0, -12), T(2, 0, -3)], true, 600);
+  check('verrouillage : garde 350 ms avant de changer, puis bascule sur la cible bien meilleure', early?.id === 1 && late?.id === 2);
+  const l2 = new AutoLock(); l2.update([0, 0, 0], 0, [T(1, 0, -10)], true, 0);
+  check('verrouillage : curseur retourné à 180° -> verrou relâché', l2.update([0, 0, 0], Math.PI, [T(1, 0, -10)], true, 1000) === null);
+  const l3 = new AutoLock(); l3.update([0, 0, 0], 0, [T(1, 0, -10), T(2, 3, -14)], true, 0);
+  check('verrouillage : cible disparue -> nouvelle cible aussitôt', l3.update([0, 0, 0], 0, [T(2, 3, -14)], true, 50)?.id === 2);
+  check('verrouillage : à distance égale, la cible la plus proche de l\'axe du curseur', pickTarget([0, 0, 0], 0, [T(1, -8, -8), T(2, 0.5, -11.3)])?.id === 2);
+}
+
+
 async function main() {
   voies();
   await vitesses();
@@ -293,6 +559,11 @@ async function main() {
   await steerToTests();
   aPied();
   visee();
+  console.log('\n--- ressenti (mesures) ---');
+  await ressenti();
+  camera();
+  aPiedRessenti();
+  viseeStabilite();
   console.log(fails ? `\n${fails} ÉCHEC(S)` : '\nTout est PASS');
   process.exit(fails ? 1 : 0);
 }

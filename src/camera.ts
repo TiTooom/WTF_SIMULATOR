@@ -13,7 +13,7 @@ const CAM_LEAN_MAX = (15 * Math.PI) / 180; // pivot maximal en virage
 const ZOOM_MIN = 0.3, ZOOM_MAX = 2.5; // zoom au choix du joueur (molette), mémorisé entre les parties
 const SPRING_FOOT = 12; // pulsation propre du ressort (rad/s), amortissement critique
 const SPRING_VEH = 8;
-const SNAP_DIST = 40; // téléportation (réapparition, entrée en jeu) : on saute sans traverser la ville
+const SNAP_DIST = 25; // téléportation (réapparition, entrée en jeu) : on saute sans traverser la ville ; à 28 m/s le ressort accuse ~7 m de retard seulement
 const Y_UP = new THREE.Vector3(0, 1, 0);
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -21,7 +21,7 @@ export interface CamFollow {
   /** Position suivie (le joueur à pied, ou le véhicule). */
   pos: Vec3;
   /** Présent quand le joueur conduit. */
-  veh?: { q: Quat; sp: number; camDistance: number };
+  veh?: { q: Quat; sp: number; camDistance: number; /** Vitesse de pointe du véhicule (m/s), défaut 25 : règle le zoom et l'avance. */ vmax?: number };
 }
 
 export class CameraRig {
@@ -34,6 +34,8 @@ export class CameraRig {
   private dist = CAM_FOOT_DIST;
   private pitch = PITCH_FOOT;
   private spSmooth = 0;
+  private turnSmooth = 0; // vitesse de lacet filtrée (rad/s) : pas de tremblement du pivot
+  private hadVeh = false;
   private readonly pos = new THREE.Vector3(); // position du ressort
   private readonly vel = new THREE.Vector3();
   private started = false;
@@ -55,7 +57,18 @@ export class CameraRig {
   }
 
   /** Le joueur monte dans un véhicule : la caméra se redresse. */
-  onEnterVehicle() { this.yaw = 0; }
+  onEnterVehicle() { this.yaw = 0; this.hadVeh = false; }
+
+  // Lecture seule (tests, debug)
+  get lead() { return Math.hypot(this.lookAhead[0], this.lookAhead[1]); }
+  get distance() { return this.dist; }
+  get pitchDeg() { return (this.pitch * 180) / Math.PI; }
+  /** Point suivi par le ressort (sans l'avance). */
+  get focusX() { return this.pos.x; }
+  get focusZ() { return this.pos.z; }
+
+  /** Téléportation connue de l'appelant (réapparition, hôpital) : le prochain `update` saute directement sur la cible, sans balayage ni avance résiduelle. */
+  teleported() { this.started = false; }
 
   /** Place la caméra. À appeler une fois par image, avant tout calcul de visée. */
   update(rawDt: number, f: CamFollow) {
@@ -68,21 +81,26 @@ export class CameraRig {
     if (f.veh) {
       this.q.set(...f.veh.q);
       const vy = this.euler.setFromQuaternion(this.q, 'YXZ').y;
+      if (!this.hadVeh) { this.lastVehYaw = vy; this.turnSmooth = 0; this.hadVeh = true; } // 1re image au volant : pas de pic de lacet
       let dy = vy - this.lastVehYaw;
       dy = Math.atan2(Math.sin(dy), Math.cos(dy));
       this.lastVehYaw = vy;
       const turnRate = dt > 0 ? dy / dt : 0;
-      leanTarget = clamp(turnRate * 0.2, -CAM_LEAN_MAX, CAM_LEAN_MAX);
+      this.turnSmooth += (turnRate - this.turnSmooth) * (1 - Math.exp(-7 * dt)); // filtre : le lacet interpolé à 30 Hz ne fait pas trembler l'image
+      leanTarget = clamp(this.turnSmooth * 0.2, -CAM_LEAN_MAX, CAM_LEAN_MAX);
       const sp = f.veh.sp;
       this.spSmooth += (sp - this.spSmooth) * (1 - Math.exp(-3 * dt));
-      const k = clamp(Math.abs(this.spSmooth) / 25, 0, 1); // 25 m/s = vitesse de pointe de la citadine
+      const kl = clamp(Math.abs(this.spSmooth) / (f.veh.vmax && f.veh.vmax > 5 ? f.veh.vmax : 25), 0, 1);
+      const k = kl * kl * (3 - 2 * kl); // zoom progressif : peu de recul en dessous de ~40 % de la pointe
       const lead = clamp(this.spSmooth * 0.6, -9, 15);
       ahead = [-Math.sin(vy) * lead, -Math.cos(vy) * lead];
-      dist = (Math.max(f.veh.camDistance * 0.9, 12) + k * 14) * this.zoom;
+      dist = (clamp(CAM_FOOT_DIST + 2 + (f.veh.camDistance - 9), 15, 21) + k * 12) * this.zoom; // toujours plus loin qu'à pied (15 m), jusqu'à ~29 m à pleine vitesse
       pitch = PITCH_SLOW + (PITCH_FAST - PITCH_SLOW) * k;
       omega = SPRING_VEH;
     } else {
       this.spSmooth = 0;
+      this.turnSmooth = 0;
+      this.hadVeh = false;
     }
 
     // Réglages lissés
@@ -98,6 +116,10 @@ export class CameraRig {
     if (!this.started || Math.hypot(tx - this.pos.x, tz - this.pos.z) > SNAP_DIST) {
       this.pos.set(tx, ty, tz);
       this.vel.set(0, 0, 0);
+      this.lookAhead[0] = this.lookAhead[1] = 0; // l'avance de l'ancien endroit n'a plus de sens
+      this.yaw = 0;
+      this.dist = dist;
+      this.pitch = pitch;
       this.started = true;
     } else {
       const n = Math.max(1, Math.ceil(dt / 0.016));

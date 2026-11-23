@@ -86,6 +86,7 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
   let raf = 0;
   let last = 0;
   let scale = 1;
+  let res = 1; // résolution interne du canvas (netteté sur écran dense)
 
   const audio = () => opts.audio ?? (window as unknown as { __wtf?: { audio?: GameAudio } }).__wtf?.audio;
   const now = () => performance.now();
@@ -95,6 +96,8 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
     scale = Math.min((innerWidth * 0.84) / W, (innerHeight * 0.84) / H, 1.7);
     canvas.style.width = `${W * scale}px`;
     canvas.style.height = `${H * scale}px`;
+    res = clamp(scale * (window.devicePixelRatio || 1), 1, 2.5);
+    if (canvas.width !== Math.round(W * res)) { canvas.width = Math.round(W * res); canvas.height = Math.round(H * res); }
   };
 
   /** Envoie le résultat (une seule fois) et lance la petite animation de sortie. */
@@ -122,6 +125,7 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
     window.removeEventListener('resize', fit);
     document.removeEventListener('pointerlockchange', onLock);
     overlay?.remove();
+    delete (window as unknown as { __mg?: unknown }).__mg;
     overlay = canvas = null;
     g = null;
     cur = null;
@@ -143,6 +147,7 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
     const c = s.env.cursor;
     c.x = clamp(c.x + e.movementX / scale, 0, W);
     c.y = clamp(c.y + e.movementY / scale, 0, H);
+    if (!s.sent) s.game.onMove?.(c.x, c.y);
   }
   function onDown(e: MouseEvent) {
     const s = cur;
@@ -177,7 +182,7 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
     if (!s || !g || !canvas) return;
     raf = requestAnimationFrame(frame);
     const tNow = now();
-    const dt = clamp((tNow - last) / 1000, 0, 0.05);
+    const dt = clamp((tNow - last) / 1000, 0, 0.25);
     last = tNow;
     const t = tNow - s.t0;
 
@@ -192,6 +197,7 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
 
     // Rendu
     g.save();
+    g.setTransform(res, 0, 0, res, 0, 0);
     g.clearRect(0, 0, W, H);
     if (bg) g.drawImage(bg, 0, 0);
     try { s.game.draw(g, t); } catch { /* un dessin raté ne doit pas bloquer */ }
@@ -249,6 +255,7 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
       cur = { start: st, game, env, t0, sent: false, pending: null, outroAt: 0, outroOk: false };
 
       overlay = document.createElement('div');
+      overlay.id = 'mg-overlay';
       overlay.style.cssText = 'position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(10,10,20,0.55);cursor:none;user-select:none';
       canvas = document.createElement('canvas');
       canvas.width = W;
@@ -266,6 +273,8 @@ export function createMinigames(opts: MinigamesOpts): Minigames {
       window.addEventListener('keydown', onKey, true);
       window.addEventListener('resize', fit);
       document.addEventListener('pointerlockchange', onLock);
+      // Sonde pour les tests de bout en bout (tests/minijeux-reel.ts) : lecture seule
+      Object.assign(window, { __mg: { kind: st.kind, sid: st.sid, cursor: env.cursor, scale: () => scale, now: env.now, probe: () => game.probe?.() ?? {}, sent: () => cur?.sent ?? true } });
       sfx(audio(), 'mg_open');
       last = now();
       raf = requestAnimationFrame(frame);

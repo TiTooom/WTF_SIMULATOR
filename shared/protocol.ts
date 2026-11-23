@@ -181,7 +181,7 @@ export type GameServerEvent =
   | { k: 'sms'; sms: Sms }
   | { k: 'mg_start'; s: MinigameStart }
   | { k: 'mg_end'; sid: number; ok: boolean }
-  | { k: 'mission'; ev: 'start' | 'checkpoint' | 'done' | 'fail'; id: string; medal?: MedalTier; ms?: number; text?: string }
+  | { k: 'mission'; ev: 'start' | 'checkpoint' | 'done' | 'fail'; id: string; medal?: MedalTier; ms?: number; text?: string; damage?: number; accuracy?: number; reward?: number; par?: { ms: number; maxDamage: number; minAccuracy: number } }
   | { k: 'vignettes'; id: string } // planches BD (narration)
   | { k: 'arrete' } // arrêté par la police
   | { k: 'mort' }

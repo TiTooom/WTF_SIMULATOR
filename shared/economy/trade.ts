@@ -6,7 +6,7 @@ import { BUST_MONEY_LOSS } from '../wanted';
 import { GOODS } from './goods';
 
 export const START_MONEY = 200; // argent de départ de chaque joueur (euros)
-export const BAG_CAP = 30; // capacité du sac (somme des GOODS[..].weight × quantité)
+export const BAG_CAP = 14; // capacité du sac (somme des GOODS[..].weight × quantité) ; réglée par simulation (sac 30 -> argent infini, voir prices.ts)
 export const STASH_CAP = 300; // capacité de la planque
 export const MAX_MONEY = 1_000_000_000; // plafond d'argent (évite tout dépassement de nombre)
 export const MAX_TRADE_QTY = 50; // quantité maximale par transaction

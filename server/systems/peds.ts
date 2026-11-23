@@ -160,8 +160,8 @@ export const createPeds: SystemFactory = (ctx): PedsSystem => {
     if (!peds.length) return;
     for (const v0 of sim.vehicles) {
       if (v0.pooled || v0.dead) continue;
-      const v = sim.resolveRef(sim.refOf(v0)); // revalide pool, génération, corps
-      if (!v || !bodyOk(v.behavior.body)) continue;
+      const v = v0; // lu directement dans sim.vehicles ce tick (pas de référence conservée) : bodyOk suffit, sans allouer de VRef
+      if (!bodyOk(v.behavior.body)) continue;
       const lv = v.behavior.body.linvel();
       const speed = Math.hypot(lv.x, lv.z);
       if (!(speed > 2)) continue;

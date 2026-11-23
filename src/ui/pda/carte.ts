@@ -178,7 +178,23 @@ function fillSide(side: HTMLDivElement, me: PrivateState) {
     row.append(sw, t);
     card.appendChild(row);
   }
-  side.appendChild(card);
+  // Légende des repères (pastilles identiques à celles de la carte)
+  const leg = document.createElement('div');
+  leg.className = 'pda-card';
+  leg.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12px;font-weight:800';
+  for (const k of ['mission', 'dealer', 'planque', 'camera', 'donneur', 'hopital', 'commissariat', 'cible', 'danger'] as const) {
+    const st = MARK_STYLE[k];
+    const item = document.createElement('span');
+    item.style.cssText = 'display:inline-flex;align-items:center;gap:4px;white-space:nowrap';
+    const dot = document.createElement('span');
+    dot.textContent = st.glyph;
+    dot.style.cssText = `display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:2px solid #14141f;border-radius:50%;background:${st.color};color:#14141f;font-size:11px;font-weight:900`;
+    const nm = document.createElement('span');
+    nm.textContent = st.name;
+    item.append(dot, nm);
+    leg.appendChild(item);
+  }
+  side.append(card, leg);
   const mk = document.createElement('div');
   mk.className = 'pda-card';
   if (!me.marks.length) {

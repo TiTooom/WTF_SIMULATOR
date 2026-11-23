@@ -4,6 +4,7 @@
 // Règles pour les systèmes : jamais de corps Rapier conservé entre deux ticks (VRef + sim.resolveRef), serialize() sans lire Rapier.
 import type { SimPlayer } from '../shared/api';
 import { getCity } from '../shared/city/layout';
+import { BAG_CAP } from '../shared/economy/trade';
 import { GameBus, parseGameMsg, type GameCtx, type GameSystem, type SystemFactory } from '../shared/game';
 import { SYSTEM_IDS, type SystemId } from '../shared/ids';
 import { PED_STRIDE, type GameServerEvent, type PrivateState } from '../shared/protocol';
@@ -176,7 +177,7 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
     privateFor(p) {
       const pos = sim.playerPos(p);
       const out: PrivateState = {
-        money: 0, bag: {}, bagCap: 20, stars: 0, starProgress: 0, district: city.districtAt(pos[0], pos[2]), marks: [], medals: {}, unread: 0,
+        money: 0, bag: {}, bagCap: BAG_CAP, stars: 0, starProgress: 0, district: city.districtAt(pos[0], pos[2]), marks: [], medals: {}, unread: 0,
       };
       for (const s of systems) if (s.privateView) guard(s, 'privateView', () => s.privateView!(p, out));
       if (out.marks.length > MAX_MARKS) out.marks.length = MAX_MARKS;

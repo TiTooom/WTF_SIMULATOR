@@ -13,7 +13,8 @@ export const AN = { NORMAL: 0, BUSTED: 1, ROLL: 2, KO: 3 } as const;
 const PLAYER_COLORS = [0xe63946, 0x1d8cf8, 0xffd23f, 0x2ec4b6, 0xff7a1a, 0xb15cff, 0xff5fa2, 0x7bd62b, 0x00c2e0, 0xf2f2f2, 0xff9f1c, 0x3a86ff];
 const PANTS_COLORS = [0x2b3a67, 0x3d3d4d, 0x5c3d2e, 0x1f4d3a, 0x4a3a6a, 0x6b5a3a];
 const SKINS = [0xf1c27d, 0xe0a370, 0xc68642, 0x8d5524, 0xffdbac];
-const HAIRS = [0x2b1d12, 0x7a4a21, 0xe8c15a, 0x1a1a22, 0xc2410c, 0xd9d9e3];
+// Cheveux : jamais trop sombres (la bande d'ombre du toon et le contour les rendraient noirs d'un bloc)
+const HAIRS = [0x5a3a22, 0x9a5a28, 0xe8c15a, 0x6a6a96, 0xd2501a, 0xd9d9e3];
 
 function hashName(name: string): number {
   let h = 2166136261;
@@ -79,8 +80,14 @@ export function buildAvatar(name: string): THREE.Group {
 
   const hb = new PartBuilder();
   hb.add(new THREE.SphereGeometry(0.25, 12, 9), skin, 0, 1.58, 0);
-  hb.add(new THREE.SphereGeometry(0.275, 12, 6, 0, Math.PI * 2, 0, Math.PI * 0.46), hair, 0, 1.6, 0.02); // cheveux
-  for (const x of [-0.09, 0.09]) hb.box(0.07, 0.1, 0.05, 0x14141f, x, 1.6, -0.235);
+  // Cheveux : calotte reculée et relevée (le visage reste dégagé, avant elle recouvrait toute la face) + frange sur le front
+  hb.add(new THREE.SphereGeometry(0.275, 12, 6, 0, Math.PI * 2, 0, Math.PI * 0.5), hair, 0, 1.63, 0.05);
+  hb.box(0.34, 0.07, 0.12, hair, 0, 1.755, -0.15);
+  for (const x of [-0.09, 0.09]) {
+    hb.box(0.09, 0.1, 0.03, 0xffffff, x, 1.6, -0.247); // blanc de l'oeil
+    hb.box(0.05, 0.075, 0.03, 0x14141f, x, 1.595, -0.263); // pupille
+  }
+  hb.box(0.06, 0.06, 0.06, skin, 0, 1.54, -0.26); // nez
   const head = hull(new THREE.Mesh(hb.build(), toonVC), 0.035);
   body.add(head);
 

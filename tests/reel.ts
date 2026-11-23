@@ -9,6 +9,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { startServer } from '../server/server';
 import { getCity } from '../shared/city/layout';
+import { MISSIONS } from '../shared/missions';
+import { TAXI_LIVERY } from '../shared/activities';
+import { fouilleSpec, tournevisSpec } from '../shared/minigames/rules';
 
 const PORT = 3100 + Math.floor(Math.random() * 800);
 const DEBUG = 9400 + Math.floor(Math.random() * 400);
@@ -181,6 +184,87 @@ async function main() {
       const after = await priv();
       check(Object.keys(after.bag).length === 0 && after.stars === 0, 'arrestation : sac vidé et étoiles remises à 0', `argent ${before.money} -> ${after.money} €, sac ${JSON.stringify(after.bag)}`);
       await shot('6_arrete');
+    }
+
+    // 6b. Mission 1 de bout en bout (donneur -> fouille -> vol -> livraison), écran de fin avec médaille
+    {
+      const def = MISSIONS[0];
+      const giver = getCity().pois.find((p) => p.id === def.giver)!;
+      await sleep(1500); // sortie de l'arrestation (téléportation au commissariat)
+      sim().teleportPlayer(player(), giver.x + 3, 1.3, giver.z);
+      await sleep(700);
+      await ev('window.__ev.length = 0');
+      await ev(`window.__wtf.net.send({ type: 'game', m: { k: 'mission', op: 'start', id: ${JSON.stringify(def.id)} } })`);
+      let mm = await priv() as unknown as { mission?: { id: string; step: number } };
+      for (let i = 0; i < 20 && !mm.mission; i++) { await sleep(300); mm = await priv() as unknown as typeof mm; }
+      check(mm.mission?.id === def.id, 'mission 1 : lancée près du donneur, visible dans le HUD (me.mission)', JSON.stringify(mm.mission));
+      const hudMission = await ev<string>(`document.querySelector('#gta-hud .gh-mission')?.textContent ?? ''`);
+      check(hudMission.includes('MISSION'), 'mission 1 : le HUD affiche la mission', hudMission.slice(0, 60));
+      const answer = async (): Promise<boolean> => {
+        let st: { s: { sid: number; kind: string; seed: number; difficulty: number } } | undefined;
+        for (let i = 0; i < 20 && !st; i++) { await sleep(300); st = (await events()).reverse().find((e) => e.k === 'mg_start') as unknown as typeof st; }
+        if (!st) return false;
+        const data = st.s.kind === 'tournevis' ? [tournevisSpec(st.s.seed, st.s.difficulty).turns, 200] : st.s.kind === 'fouille' ? (() => { const f = fouilleSpec(st.s.seed); return [f.slot, f.swipes]; })() : [1000];
+        await sleep(1700);
+        await ev(`window.__wtf.net.send({ type: 'game', m: { k: 'mg', r: { sid: ${st.s.sid}, ok: true, ms: 1500, data: ${JSON.stringify(data)} } } })`);
+        await sleep(900);
+        await ev('window.__ev.length = 0');
+        return true;
+      };
+      let done: { medal?: string; ms?: number; reward?: number; par?: unknown } | undefined;
+      for (let guard = 0; guard < 40 && !done; guard++) {
+        const cur = await priv() as unknown as { mission?: { step: number } };
+        if (!cur.mission) break;
+        const st = def.steps[cur.mission.step - 1] ?? def.steps[0];
+        if (st.t === 'aller') sim().teleportPlayer(player(), st.x, 1.3, st.z);
+        else if (st.t === 'minijeu') { sim().teleportPlayer(player(), st.x, 1.3, st.z); await sleep(500); await answer(); }
+        else if (st.t === 'voler') {
+          const pp = sim().playerPos(player());
+          const car = sim().vehicles.filter((v) => !v.pooled && !v.dead && v.locked && !v.driver && v.def.type === 'citadine')
+            .sort((a, b) => { const ta = a.behavior.body.translation(), tb = b.behavior.body.translation(); return Math.hypot(ta.x - pp[0], ta.z - pp[2]) - Math.hypot(tb.x - pp[0], tb.z - pp[2]); })[0];
+          if (car) { const t = car.behavior.body.translation(); sim().teleportPlayer(player(), t.x + 1.8, 1.3, t.z); await sleep(600); await ev('window.__ev.length = 0'); await ev(`window.__wtf.net.send({ type: 'interact' })`); await answer(); }
+        } else if (st.t === 'livrer') {
+          const v = player().vehicle;
+          if (v) { v.behavior.body.setTranslation({ x: st.x, y: 0.7, z: st.z }, true); v.behavior.body.setLinvel({ x: 0, y: 0, z: 0 }, true); }
+          else sim().teleportPlayer(player(), st.x, 1.3, st.z);
+        }
+        await sleep(900);
+        done = (await events()).find((e) => e.k === 'mission' && e.ev === 'done') as unknown as typeof done;
+      }
+      for (let i = 0; i < 10 && !done; i++) { await sleep(300); done = (await events()).find((e) => e.k === 'mission' && e.ev === 'done') as unknown as typeof done; }
+      check(!!done && !!done.medal, 'mission 1 : événement de fin avec médaille', JSON.stringify(done));
+      check(!!done && typeof done.reward === 'number' && done.reward > 0 && !!done.par, 'mission 1 : l’événement de fin porte récompense et objectifs (par)');
+      await sleep(900);
+      const result = await ev<string>(`document.body.innerText.includes('MISSION RÉUSSIE') ? 'MISSION RÉUSSIE' : ''`);
+      check(result === 'MISSION RÉUSSIE', 'mission 1 : l’écran de fin (showMissionResult) s’affiche');
+      await shot('7_fin_mission');
+      await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', bubbles: true }))`);
+      await ev(`document.querySelector('div[style*="z-index:960"]')?.click()`);
+      await sleep(900);
+      // le PDA reçoit la médaille
+      const medals = (await priv() as unknown as { medals: Record<string, string> }).medals;
+      check(!!medals[def.id], 'mission 1 : médaille enregistrée dans me.medals', JSON.stringify(medals));
+
+      // Taxi : berline livrée « taxi » ; la touche d'activité (client) démarre la course
+      if (player().vehicle) { await ev(`window.__wtf.net.send({ type: 'interact' })`); await sleep(800); }
+      const pp = sim().playerPos(player());
+      const taxi = sim().acquireVehicle('berline', pp[0] + 6, pp[2], 0, { livery: TAXI_LIVERY, y: 0.7 });
+      check(!!taxi, 'taxi : berline taxi obtenue du pool');
+      if (taxi) {
+        sim().enterVehicle(player(), taxi, 0, true);
+        await sleep(700);
+        const key = await ev<string>('window.__wtf.settings.keys.activity');
+        await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { code: ${JSON.stringify(key)}, bubbles: true }))`);
+        await sleep(400);
+        await ev(`window.dispatchEvent(new KeyboardEvent('keyup', { code: ${JSON.stringify(key)}, bubbles: true }))`);
+        let act: { activity?: { kind: string; text: string } } = await priv() as never;
+        for (let i = 0; i < 20 && !act.activity; i++) { await sleep(300); act = await priv() as never; }
+        check(act.activity?.kind === 'taxi', 'taxi : la touche d’activité démarre le taxi (me.activity)', JSON.stringify(act.activity));
+        let hudAct = '';
+        for (let i = 0; i < 20 && !hudAct.includes('TAXI'); i++) { await sleep(300); hudAct = await ev<string>(`document.querySelector('#gta-hud .gh-mission')?.textContent ?? ''`); } // rendu logiciel lent : le HUD suit avec retard
+        check(hudAct.includes('TAXI'), 'taxi : le HUD affiche l’activité', hudAct.slice(0, 60));
+        await shot('8_taxi');
+      }
     }
 
     // 7. Rendu et erreurs

@@ -2,18 +2,29 @@
 //  - Sol, trottoirs, rues, marquages, arbres, lampadaires, quai et eau : maillages fusionnés GLOBAUX (peu de sommets, ~12 appels de dessin).
 //  - Bâtiments et toits : 25 chunks (CITY.CHUNK = 128 m) construits UNE fois, en `InstancedMesh` (+ coque de contour instanciée),
 //    seuls les 3×3 chunks autour du point suivi sont visibles (≈ 36 appels de dessin).
+//  - Détails (buildDetails) : enseignes de toit par quartier (1 maillage global + atlas canvas), bouches d'incendie et panneaux de rue fusionnés par chunk.
 //  - Couleurs de quartier : toits (couleur du quartier), sols et palette des façades. Fenêtres : motif calculé dans le shader (aucune texture).
 import * as THREE from 'three';
 import { seeded } from '../../shared/constants';
 import { CHUNKS_PER_SIDE, CITY, getCity } from '../../shared/city/layout';
 import { DISTRICTS } from '../../shared/city/districts';
 import { DISTRICT_IDS } from '../../shared/ids';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PartBuilder, boxGeo, boxHullMat, canvasTexture, hullGeometry, outlineMat, punch, toon, toonRaw, toonVC } from '../gfx';
 
 const { CELL, ROAD, SIDEWALK, LOT, BORDER } = CITY;
 export const FOG_COLOR = 0x9fd3ff;
 export const FOG_NEAR = 45;
 export const FOG_FAR = 150;
+
+/** Enseignes de toit : 3 par quartier, dans l'ordre de DISTRICT_IDS (campus, docks, vieux_bourg, zone_indus, les_hauts). Textes inventés, aucun commerce réel. */
+const SIGNS: { text: string; bg: string; fg: string }[] = [
+  { text: 'CAFÉ MACHINE', bg: '#3a8f43', fg: '#fff3a0' }, { text: 'ANNALES', bg: '#d6f0a8', fg: '#1f6f2a' }, { text: 'BIBLIO 24H', bg: '#1f6f2a', fg: '#ffffff' },
+  { text: 'POISSONS', bg: '#2f80ed', fg: '#ffffff' }, { text: 'BAR DU PORT', bg: '#0e3c8c', fg: '#ffd23f' }, { text: 'ANCRE HÔTEL', bg: '#bfe0ff', fg: '#0e3c8c' },
+  { text: 'FROMAGE', bg: '#ffd23f', fg: '#7a3b00' }, { text: 'BOULANGER', bg: '#e8a23a', fg: '#ffffff' }, { text: 'AUBERGE', bg: '#8a2b16', fg: '#ffe9a0' },
+  { text: 'GARAGE', bg: '#f2994a', fg: '#14141f' }, { text: 'FERRAILLE', bg: '#4b4f5c', fg: '#ffb347' }, { text: 'PIÈCES AUTO', bg: '#14141f', fg: '#ff7a1a' },
+  { text: 'GOLF CLUB', bg: '#9b51e0', fg: '#ffffff' }, { text: 'CHAMPAGNE', bg: '#2a145a', fg: '#ffd23f' }, { text: 'SPA & CO', bg: '#e9d4ff', fg: '#5a1fa0' },
+];
 
 const mix = (a: number, b: number, k: number) => new THREE.Color(a).lerp(new THREE.Color(b), k).getHex();
 
@@ -112,6 +123,7 @@ export class CityView {
     this.buildGround();
     this.buildScenery();
     this.buildChunks();
+    this.buildDetails();
     this.buildShore();
     scene.add(this.root);
     this.update(0, 0);
@@ -272,6 +284,131 @@ export class CityView {
     }
     return mesh;
   }
+
+
+  // ---------- Détails de rue : enseignes de toit par quartier, panneaux de rue, bouches d'incendie (3 à 5 appels de dessin au total) ----------
+  private buildDetails() {
+    const city = getCity();
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0);
+
+    // Enseignes : planches inclinées au bord sud des toits (vers la caméra), texte toujours lisible de dessus ; un seul maillage global, un seul atlas
+    const defs = SIGNS;
+    const COLS = 4, ROWS = 4, CW = 256, CH = 128;
+    const atlas = this.own(canvasTexture([CW * COLS, CH * ROWS], (g) => {
+      g.fillStyle = '#14141f';
+      g.fillRect(0, 0, CW * COLS, CH * ROWS);
+      defs.forEach((d, i) => {
+        const x = (i % COLS) * CW, y = Math.floor(i / COLS) * CH;
+        g.fillStyle = d.bg; g.fillRect(x + 6, y + 6, CW - 12, CH - 12);
+        g.strokeStyle = '#14141f'; g.lineWidth = 10; g.strokeRect(x + 5, y + 5, CW - 10, CH - 10);
+        g.strokeStyle = d.fg; g.lineWidth = 4; g.strokeRect(x + 16, y + 16, CW - 32, CH - 32);
+        let size = 62;
+        g.font = `900 ${size}px Impact,"Arial Black",sans-serif`;
+        const w = g.measureText(d.text).width;
+        if (w > CW - 52) { size = Math.floor((size * (CW - 52)) / w); g.font = `900 ${size}px Impact,"Arial Black",sans-serif`; }
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.lineJoin = 'round'; g.lineWidth = 9; g.strokeStyle = '#14141f';
+        g.strokeText(d.text, x + CW / 2, y + CH / 2 + 3);
+        g.fillStyle = d.fg; g.fillText(d.text, x + CW / 2, y + CH / 2 + 3);
+      });
+    }, [1, 1]));
+    atlas.wrapS = atlas.wrapT = THREE.ClampToEdgeWrapping;
+    atlas.anisotropy = 8;
+    const quad = (p0: number[], right: number[], up: number[], n: number[], cell: number, solid: boolean) => {
+      const g = new THREE.BufferGeometry();
+      const pos = [
+        p0[0] - right[0], p0[1] - right[1], p0[2] - right[2],
+        p0[0] + right[0], p0[1] + right[1], p0[2] + right[2],
+        p0[0] + right[0] + up[0], p0[1] + right[1] + up[1], p0[2] + right[2] + up[2],
+        p0[0] - right[0] + up[0], p0[1] - right[1] + up[1], p0[2] - right[2] + up[2],
+      ];
+      const cx = cell % COLS, cy = Math.floor(cell / COLS);
+      const u0 = cx / COLS, u1 = (cx + 1) / COLS, v1 = 1 - cy / ROWS, v0 = 1 - (cy + 1) / ROWS;
+      const e = solid ? 0.5 : 0;
+      const uv = solid ? [u0 + (u1 - u0) * e, v0 + (v1 - v0) * e, u0 + (u1 - u0) * e, v0 + (v1 - v0) * e, u0 + (u1 - u0) * e, v0 + (v1 - v0) * e, u0 + (u1 - u0) * e, v0 + (v1 - v0) * e] : [u0, v0, u1, v0, u1, v1, u0, v1];
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute('normal', new THREE.Float32BufferAttribute([...n, ...n, ...n, ...n], 3));
+      g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+      g.setIndex([0, 1, 2, 0, 2, 3]);
+      return g;
+    };
+    const A = (55 * Math.PI) / 180, sinA = Math.sin(A), cosA = Math.cos(A);
+    const signs: THREE.BufferGeometry[] = [];
+    for (const b of city.buildings) {
+      const blk = city.blocks[b.block];
+      if (!blk || b.w < 9 || b.h < 5) continue;
+      const h = Math.imul(b.id + 7, 2654435761) >>> 0;
+      if ((h & 255) / 255 > 0.6) continue; // ~60 % des bâtiments donnant sur la rue au sud
+      if (LOT / 2 - (b.z - blk.z + b.d / 2) > 7) continue; // le bord sud doit être celui de la rue
+      const cell = DISTRICT_IDS.indexOf(b.district) * 3 + (h >> 8) % 3;
+      const w2 = Math.min(b.w - 2, 7) / 2, hh = w2; // cellule 2:1
+      const base = [b.x, b.h + 0.6, b.z + b.d / 2 - 0.3];
+      const up = [0, hh * 2 * sinA, -hh * 2 * cosA], n = [0, cosA, sinA];
+      this.signPos.push([b.x, b.z + b.d / 2]);
+      signs.push(quad(base, [w2, 0, 0], up, n, cell, false));
+      // dos noir un peu plus large : filet de contour et épaisseur
+      signs.push(quad([base[0], base[1] - 0.14 * sinA - 0.03 * cosA, base[2] + 0.14 * cosA - 0.03 * sinA], [w2 + 0.22, 0, 0], [0, (hh * 2 + 0.28) * sinA, -(hh * 2 + 0.28) * cosA], n, 15, true));
+    }
+    if (signs.length) {
+      const sm = new THREE.Mesh(this.own(mergeGeometries(signs)!), this.own(new THREE.MeshBasicMaterial({ map: atlas, side: THREE.DoubleSide })));
+      sm.frustumCulled = false;
+      this.root.add(sm);
+      this.signCount = signs.length / 2;
+    }
+
+    // Bouches d'incendie : 1 à 2 par îlot, sur le trottoir (rouge, capuchon jaune)
+    const hyd = this.own(new PartBuilder()
+      .add(new THREE.CylinderGeometry(0.2, 0.24, 0.6, 6), 0xe63946, 0, 0.3, 0)
+      .add(new THREE.CylinderGeometry(0.26, 0.26, 0.1, 6), 0xffd23f, 0, 0.66, 0)
+      .box(0.5, 0.14, 0.14, 0xe63946, 0, 0.4, 0)
+      .build());
+    const hydrants: THREE.Matrix4[] = [];
+    for (const b of city.blocks) {
+      const r = Math.imul(b.id + 3, 2246822519) >>> 0;
+      const sx = r & 1 ? 1 : -1, sz = r & 2 ? 1 : -1;
+      hydrants.push(m.clone().compose(p.set(b.x + sx * (LOT / 2 + 1.4), 0.05, b.z + sz * 11), q.identity(), s));
+      if (r & 4) hydrants.push(m.clone().compose(p.set(b.x - sz * 12, 0.05, b.z - sx * (LOT / 2 + 1.4)), q.identity(), s));
+    }
+    this.perChunk(hyd, hydrants);
+
+    // Panneaux de rue : un poteau par carrefour (coin libre nord-est), deux plaques en croix, lisibles de loin
+    const post = this.own(new PartBuilder()
+      .box(0.1, 2.7, 0.1, 0x4b4f5c, 0, 1.35, 0)
+      .box(1.3, 0.34, 0.05, 0x2e9e5b, 0, 2.55, 0)
+      .box(1.1, 0.07, 0.06, 0xffffff, 0, 2.55, 0)
+      .box(0.05, 0.34, 1.3, 0x2f80ed, 0, 2.15, 0)
+      .box(0.06, 0.07, 1.1, 0xffffff, 0, 2.15, 0)
+      .build());
+    const posts: THREE.Matrix4[] = [];
+    for (const n of city.nodes) {
+      if (n.i === CITY.N || n.j === 0) continue; // côté ouest/sud de la ville : pas d'îlot de ce côté
+      posts.push(m.clone().compose(p.set(n.x + 5.6, 0.05, n.z - 5.6), q.setFromAxisAngle(Y, ((n.i + n.j) % 4) * 0.2), s));
+    }
+    this.perChunk(post, posts);
+  }
+
+  /** Petits objets répétés : fusionnés par chunk (un maillage + sa coque par chunk), visibles seulement avec le chunk. */
+  private perChunk(geo: THREE.BufferGeometry, mats: THREE.Matrix4[]) {
+    const city = getCity();
+    const per = new Map<number, THREE.BufferGeometry[]>();
+    const p = new THREE.Vector3();
+    for (const m of mats) {
+      p.setFromMatrixPosition(m);
+      const id = city.chunkOf(p.x, p.z).id;
+      (per.get(id) ?? per.set(id, []).get(id)!).push(geo.clone().applyMatrix4(m));
+    }
+    for (const [id, list] of per) {
+      const merged = this.own(mergeGeometries(list)!);
+      for (const g of list) g.dispose();
+      const mesh = new THREE.Mesh(merged, toonVC);
+      const hull = new THREE.Mesh(this.own(hullGeometry(merged, 0.05)), outlineMat);
+      this.chunks[id].group.add(mesh, hull);
+    }
+  }
+  /** Nombre d'enseignes posées (pour les tests). */
+  signCount = 0;
+  /** Positions (x, z du bord sud du toit) des enseignes, pour les tests et les captures. */
+  readonly signPos: [number, number][] = [];
 
   // ---------- Chunks : bâtiments + toits ----------
   private buildChunks() {

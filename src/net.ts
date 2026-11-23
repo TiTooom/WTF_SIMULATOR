@@ -118,6 +118,8 @@ export class Net {
     const pr = s.props;
     for (let o = 0; o + PROP_STRIDE <= pr.length; o += PROP_STRIDE) this.propState.set(pr[o], pr.slice(o, o + PROP_STRIDE));
     if (s.d) {
+      // Valeurs par défaut omises par le serveur (budget réseau) : on les rétablit
+      for (const v of s.vehicles) { v.drv ??= ''; v.a ??= []; v.hp ??= 1; v.dead ??= 0; v.st ??= 0; if ((v.q as number[]).length === 2) (v as { q: number[] }).q = [0, v.q[0], 0, v.q[1]]; }
       const idx = s.vi ?? [];
       idx.forEach((vi, j) => { this.vehState[vi] = s.vehicles[j]; });
       this.vehState.length = s.vn ?? this.vehState.length;

@@ -12,7 +12,7 @@
 //   hud.flash(force) ; hud.tick(dt) ; hud.setVisible(bool)
 //   HudState.cops : nombre de flics à vue (copsInSight(...) ci-dessous) ; défini => les étoiles alternent rouge/bleu seulement si cops > 0.
 import { DISTRICTS } from '../shared/city/districts';
-import { PED_KINDS } from '../shared/ids';
+import { DISTRICT_IDS, PED_KINDS } from '../shared/ids';
 import { PED_STRIDE, type Mark, type PrivateState } from '../shared/protocol';
 import { playerColor } from './models';
 import { MAP_EXTENT, MARK_STYLE, cityMapCanvas, worldToMap } from './ui/pda/carte';
@@ -72,7 +72,15 @@ const CSS = `
 #gta-hud .gh-district{padding:2px 12px;border:4px solid #000;border-radius:8px;font-size:14px;color:#fff;text-shadow:1px 1px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000;box-shadow:3px 3px 0 #000;max-width:${MAP_PX + 10}px;text-align:center}
 #gta-hud .gh-top{position:absolute;left:50%;top:14px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;max-width:min(560px,70vw)}
 #gta-hud .gh-box{padding:7px 16px;border:4px solid #000;border-radius:10px;background:#fff6dc;color:#1b1b2b;font-size:16px;box-shadow:4px 4px 0 #000;text-align:center}
-#gta-hud .gh-mission{display:none}
+#gta-hud .gh-mission{display:none;min-width:260px;border-color:#000;background:#fff6dc}
+#gta-hud .gh-mission b{display:block;font-size:11px;letter-spacing:.12em;color:#e63946}
+#gta-hud .gh-mpips{display:flex;gap:5px;justify-content:center;margin-top:5px}
+#gta-hud .gh-mpips i{width:16px;height:9px;border:2px solid #000;border-radius:3px;background:#d8d3c2}
+#gta-hud .gh-mpips i.done{background:#3ddc84}#gta-hud .gh-mpips i.cur{background:#ffd23f;animation:ghblink .8s steps(2,jump-none) infinite}
+#gta-hud .gh-mtime{font-size:15px;color:#1b1b2b}#gta-hud .gh-mtime.low{color:#e63946;animation:ghblink .5s steps(2,jump-none) infinite}
+#gta-hud .gh-legend{display:flex;gap:4px;justify-content:center;margin-top:-2px}
+#gta-hud .gh-legend i{width:15px;height:15px;border:3px solid #000;border-radius:4px;box-shadow:2px 2px 0 #000;opacity:.8}
+#gta-hud .gh-legend i.here{opacity:1;transform:translateY(-3px) scale(1.25)}
 #gta-hud .gh-mission small{display:block;font-size:12px;color:#5a5d7a}
 #gta-hud .gh-toast{background:#ffd23f;animation:ghpop .25s ease-out}
 @keyframes ghpop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
@@ -136,12 +144,25 @@ export function createHud() {
   map.width = map.height = MAP_PX * 2;
   mapBox.appendChild(map);
   const districtTag = document.createElement('div'); districtTag.className = 'gh-district';
-  right.append(starsEl, prog, money, mapBox, districtTag);
+  // Légende des quartiers sous la mini-carte : une pastille par quartier (celui où l'on se trouve ressort), nom complet au survol
+  const legend = document.createElement('div'); legend.className = 'gh-legend';
+  const legendChips = new Map<string, HTMLElement>();
+  for (const id of DISTRICT_IDS) {
+    const c = document.createElement('i');
+    c.style.background = hex(DISTRICTS[id].color);
+    c.title = `${DISTRICTS[id].name} (${DISTRICTS[id].gangName})`;
+    legend.appendChild(c);
+    legendChips.set(id, c);
+  }
+  right.append(starsEl, prog, money, mapBox, districtTag, legend);
   const top = document.createElement('div'); top.className = 'gh-top';
   const missionBox = document.createElement('div'); missionBox.className = 'gh-box gh-mission';
+  const missionTag = document.createElement('b');
   const missionMain = document.createElement('div');
+  const missionTime = document.createElement('div'); missionTime.className = 'gh-mtime';
   const missionSub = document.createElement('small');
-  missionBox.append(missionMain, missionSub);
+  const missionPips = document.createElement('div'); missionPips.className = 'gh-mpips';
+  missionBox.append(missionTag, missionMain, missionTime, missionSub, missionPips);
   top.appendChild(missionBox);
   const banner = document.createElement('div'); banner.className = 'gh-banner';
   const hint = document.createElement('div'); hint.className = 'gh-hint';
@@ -258,16 +279,28 @@ export function createHud() {
         bannerT = 3;
       }
       lastDistrict = me.district;
+      for (const [id, c] of legendChips) c.classList.toggle('here', id === me.district);
     }
     const ms = me.mission, ac = me.activity;
     if (ms) {
       missionBox.style.display = 'block';
+      missionTag.textContent = 'MISSION';
       missionMain.textContent = ms.text;
-      missionSub.textContent = `Étape ${ms.step}/${ms.steps} · ` + (ms.timeLimitMs ? `reste ${fmtMs(ms.timeLimitMs - ms.ms)}` : fmtMs(ms.ms));
+      const left = ms.timeLimitMs ? ms.timeLimitMs - ms.ms : 0;
+      missionTime.textContent = ms.timeLimitMs ? `⏱ ${fmtMs(Math.max(0, left))}` : `⏱ ${fmtMs(ms.ms)}`;
+      missionTime.className = 'gh-mtime' + (ms.timeLimitMs && left < 30000 ? ' low' : '');
+      missionTime.style.display = '';
+      missionSub.textContent = `Étape ${Math.min(ms.step, ms.steps)}/${ms.steps}`;
+      const total = Math.max(1, Math.min(12, ms.steps));
+      if (missionPips.childElementCount !== total) { missionPips.textContent = ''; for (let i = 0; i < total; i++) missionPips.appendChild(document.createElement('i')); }
+      Array.from(missionPips.children).forEach((p, i) => { p.className = i + 1 < ms.step ? 'done' : i + 1 === ms.step ? 'cur' : ''; });
+      missionPips.style.display = '';
     } else if (ac) {
       missionBox.style.display = 'block';
+      missionTag.textContent = ac.kind.toUpperCase();
       missionMain.textContent = ac.text;
-      missionSub.textContent = `${ac.kind} · score ${ac.score}`;
+      missionTime.style.display = 'none'; missionPips.style.display = 'none';
+      missionSub.textContent = `score ${ac.score}`;
     } else missionBox.style.display = 'none';
   }
 

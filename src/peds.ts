@@ -19,7 +19,7 @@ const pedMat = toonRaw({}); // couleur = instanceColor
 const hash = (n: number) => { let h = (n * 2654435761) >>> 0; h ^= h >>> 15; return h >>> 0; };
 
 interface Part { mesh: THREE.InstancedMesh; hull: THREE.InstancedMesh | null }
-interface Rec { ph: number; x: number; z: number; fall: number; moving: number; shirt: number; pants: number; skin: number; hat: number; pack: number; seen: number; kind: number }
+interface Rec { ph: number; ph0: number; x: number; z: number; fall: number; moving: number; shirt: number; pants: number; skin: number; hat: number; pack: number; seen: number; kind: number }
 
 const tmpM = new THREE.Matrix4(), root = new THREE.Matrix4(), local = new THREE.Matrix4();
 const tmpQ = new THREE.Quaternion(), tmpQ2 = new THREE.Quaternion(), tmpP = new THREE.Vector3(), tmpS = new THREE.Vector3(), AX = new THREE.Vector3(1, 0, 0), AY = new THREE.Vector3(0, 1, 0);
@@ -82,7 +82,7 @@ export class PedsView {
       const d = DISTRICTS[getCity().districtAt(x, z)].color;
       shirt = d; hat = d;
     }
-    r = { ph: (h % 628) / 100, x, z, fall: 0, moving: 0, shirt, pants: k === 'flic' ? 0x1f2f66 : k === 'dealer' ? 0x1b1b24 : pants, skin, hat, pack, seen: this.frame, kind };
+    r = { ph: (h % 628) / 100, ph0: (h % 628) / 100, x, z, fall: 0, moving: 0, shirt, pants: k === 'flic' ? 0x1f2f66 : k === 'dealer' ? 0x1b1b24 : pants, skin, hat, pack, seen: this.frame, kind };
     this.recs.set(id, r);
     return r;
   }
@@ -106,12 +106,15 @@ export class PedsView {
       const target = down || st === 3 || speed < 0.15 ? 0 : 1;
       r.moving += (target - r.moving) * Math.min(1, dt * 10);
       r.fall += ((down ? 1 : 0) - r.fall) * Math.min(1, dt * 9);
-      r.ph += dt * (run ? 13 : 7.5) * (0.4 + 0.6 * r.moving);
-      const sw = Math.sin(r.ph) * (run ? 0.95 : 0.6) * r.moving;
-      const bob = Math.abs(Math.cos(r.ph)) * (run ? 0.07 : 0.035) * r.moving;
+      // Cadence liée à la vitesse réelle (les pieds ne patinent pas), amplitude nette : marche posée, fuite très ample
+      r.ph += dt * (run ? 15 : Math.max(5.5, Math.min(12, speed * 3.8))) * (0.4 + 0.6 * r.moving);
+      const sw = Math.sin(r.ph) * (run ? 1.25 : 0.85) * r.moving;
+      const bob = Math.abs(Math.cos(r.ph)) * (run ? 0.1 : 0.05) * r.moving;
+      const idle = Math.sin(this.frame * 0.04 + r.ph0) * 0.06 * (1 - r.moving) * (1 - r.fall); // respiration à l'arrêt
       const size = kind === 'flic' ? 1.06 : kind === 'gang' ? 1.0 : kind === 'etudiant' ? 0.97 : 1;
       const wide = kind === 'gang' ? 1.22 : 1;
-      const lean = (run ? 0.3 : kind === 'dealer' ? 0.2 : 0.05) * (1 - r.fall);
+      const lean = (run ? 0.35 : kind === 'dealer' ? 0.22 : kind === 'flic' ? 0 : 0.07) * (1 - r.fall);
+      const armK = kind === 'dealer' ? 0.35 : kind === 'flic' ? 1.1 : kind === 'gang' ? 0.8 : 1; // dealer : mains dans les poches ; flic : pas décidé
 
       // Racine : position, cap, chute (face au ciel, tête vers l'arrière)
       tmpQ.setFromAxisAngle(AY, yaw);
@@ -126,13 +129,13 @@ export class PedsView {
         this.col.setHex(color);
         part.mesh.setColorAt(idx, this.col);
       };
-      const armUp = run ? -1.9 * (1 - r.fall) + r.fall * 1.2 : 0; // fuite : bras en l'air
+      const armUp = run ? -2.5 * (1 - r.fall) + r.fall * 1.2 : 0; // fuite : bras en l'air
       put(P.torso, i, 0, 1.44, 0, 0, r.shirt);
-      put(P.head, i, 0, 1.44, 0, 0, r.skin);
+      put(P.head, i, 0, 1.44 + idle * 0.2, 0, Math.sin(r.ph * 2) * 0.06 * r.moving + idle, r.skin);
       put(P.legL, i, -0.12, 0.82, 0, sw + r.fall * 0.5, r.pants);
       put(P.legR, i, 0.12, 0.82, 0, -sw - r.fall * 0.3, r.pants);
-      put(P.armL, i, -0.33, 1.4, 0, -sw * 0.9 + (run ? armUp * 0.6 : 0) + r.fall * 2.3, r.shirt);
-      put(P.armR, i, 0.33, 1.4, 0, sw * 0.9 + (run ? armUp * 0.6 : 0) - r.fall * 1.6, r.shirt);
+      put(P.armL, i, -0.33, 1.4, 0, -sw * armK + idle + (run ? armUp * 0.7 : 0) + r.fall * 2.3, r.shirt);
+      put(P.armR, i, 0.33, 1.4, 0, sw * armK - idle + (run ? armUp * 0.7 : 0) - r.fall * 1.6, r.shirt);
       if (r.hat) put(P.hat, nHat++, 0, 1.73, 0, 0, r.hat);
       if (r.pack) put(P.pack, nPack++, 0, 1.4, 0.2, 0, r.pack);
     }

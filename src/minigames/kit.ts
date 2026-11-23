@@ -25,6 +25,10 @@ export interface MgGame {
   onDown?(btn: number): void;
   onUp?(btn: number): void;
   onKey?(code: string): void;
+  /** Après chaque déplacement de souris (indépendant du nombre d'images par seconde) : coordonnées du curseur virtuel. */
+  onMove?(x: number, y: number): void;
+  /** État observable (tests de bout en bout : positions à viser). Jamais utilisé par le jeu. */
+  probe?(): Record<string, number>;
 }
 
 export type MgFactory = (env: MgEnv) => MgGame;
@@ -104,3 +108,29 @@ export function drawCursor(g: CanvasRenderingContext2D, x: number, y: number, do
 }
 
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+/** Yeux de dessin animé (globes blancs cerclés, pupilles qui regardent vers (lx, ly) ; `wide` = yeux exorbités). */
+export function googly(g: CanvasRenderingContext2D, x: number, y: number, r: number, lx: number, ly: number, wide = false) {
+  const rr = wide ? r * 1.25 : r;
+  disc(g, x, y, rr, '#fff', 4);
+  const a = Math.atan2(ly - y, lx - x);
+  const d = Math.min(rr * 0.45, Math.hypot(lx - x, ly - y) * 0.1);
+  disc(g, x + Math.cos(a) * d, y + Math.sin(a) * d, rr * (wide ? 0.32 : 0.45), INK, 1);
+}
+
+/** Goutte de sueur (stress). */
+export function sweat(g: CanvasRenderingContext2D, x: number, y: number, s = 1) {
+  g.save();
+  g.translate(x, y);
+  g.scale(s, s);
+  g.beginPath();
+  g.moveTo(0, -12);
+  g.quadraticCurveTo(10, 2, 0, 8);
+  g.quadraticCurveTo(-10, 2, 0, -12);
+  g.fillStyle = '#8ecbff';
+  g.fill();
+  g.lineWidth = 3;
+  g.strokeStyle = INK;
+  g.stroke();
+  g.restore();
+}

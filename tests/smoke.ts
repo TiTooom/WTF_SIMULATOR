@@ -234,13 +234,13 @@ async function main() {
     const cnt = (k: string, d?: string) => c1.pois.filter((p) => p.kind === k && (!d || p.district === d)).length;
     check('POI : 2 dealers, 1 planque, 3 caméras, 1 donneur par quartier',
       DISTRICT_IDS.every((d) => cnt('dealer', d) === 2 && cnt('planque', d) === 1 && cnt('camera', d) === 3 && cnt('donneur', d) === 1));
-    check('POI : 1 commissariat, 1 hôpital, ~20 parkings', cnt('commissariat') === 1 && cnt('hopital') === 1 && cnt('parking') >= 18 && cnt('parking') <= 22, `parkings=${cnt('parking')}`);
+    check('POI : 1 commissariat, 1 hôpital, ~40 parkings (8 par quartier)', cnt('commissariat') === 1 && cnt('hopital') === 1 && cnt('parking') >= 38 && cnt('parking') <= 42 && DISTRICT_IDS.every((d) => cnt('parking', d) >= 6), `parkings=${cnt('parking')}`);
     check('POI : points d\'apparition joueur (≥ 8) et voiture (≥ 2)',
       c1.pois.filter((p) => p.kind === 'spawn' && p.tag === 'player').length >= 8 && c1.pois.filter((p) => p.kind === 'spawn' && p.tag === 'car').length >= 2);
     const inB = (x: number, z: number, m = 0.2) => c1.buildings.some((b) => Math.abs(x - b.x) < b.w / 2 + m && Math.abs(z - b.z) < b.d / 2 + m);
     check('POI : aucun dans un bâtiment', c1.pois.every((p) => !inB(p.x, p.z)), c1.pois.filter((p) => inB(p.x, p.z)).map((p) => p.id).join(','));
     const roadDist = (x: number, z: number) => Math.min(...lines.map((l) => Math.min(Math.abs(x - l), Math.abs(z - l))));
-    check('POI : apparitions et parkings sur la chaussée', c1.pois.filter((p) => p.kind === 'spawn' || p.kind === 'parking').every((p) => roadDist(p.x, p.z) <= CITY.ROAD / 2));
+    check('POI : apparitions et parkings sur la chaussée', c1.pois.filter((p) => p.kind === 'spawn' || p.kind === 'parking').every((p) => roadDist(p.x, p.z) <= CITY.ROAD / 2 + 0.31)); // parkings à ROAD/2 + 0,3 (bord de chaussée)
     check('POI : tous dans l\'enceinte', c1.pois.every((p) => Math.abs(p.x) < CITY.BORDER && Math.abs(p.z) < CITY.BORDER));
     const ids = new Set(c1.pois.map((p) => p.id));
     check('POI : identifiants uniques', ids.size === c1.pois.length);

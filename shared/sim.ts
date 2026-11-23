@@ -6,14 +6,14 @@ import { GROUND, PROJECTILE_KINDS, STEP, VEHICLE_POOL } from './constants';
 import { CITY, getCity } from './city/layout';
 import { NO_INPUT, type FxEvent, type Input, type PlayerSnap, type Snapshot, type Vec3, type VehicleSnap } from './protocol';
 import {
-  G, grp, type AcquireOpts, type DamageKind, type Hit, type ProjectileSpec, type SimApi, type SimHooks, type SimPlayer, type SimProp,
+  G, grp, type AcquireOpts, type DamageKind, type Hit, type ProjectileSpec, type RayProbe, type SimApi, type SimHooks, type SimPlayer, type SimProp,
   type SimVehicle, type StepCtx, type VehicleDef, type VRef,
 } from './api';
 import { wedgeVertices, type PropKind } from './props';
 import { PROP_INDEX, propKindById } from './registry';
 import { VEHICLES } from './vehicles';
 import { bodyOk, isPoison } from './guard';
-import { ONFOOT, newRoll, rollVelocity, startRoll, type RollState } from './onfoot';
+import { ONFOOT, approachVelocity, newRoll, rollVelocity, startRoll, wishVelocity, type RollState } from './onfoot';
 
 // ---------- Réglages ----------
 const PLAYER_HP = 100;
@@ -31,7 +31,8 @@ const VEH_HALF: Vec3 = [0.8, 0.5, 1.2]; // boîte (demi-dimensions, volontaireme
 const WALK = ONFOOT.walk;
 const RUN = ONFOOT.run;
 
-const civilLivery = (id: number) => 1 + ((Math.imul(id + 1, 2654435761) >>> 16) % 250);
+/** Livrée des civils : 2..250 (la livrée 1 est réservée au taxi, jamais attribuée au hasard). */
+const civilLivery = (id: number) => 2 + ((Math.imul(id + 1, 2654435761) >>> 16) % 249);
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const fin = (n: unknown, d = 0) => (typeof n === 'number' && Number.isFinite(n) ? n : d);
 const clamp1 = (n: unknown) => Math.max(-1, Math.min(1, fin(n)));
@@ -371,6 +372,24 @@ export class Sim implements SimApi {
 
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number, exclude?: RAPIER.RigidBody | null): Hit | null {
     return this.cast(origin, dir, maxDist, exclude);
+  }
+
+  private readonly probeRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
+  private readonly probeOut: RayProbe = { kind: 'static', dist: 0, vehicle: null };
+  /** Variante légère de `raycast` pour l'IA (20 Hz x 24 voitures) : sans normale ni vecteurs alloués ; `dir` doit être unitaire. Le résultat est un objet RÉUTILISÉ (à lire tout de suite). */
+  raycastProbe(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, exclude?: RAPIER.RigidBody | null): RayProbe | null {
+    if (!(maxDist > 0) || !Number.isFinite(maxDist + ox + oy + oz + dx + dy + dz)) return null;
+    const r = this.probeRay;
+    r.origin.x = ox; r.origin.y = oy; r.origin.z = oz;
+    r.dir.x = dx; r.dir.y = dy; r.dir.z = dz;
+    const h = this.world.castRay(r, maxDist, true, undefined, undefined, undefined, exclude ?? undefined, (c) => !c.isSensor());
+    if (!h) return null;
+    const res = this.resolve(h.collider);
+    const out = this.probeOut;
+    out.kind = res.kind;
+    out.dist = h.timeOfImpact;
+    out.vehicle = res.o?.vehicle ?? null;
+    return out;
   }
 
   nearby(pos: THREE.Vector3, radius: number): Hit[] {
@@ -900,7 +919,7 @@ export class Sim implements SimApi {
     }
     const radius = clamp(4 + v.def.maxHp / 50, 5, 9);
     this.explode(pos, radius, 14, 50, by);
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 6; i++) {
       const a = Math.random() * Math.PI * 2;
       const s = 5 + Math.random() * 9;
       this.createProp('debris', new THREE.Vector3(pos.x + (Math.random() - 0.5), pos.y + 0.5, pos.z + (Math.random() - 0.5)),
@@ -971,9 +990,11 @@ export class Sim implements SimApi {
 
   private walk(p: SimPlayer) {
     const i = p.input;
-    const dir = new THREE.Vector3(i.s, 0, -i.f).applyAxisAngle(Y_AXIS, i.yaw);
-    if (dir.lengthSq() > 1) dir.normalize();
-    dir.multiplyScalar(i.run ? RUN : WALK);
+    // Vitesse voulue lissée (accélération limitée, freinage plus franc) : shared/onfoot.ts
+    const cur = (p.scratch.wv ??= [0, 0]) as [number, number];
+    const nv = approachVelocity(cur, wishVelocity(i.f, i.s, i.yaw, i.run), STEP);
+    cur[0] = nv[0];
+    cur[1] = nv[1];
     const v = p.body.linvel();
     const ground = this.grounded(p);
     const vy = v.y;
@@ -994,7 +1015,7 @@ export class Sim implements SimApi {
       kb[1] *= decay;
       if (Math.hypot(kb[0], kb[1]) < 0.2) p.scratch.kb = undefined;
     }
-    p.body.setLinvel({ x: (rv ? rv[0] : dir.x) + kx, y: vy, z: (rv ? rv[1] : dir.z) + kz }, true);
+    p.body.setLinvel({ x: (rv ? rv[0] : cur[0]) + kx, y: vy, z: (rv ? rv[1] : cur[1]) + kz }, true);
   }
 
   // ---------- Véhicules ----------
@@ -1164,8 +1185,8 @@ export class Sim implements SimApi {
         } catch { /* corps retiré par le véhicule lui-même */ }
       }
       const vs: VehicleSnap = {
-        type: v.def.type, p: [round(pp[0]), round(pp[1]), round(pp[2])], q: [round(qq[0], 1000), round(qq[1], 1000), round(qq[2], 1000), round(qq[3], 1000)],
-        drv: v.driver?.id ?? '', sp: round(fin(a.sp)), st: round(fin(a.st)), a: (a.a ?? []).map((n) => round(fin(n), 1000)),
+        type: v.def.type, p: delta ? [round(pp[0], 10), round(pp[1], 10), round(pp[2], 10)] : [round(pp[0]), round(pp[1]), round(pp[2])], q: [round(qq[0], 1000), round(qq[1], 1000), round(qq[2], 1000), round(qq[3], 1000)],
+        drv: v.driver?.id ?? '', sp: round(fin(a.sp), delta ? 10 : 100), st: round(fin(a.st)), a: (a.a ?? []).map((n) => round(fin(n), 1000)),
         hp: round(clamp(v.hp / v.def.maxHp, 0, 1)), dead: v.pooled ? 2 : v.dead ? 1 : 0,
       };
       const lvy = v.livery || (v.def.type === 'police' ? 0 : civilLivery(v.id)); // civils : couleur déterminée par l'id, identique chez tous les clients
@@ -1173,6 +1194,14 @@ export class Sim implements SimApi {
       if (v.locked) vs.lk = 1;
       if (v.ai) vs.ai = 1;
       if (delta) {
+        // Budget réseau : les valeurs par défaut sont omises sur le fil (le client les rétablit : Net.expand) ; la comparaison porte sur l'objet compact
+        const w = vs as Partial<VehicleSnap>;
+        if (!vs.drv) delete w.drv;
+        if (!vs.a.length) delete w.a;
+        if (vs.hp === 1) delete w.hp;
+        if (!vs.dead) delete w.dead;
+        if (!vs.st) delete w.st;
+        if (!vs.q[0] && !vs.q[2]) (w as { q: number[] }).q = [vs.q[1], vs.q[3]]; // rotation autour de la verticale seule (voitures) : [qy, qw]
         const str = JSON.stringify(vs);
         if (this.vSent[idx] === str) return;
         this.vSent[idx] = str;
@@ -1189,7 +1218,8 @@ export class Sim implements SimApi {
       if (delta) (p as PX).sentAsleep = asleep; // (la 1re lecture endormie est comparée : l'arrondi du dernier mouvement)
       const t = p.body.translation();
       const r = p.body.rotation();
-      const x = round(t.x), y = round(t.y), z = round(t.z), qx = round(r.x, 1000), qy = round(r.y, 1000), qz = round(r.z, 1000), qw = round(r.w, 1000);
+      const pr = 100;
+      const x = round(t.x, pr), y = round(t.y, pr), z = round(t.z, pr), qx = round(r.x, 1000), qy = round(r.y, 1000), qz = round(r.z, 1000), qw = round(r.w, 1000);
       if (delta) {
         if (last && last[2] === x && last[3] === y && last[4] === z && last[5] === qx && last[6] === qy && last[7] === qz && last[8] === qw && last[9] === flags) continue;
         p.sent = [p.id, 0, x, y, z, qx, qy, qz, qw, flags];

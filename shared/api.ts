@@ -108,6 +108,9 @@ export interface Hit {
   player?: SimPlayer;
 }
 
+/** Résultat de `raycastProbe` (objet réutilisé). */
+export interface RayProbe { kind: HitKind; dist: number; vehicle: SimVehicle | null }
+
 export type DamageKind = 'impact' | 'explosion' | 'bullet';
 
 export interface ProjectileSpec {
@@ -136,6 +139,8 @@ export interface SimApi {
 
   /** Rayon contre tout (sol, props, véhicules, joueurs) en ignorant éventuellement un corps. */
   raycast(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number, exclude?: RAPIER.RigidBody | null): Hit | null;
+  /** Rayon léger pour l'IA : pas d'allocation, `dir` unitaire ; retourne un objet réutilisé (à lire immédiatement) ou null. */
+  raycastProbe(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, exclude?: RAPIER.RigidBody | null): RayProbe | null;
   /** Corps proches d'un point (aimants, ondes de choc…). */
   nearby(pos: THREE.Vector3, radius: number): Hit[];
 

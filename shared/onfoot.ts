@@ -8,6 +8,11 @@
 //   si rv : p.body.setLinvel({ x: rv[0] + kx, y: vy, z: rv[1] + kz }, true) à la place de la marche ; sinon marche normale (WALK/RUN = ONFOOT.walk/run).
 //   Supprimer le saut (`if (i.jump && ground) vy = JUMP`) : jump = roulade à pied (protocole). Optionnel : an (PlayerSnap) = 2 pendant la roulade (rolling(roll, time)).
 export const ONFOOT = { walk: 6, run: 10, roll: 14, rollMs: 450, rollCooldownMs: 900 } as const;
+/**
+ * Ressenti de la marche (m/s², rad/s) : démarrage vif mais non instantané (6 m/s en ~0,11 s, 10 m/s en ~0,25 s), arrêt net (~0,1 s),
+ * demi-tour de vitesse en ~0,2 s, personnage qui se tourne vers le curseur en ~0,2 s pour 180°.
+ */
+export const FOOT = { accel: 55, runAccel: 40, brake: 75, turnRate: 20 } as const;
 
 export interface RollState {
   /** Fin de la roulade en cours (ms de simulation), 0 = aucune. */
@@ -53,4 +58,38 @@ export function rollVelocity(r: RollState, now: number): [number, number] | null
   const k = Math.max(0, Math.min(1, (now - r.start) / ONFOOT.rollMs)); // 0 -> 1
   const sp = ONFOOT.roll * (1.15 - 0.55 * k * k); // 16 m/s au départ, ~8,4 à la fin
   return [r.dx * sp, r.dz * sp];
+}
+
+/** Vitesse voulue (repère monde) à partir de l'entrée (f, s), du cap de la caméra/du joueur et de la course. Normalisée : pas de diagonale plus rapide. */
+export function wishVelocity(f: number, s: number, yaw: number, run: boolean | number): [number, number] {
+  let x = Number.isFinite(s) ? s : 0, z = Number.isFinite(f) ? -f : 0;
+  const len = Math.hypot(x, z);
+  if (len < 0.05) return [0, 0];
+  if (len > 1) { x /= len; z /= len; }
+  const c = Math.cos(yaw), si = Math.sin(yaw), sp = run ? ONFOOT.run : ONFOOT.walk;
+  return [(x * c + z * si) * sp, (-x * si + z * c) * sp];
+}
+
+/**
+ * Rapproche la vitesse horizontale `cur` de `want` : accélération limitée (FOOT.accel / runAccel), freinage plus franc (FOOT.brake) ;
+ * un demi-tour passe par zéro. Fonction pure (retourne un nouveau couple).
+ */
+export function approachVelocity(cur: readonly [number, number], want: readonly [number, number], dt: number): [number, number] {
+  const dx = want[0] - cur[0], dz = want[1] - cur[1];
+  const d = Math.hypot(dx, dz);
+  if (!(d > 1e-9) || !(dt > 0)) return [want[0], want[1]];
+  const wl = Math.hypot(want[0], want[1]), cl = Math.hypot(cur[0], cur[1]);
+  const a = wl < cl - 0.01 || d > wl + cl - 0.01 ? FOOT.brake : wl > ONFOOT.walk + 0.5 ? FOOT.runAccel : FOOT.accel;
+  const step = a * dt;
+  if (d <= step) return [want[0], want[1]];
+  return [cur[0] + (dx / d) * step, cur[1] + (dz / d) * step];
+}
+
+/** Tourne `cur` vers `target` (rad, plus court chemin) : vitesse proportionnelle à l'écart, plafonnée à `rate` rad/s. Sans à-coup à l'arrivée. */
+export function turnToward(cur: number, target: number, dt: number, rate: number = FOOT.turnRate): number {
+  if (!Number.isFinite(cur)) return Number.isFinite(target) ? target : 0;
+  if (!Number.isFinite(target) || !(dt > 0)) return cur;
+  const err = Math.atan2(Math.sin(target - cur), Math.cos(target - cur));
+  const step = Math.max(-rate * dt, Math.min(rate * dt, err * (1 - Math.exp(-14 * dt))));
+  return cur + step;
 }

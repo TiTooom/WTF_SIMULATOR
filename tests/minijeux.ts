@@ -3,16 +3,18 @@
 // Système serveur testé sur un vrai Sim (temps de simulation = 60 pas/s), sans réseau ni port : le contexte de jeu est reconstitué à la main.
 // Couvre : résultat trop rapide refusé, sid inconnu/rejoué/d'un autre joueur ignoré, annulation (éloignement, touché, mort, expiration),
 // un seul mini-jeu actif par joueur, validations déterministes par graine pour les 8 jeux, parseGameMsg, serialize sans session.
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Sim } from '../shared/sim';
 import { GameBus, parseGameMsg, type GameCtx, type GameSystem } from '../shared/game';
 import { getCity } from '../shared/city/layout';
 import { MINIGAME_KINDS, type MinigameKind } from '../shared/ids';
 import {
-  DIGI_COLS, RULES, briseGlaceSpec, desamorcageSpec, digicodePos, digicodeSpec, dosageSpec, fouilleSpec, liassesSpec, rng, tournevisSpec,
+  DIGI_COLS, DOSAGE_CLIENT_RATE, RULES, briseGlaceSpec, courtCircuitSpec, desamorcageSpec, digicodePos, digicodeSpec, dosageSpec, fouilleSpec, liassesSpec, rng, tournevisSpec,
 } from '../shared/minigames/rules';
 import type { GameServerEvent, MinigameResult } from '../shared/protocol';
-import { createMinigames, type MinigameDone, type MinigamesSystem } from '../server/systems/minigames';
-import { createTheft, profileOf } from '../server/systems/theft';
+import { TTL_MARGIN_MS, createMinigames, type MinigameDone, type MinigamesSystem } from '../server/systems/minigames';
+import { THEFT_PROFILE, createTheft, profileOf } from '../server/systems/theft';
 
 let fails = 0;
 const check = (name: string, ok: boolean, detail = '') => {
@@ -37,10 +39,10 @@ function honest(kind: MinigameKind, seed: number, d: number): { data: number[]; 
       return { data: stops, ms: Math.max(1200, stops[DIGI_COLS - 1] + 100) };
     }
     case 'dosage': return { data: dosageSpec(seed, d).targets, ms: 2600 };
-    case 'fouille': { const s = fouilleSpec(seed); return { data: [s.slot, s.swipes], ms: 1000 }; }
+    case 'fouille': { const s = fouilleSpec(seed, d); return { data: [s.slot, s.swipes], ms: 1000 }; }
     case 'brise_glace': return { data: [briseGlaceSpec(seed, d).hits], ms: 900 };
-    case 'desamorcage': return { data: [desamorcageSpec(seed).wire], ms: 1000 };
-    case 'liasses': return { data: [liassesSpec(seed).target], ms: 1100 };
+    case 'desamorcage': return { data: [desamorcageSpec(seed, d).wire], ms: 1000 };
+    case 'liasses': return { data: [liassesSpec(seed, d).target], ms: 1100 };
   }
 }
 
@@ -343,6 +345,190 @@ async function main() {
     sim.interact('p2');
     check('véhicule rangé : plus de vol possible', starts('p2').length === 0);
     check('theft : serialize sans état', JSON.stringify(theft.serialize!()) === '{"v":1}');
+  }
+
+  // ---- 9. robustesse : boucle, mort/arrestation, deux joueurs, déconnexion, résultats tardifs ----
+  {
+    const stepAll = (ms: number) => { for (let i = 0; i < Math.ceil(ms / (1000 / 60)); i++) { sim.step(); mg.postStep?.(); } };
+    if (p1.vehicle) sim.interact('p1');
+    if (p2.vehicle) sim.interact('p2');
+    if (sim.isDead(p1)) sim.respawnPlayer(p1);
+    if (sim.isDead(p2)) sim.respawnPlayer(p2);
+    sim.teleportPlayer(p1, -100, 1, 100);
+    sim.teleportPlayer(p2, 100, 1, -100);
+    p1.hp = 100;
+    p2.hp = 100;
+    stepAll(300);
+    mg.cancel(p1);
+    mg.cancel(p2);
+
+    // 9a. relancé en boucle : démarrer / annuler / mal répondre 400 fois, rien ne fuit
+    reset();
+    let lastSid = 0;
+    let monotone = true;
+    let started = 0;
+    for (let i = 0; i < 400; i++) {
+      const kind = MINIGAME_KINDS[i % MINIGAME_KINDS.length];
+      const sid = mg.startMinigame(p1, kind, `boucle:${i}`, (i % 11) / 10, undefined, i);
+      if (sid === null) continue;
+      started++;
+      if (sid <= lastSid) monotone = false;
+      lastSid = sid;
+      if (mg.startMinigame(p1, kind, 'doublon', 0.5) !== null) monotone = false; // jamais deux sessions pour un joueur
+      if (i % 3 === 0) mg.cancel(p1, 'boucle');
+      else if (i % 3 === 1) send('p1', { sid, ok: true, ms: 5, data: [1, 2, 3] }); // trop rapide
+      else { send('p1', { sid, ok: false, ms: 5 }); send('p1', { sid, ok: true, ms: 900, data: [1] }); } // échec puis rejeu ignoré
+      if (i % 50 === 0) stepAll(20);
+    }
+    check('boucle de 400 sessions : toutes démarrées, sid croissants, jamais deux sessions', started === 400 && monotone && mg.activeOf(p1) === null);
+    check('boucle : une fin par session, aucune réussite par accident', dones.length === 400 && dones.every((d) => !d.ok) && doneBus.length === 400);
+    check('boucle : aucune fuite de session après coup', mg.activeOf(p1) === null && !sim.broken);
+    reset();
+
+    // 9b. joueur mort : aucun démarrage ; arrêté : la session en cours est annulée, la suivante peut démarrer
+    sim.damagePlayer(p1, 999, null, 'test');
+    stepAll(50);
+    check('mini-jeu refusé pendant la mort', mg.startMinigame(p1, 'tournevis', 'mort', 0.3) === null && starts().length === 0);
+    send('p1', { sid: lastSid, ok: true, ms: 2000, data: [3, 500] });
+    check('résultat envoyé par un joueur mort : ignoré', out.length === 0);
+    stepAll(6000); // réapparition
+    p1.hp = 100;
+    sim.teleportPlayer(p1, -100, 1, 100);
+    stepAll(100);
+    const sidBust = mg.startMinigame(p1, 'digicode', 'arret', 0.3)!;
+    check('après réapparition le mini-jeu redémarre', typeof sidBust === 'number');
+    reset();
+    bus.emit('playerBusted', { p: p1 });
+    check('arrestation : session annulée (mg_end ok=false, raison arrete)', ends().length === 1 && !ends()[0].ok && dones[0]?.reason === 'arrete' && mg.activeOf(p1) === null);
+    const sidAfter = mg.startMinigame(p1, 'liasses', 'apres_arret', 0.3);
+    check('démarrage possible juste après l\'arrestation (joueur vivant)', typeof sidAfter === 'number');
+    const hereB = sim.playerPos(p1);
+    sim.teleportPlayer(p1, hereB[0] + 150, 1, hereB[2]); // retour au commissariat : loin de la scène
+    stepAll(60);
+    check('transporté au commissariat pendant le jeu : annulé (eloigne)', mg.activeOf(p1) === null && dones.at(-1)?.reason === 'eloigne');
+    sim.teleportPlayer(p1, -100, 1, 100);
+    stepAll(60);
+    reset();
+
+    // 9c. deux joueurs en même temps : résultats indépendants
+    {
+      const a = mg.startMinigame(p1, 'brise_glace', 'duo', 0.3, undefined, 31)!;
+      const b = mg.startMinigame(p2, 'desamorcage', 'duo', 0.3, undefined, 32)!;
+      check('deux sessions simultanées, sid distincts', a !== b && mg.activeOf(p1)?.sid === a && mg.activeOf(p2)?.sid === b);
+      reset();
+      const ha = honest('brise_glace', 31, 0.3);
+      stepAll(ha.ms);
+      send('p2', { sid: a, ok: true, ms: ha.ms, data: ha.data }); // le sid de l'autre : ignoré
+      check('le sid d\'un autre joueur ne clôt rien', mg.activeOf(p1)?.sid === a && mg.activeOf(p2)?.sid === b && out.length === 0);
+      send('p1', { sid: a, ok: true, ms: ha.ms, data: ha.data });
+      check('p1 réussit pendant que p2 joue encore', ends('p1').length === 1 && ends('p1')[0].ok && ends('p2').length === 0 && mg.activeOf(p2)?.sid === b);
+      sim.damagePlayer(p2, 10, null, 'test');
+      stepAll(50);
+      check('p2 touché : annulé sans toucher p1', ends('p2').length === 1 && !ends('p2')[0].ok && ends('p1').length === 1 && dones.some((d) => d.p === p2 && d.reason === 'touche'));
+      p2.hp = 100;
+      reset();
+    }
+
+    // 9d. déconnexion pendant un jeu
+    {
+      let cb2: MinigameDone | null = null;
+      const sid = mg.startMinigame(p2, 'fouille', 'depart', 0.2, (e) => { cb2 = e; }, 9)!;
+      mg.onLeave!(p2);
+      check('déconnexion : session close, onDone « depart » une seule fois', mg.activeOf(p2) === null && dones.length === 1 && dones[0].reason === 'depart' && ends('p2').length === 0 && cb2 !== null);
+      const hf = honest('fouille', 9, 0.2);
+      reset();
+      send('p2', { sid, ok: true, ms: hf.ms, data: hf.data }); // résultat arrivé après la déconnexion
+      check('résultat reçu après la déconnexion : ignoré', out.length === 0 && dones.length === 0);
+      // joueur supprimé sans passer par onLeave : la session est close en silence au tick suivant
+      sim.addPlayer('p3', 'Carl');
+      const p3 = sim.players.get('p3')!;
+      let called = 0;
+      mg.startMinigame(p3, 'digicode', 'fantome', 0.2, () => { called++; });
+      sim.removePlayer('p3');
+      stepAll(100);
+      check('joueur supprimé sans onLeave : session close en silence, onDone une fois', called === 1 && mg.activeOf(p3) === null && ends('p3').length === 0 && !sim.broken);
+      // même identifiant, nouveau joueur (reconnexion) : l'ancien sid n'est pas rejoué
+      sim.addPlayer('p3', 'Carl');
+      const p3b = sim.players.get('p3')!;
+      const sidB = mg.startMinigame(p3b, 'brise_glace', 'retour', 0.2, undefined, 77)!;
+      reset();
+      send('p3', { sid: sidB - 1, ok: true, ms: 900, data: [5] });
+      check('reconnexion : ancien sid ignoré, nouvelle session intacte', out.length === 0 && mg.activeOf(p3b)?.sid === sidB);
+      mg.cancel(p3b);
+      sim.removePlayer('p3');
+      stepAll(30);
+      reset();
+    }
+
+    // 9e. résultats tardifs
+    {
+      const seedL = 4242;
+      const sidL = mg.startMinigame(p1, 'brise_glace', 'tard', 0.2, undefined, seedL)!;
+      stepAll(RULES.brise_glace.maxMs + 400); // au-delà de maxMs + tolérance, avant l'expiration serveur
+      const hl = honest('brise_glace', seedL, 0.2);
+      send('p1', { sid: sidL, ok: true, ms: RULES.brise_glace.maxMs + 380, data: hl.data });
+      check('résultat trop tardif (après maxMs) refusé : trop_long', ends().length === 1 && !ends()[0].ok && dones[0]?.reason === 'trop_long', dones[0]?.reason);
+      reset();
+      const sidE = mg.startMinigame(p1, 'brise_glace', 'expire', 0.2, undefined, seedL)!;
+      stepAll(RULES.brise_glace.maxMs + TTL_MARGIN_MS + 500);
+      check('session expirée toute seule (reason expire)', ends().length === 1 && !ends()[0].ok && dones[0]?.reason === 'expire' && mg.activeOf(p1) === null);
+      reset();
+      send('p1', { sid: sidE, ok: true, ms: 900, data: hl.data });
+      check('résultat reçu après l\'expiration : ignoré, aucun événement', out.length === 0 && dones.length === 0);
+      check('nouvelle session aussitôt après une expiration', typeof mg.startMinigame(p1, 'digicode', 'suite', 0.2) === 'number');
+      mg.cancel(p1);
+      reset();
+    }
+
+    // 9f. difficulté 0..1 effective dans chaque jeu (spec monotone et plausible)
+    {
+      const seeds = Array.from({ length: 200 }, (_, i) => i * 7919 + 3);
+      check('tournevis : 3 tours en facile, 5 en difficile', tournevisSpec(1, 0).turns === 3 && tournevisSpec(1, 1).turns === 5);
+      check('digicode : zone plus étroite et colonnes plus rapides avec la difficulté', digicodeSpec(5, 1).cols[0].half < digicodeSpec(5, 0).cols[0].half && digicodeSpec(5, 1).cols[0].speed > digicodeSpec(5, 0).cols[0].speed);
+      check('dosage : tolérance plus faible avec la difficulté', dosageSpec(5, 1).tol < dosageSpec(5, 0).tol && dosageSpec(5, 1).tol > 0.03);
+      check('brise_glace : 5 coups en facile, 6 en difficile', briseGlaceSpec(5, 0).hits === 5 && briseGlaceSpec(5, 1).hits === 6);
+      check('court_circuit : zone et contact plus étroits, jauge qui retombe plus vite', courtCircuitSpec(5, 1).zoneR < courtCircuitSpec(5, 0).zoneR && courtCircuitSpec(5, 1).contact < courtCircuitSpec(5, 0).contact && courtCircuitSpec(5, 1).decay > courtCircuitSpec(5, 0).decay);
+      check('fouille : 3 balayages en facile, 4 en difficile', fouilleSpec(5, 0).swipes === 3 && fouilleSpec(5, 1).swipes === 4);
+      check('desamorcage : flash plus court avec la difficulté (jamais sous 300 ms)', desamorcageSpec(5, 1).flashMs < desamorcageSpec(5, 0).flashMs && desamorcageSpec(5, 1).flashMs >= 300);
+      check('liasses : cible 3..5, tolérance 1 puis 0', seeds.every((s) => { const a = liassesSpec(s, 0).target; const b = liassesSpec(s, 1).target; return a >= 3 && a <= 4 && b >= 4 && b <= 5; }) && liassesSpec(1, 0).maxOver === 1 && liassesSpec(1, 1).maxOver === 0);
+      // faisabilité : le geste le plus long reste sous maxMs avec de la marge humaine, à toutes les difficultés
+      let feasible = true;
+      for (const s of seeds) for (const d of [0, 0.5, 1]) {
+        const ds = dosageSpec(s, d);
+        if (ds.targets.reduce((a, b) => a + b, 0) / DOSAGE_CLIENT_RATE * 1000 + 3 * 300 > RULES.dosage.maxMs) feasible = false;
+        if (briseGlaceSpec(s, d).hits / 6 * 1000 + 300 > RULES.brise_glace.maxMs) feasible = false; // 6 coups/s
+      }
+      check('dosage et brise_glace : réalisables dans les temps à toutes les difficultés', feasible);
+      // la difficulté est bien lue par validate (sinon un client facile gagnerait en difficile)
+      check('validate lit la difficulté : fouille difficile exige 4 balayages', !RULES.fouille.validate(8, 1, { sid: 1, ok: true, ms: 1500, data: [fouilleSpec(8).slot, 3] }) && RULES.fouille.validate(8, 1, { sid: 1, ok: true, ms: 1500, data: [fouilleSpec(8).slot, 4] }));
+      check('validate lit la difficulté : liasses difficile refuse une liasse de trop', !RULES.liasses.validate(5, 1, { sid: 1, ok: true, ms: 1500, data: [liassesSpec(5, 1).target + 1] }) && RULES.liasses.validate(5, 0, { sid: 1, ok: true, ms: 1500, data: [liassesSpec(5, 0).target + 1] }));
+      check('theft : chaque profil utilise un mini-jeu de vol et une difficulté 0..1', Object.values(THEFT_PROFILE).every((pr) => (pr.kind === 'tournevis' || pr.kind === 'court_circuit') && pr.difficulty >= 0 && pr.difficulty <= 1));
+    }
+
+    // 9g. contrôles statiques du client (aucune exécution de navigateur ici) : sons distincts, pas de HTML injecté, pas de tactile, écouteurs appariés
+    {
+      const dir = join(process.cwd(), 'src', 'minigames');
+      const read = (f: string) => readFileSync(join(dir, f), 'utf8');
+      const names = (src: string) => new Set([...src.matchAll(/env\.sfx\('([a-z_]+)'/g)].map((m) => m[1]));
+      const per = new Map<string, Set<string>>(MINIGAME_KINDS.map((k) => [k, names(read(`${k}.ts`))]));
+      const registered = new Set([...read('sounds.ts').matchAll(/registerSound\('([a-z_]+)'/g)].map((m) => m[1]));
+      const used = new Set<string>();
+      per.forEach((s) => s.forEach((n) => used.add(n)));
+      check('tous les sons utilisés par les jeux sont enregistrés', [...used].every((n) => registered.has(n)), [...used].filter((n) => !registered.has(n)).join(','));
+      const signature = MINIGAME_KINDS.map((k) => {
+        const others = new Set<string>();
+        per.forEach((s, o) => { if (o !== k) s.forEach((n) => others.add(n)); });
+        return [k, [...per.get(k)!].filter((n) => !others.has(n))] as const;
+      });
+      check('chaque jeu a au moins un son bien à lui', signature.every(([, own]) => own.length >= 1), signature.filter(([, o]) => !o.length).map(([k]) => k).join(','));
+      const all = readdirSync(dir).filter((f) => f.endsWith('.ts')).map((f) => read(f)).join('\n');
+      check('aucun innerHTML / insertAdjacentHTML / eval dans les mini-jeux', !/innerHTML|insertAdjacentHTML|outerHTML|\beval\(|new Function/.test(all));
+      check('aucune entrée tactile dans les mini-jeux (souris et clavier seulement)', !/touchstart|touchmove|touchend|pointerdown|pointermove|TouchEvent/.test(all));
+      const idx = read('index.ts');
+      const adds = [...idx.matchAll(/addEventListener\('([a-z]+)'/g)].map((m) => m[1]).sort();
+      const rems = [...idx.matchAll(/removeEventListener\('([a-z]+)'/g)].map((m) => m[1]).sort();
+      check('index.ts : chaque addEventListener a son removeEventListener', JSON.stringify(adds) === JSON.stringify(rems), `${adds.join(',')} / ${rems.join(',')}`);
+    }
   }
 
   check('aucune erreur de simulation', errors.length === 0 && !sim.broken, errors.slice(0, 2).join(' | '));

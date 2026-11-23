@@ -1,25 +1,38 @@
 // PROPRIÉTAIRE : game-camera-driving
 // Trafic civil : jusqu'à 24 voitures du pool (citadine / berline / camionnette) pilotées par v.ai.input (steerTo + voies de shared/city/lanes.ts)
-// et des voitures GARÉES (POI `parking`, verrouillées, immobiles tant qu'un mini-jeu ne les a pas déverrouillées via `unlock`).
+// et des voitures GARÉES (places de stationnement le long des rues, verrouillées, immobiles tant qu'un mini-jeu ne les a pas déverrouillées via `unlock`).
 // Règle Rapier : aucune référence de corps conservée entre deux ticks. On garde des VRef (+ des nombres) et on revalide
 // (sim.refOf/resolveRef + bodyOk) avant chaque lecture. serialize() ne lit pas Rapier (trafic éphémère : seulement la graine).
+// Coût : le travail est réparti sur les ticks (nettoyage tous les 30, apparition d'une seule voiture à la fois, IA en tiers à 20 Hz par voiture)
+// et la boucle chaude n'alloue presque rien (obstacles réutilisés, waypoints et itinéraires en cache).
 import * as THREE from 'three';
 import type { SimVehicle, VRef } from '../../shared/api';
 import { newDriveMem, steerTo, type DriveMem } from '../../shared/ai/drive';
-import { laneWaypoints, nearestLane, nextLane, routeLanes, turnKind, type Lane } from '../../shared/city/lanes';
+import { laneWaypoints, nearestLane, nextLane, parkingSlots, routeLanes, turnKind, type Lane, type ParkSlot } from '../../shared/city/lanes';
 import { bodyOk } from '../../shared/guard';
 import type { GameSystem, SystemFactory } from '../../shared/game';
 import { PED_ST, type PedState } from '../../shared/peds';
 
-/** Plafond de voitures civiles tenues par le système (en mouvement + garées). */
-export const TRAFFIC_MAX = 24;
-/** Dont au plus autant de voitures garées. */
-export const PARKED_MAX = 6;
+/** Civils en circulation visés au maximum (atteint avec 3 joueurs ou plus). */
+export const MOVING_MAX = 24;
+/** Voitures garées tenues au maximum. */
+export const PARKED_MAX = 8;
+/** Plafond de voitures tenues par le système (en mouvement + garées). */
+export const TRAFFIC_MAX = MOVING_MAX + PARKED_MAX;
+/** Emplacements du pool de civils laissés libres pour les autres systèmes (missions, vol, joueurs). */
+const POOL_RESERVE = 3;
+/** Population en mouvement visée selon le nombre de joueurs : min(24, 12 + 5 × joueurs). */
+export const movingTarget = (players: number) => Math.min(MOVING_MAX, 12 + 5 * Math.max(0, players));
+/** Garantie : au moins autant de voitures garées verrouillées à moins de PARKED_NEAR m de chaque joueur. */
+export const PARKED_GUARANTEE = 2;
+export const PARKED_NEAR = 90;
+const PARKED_VISIBLE = 45; // on préfère faire apparaître une garée au-delà (hors champ), mais jamais au-delà de PARKED_NEAR - 2
+const PARKED_TOO_CLOSE = 28;
 const SPAWN_MIN = 70, SPAWN_MAX = 110, DESPAWN = 140;
-const PARKED_SPAWN_MIN = 60, PARKED_SPAWN_MAX = 118;
-const AI_EVERY = 3; // pas physiques entre deux décisions (60 Hz / 3 = 20 Hz)
+const AI_EVERY = 3; // pas physiques entre deux décisions d'une même voiture (60 Hz / 3 = 20 Hz) ; les voitures sont réparties en 3 tranches
 const AI_DT = AI_EVERY / 60;
-const MANAGE_EVERY = 30; // 0,5 s
+const CULL_EVERY = 30; // 0,5 s : revalidation et disparition
+const SPAWN_CIVIL_AT = 10, SPAWN_PARKED_AT = 15; // périodes (ticks) des essais d'apparition : une seule voiture par essai
 const HALF_LEN = 2.3; // demi-longueur d'une voiture (m)
 
 export interface TrafficSystem extends GameSystem {
@@ -33,6 +46,8 @@ export interface TrafficSystem extends GameSystem {
   isParked(v: SimVehicle): boolean;
   /** Vrai si `v` est un civil en circulation tenu par le trafic. */
   isCivil(v: SimVehicle): boolean;
+  /** Nombre de voitures garées tenues à moins de `r` m de (x, z). */
+  parkedNear(x: number, z: number, r: number): number;
   /** Nombres de voitures tenues (tests, debug). */
   readonly counts: { moving: number; parked: number };
 }
@@ -41,6 +56,7 @@ interface Civil {
   ref: VRef;
   mem: DriveMem;
   route: Lane[]; // voies à suivre ; waypoint i = bout (ou coin) de route[i]
+  wps: { x: number; z: number }[] | null; // waypoints de `route` (cache, null = à recalculer)
   wpi: number;
   cruise: number; // vitesse de croisière (m/s)
   fleeUntil: number; // temps de simulation (ms)
@@ -51,17 +67,22 @@ interface Civil {
   lastHp: number;
   age: number; // secondes
   shift: number; // décalage latéral courant vers la gauche (m) pour dépasser une voiture garée
+  slice: number; // tranche d'IA (0..2)
+  n: number; // décisions prises (le rayon d'obstacle n'est lancé qu'une fois sur deux)
+  rayGap: number; // dernier résultat du rayon d'obstacle (m, Infinity = rien) : le rayon n'est lancé qu'une décision sur deux
 }
-interface Parked { ref: VRef; poi: string; x: number; z: number }
+interface Parked { ref: VRef; slot: string; x: number; z: number }
 
-/** État d'un véhicule vivant lu une fois par cycle d'IA. kind : 0 autre (joueur, police…), 1 civil, 2 garé. */
+/** État d'un véhicule vivant lu une fois par cycle d'IA (objets réutilisés). kind : 0 autre (joueur, police…), 1 civil, 2 garé. */
 interface Obs { id: number; x: number; z: number; fx: number; fz: number; vx: number; vz: number; sp: number; kind: 0 | 1 | 2 }
+const newObs = (): Obs => ({ id: 0, x: 0, z: 0, fx: 0, fz: 0, vx: 0, vz: 0, sp: 0, kind: 0 });
 
 const TYPES: Array<{ type: string; w: number; lo: number; hi: number }> = [
   { type: 'citadine', w: 0.42, lo: 11.5, hi: 15.5 },
   { type: 'berline', w: 0.38, lo: 12, hi: 16 },
   { type: 'camionnette', w: 0.2, lo: 10, hi: 13 },
 ];
+const CIVIL_TYPES = new Set(TYPES.map((t) => t.type));
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
@@ -71,8 +92,14 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
   let tick = 0;
   let civils: Civil[] = [];
   let parked: Parked[] = [];
-  const parkingPois = city.poisOf('parking');
+  let sliceCounter = 0;
+  const slots = parkingSlots(city);
+  const slotHash = slots.map((_, i) => ((i * 2654435761) >>> 0) % 1009);
   const org = new THREE.Vector3(), dir = new THREE.Vector3();
+  const kinds = new Map<number, 1 | 2>(); // id de véhicule -> civil / garé
+  const obs: Obs[] = [];
+  let obsN = 0;
+  const rd = newObs(); // lecture réutilisée
 
   const playerPositions = (): [number, number][] => {
     const out: [number, number][] = [];
@@ -85,13 +112,13 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     return out;
   };
   const nearestPlayerDist = (x: number, z: number, pl: [number, number][]) => {
-    let d = Infinity;
-    for (const [px, pz] of pl) d = Math.min(d, Math.hypot(px - x, pz - z));
-    return d;
+    let d2 = Infinity;
+    for (const [px, pz] of pl) { const dx = px - x, dz = pz - z; d2 = Math.min(d2, dx * dx + dz * dz); }
+    return Math.sqrt(d2);
   };
 
-  /** Lit un véhicule (revalidé) : pose et vitesse, ou null. */
-  const read = (v0: SimVehicle): { v: SimVehicle; x: number; z: number; fx: number; fz: number; vx: number; vz: number; sp: number } | null => {
+  /** Lit un véhicule (revalidé) dans l'objet réutilisé `rd` : pose et vitesse. Retourne le véhicule valide ou null. */
+  const read = (v0: SimVehicle): SimVehicle | null => {
     const v = sim.resolveRef(sim.refOf(v0));
     if (!v || !bodyOk(v.behavior.body)) return null;
     const b = v.behavior.body;
@@ -99,18 +126,20 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     const h = 2 * Math.atan2(q.y, q.w);
     const fx = -Math.sin(h), fz = -Math.cos(h);
     if (!Number.isFinite(t.x + t.z + h + lv.x + lv.z)) return null;
-    return { v, x: t.x, z: t.z, fx, fz, vx: lv.x, vz: lv.z, sp: lv.x * fx + lv.z * fz };
+    rd.id = v.id; rd.x = t.x; rd.z = t.z; rd.fx = fx; rd.fz = fz; rd.vx = lv.x; rd.vz = lv.z; rd.sp = lv.x * fx + lv.z * fz;
+    return v;
   };
 
   // ---------- Itinéraires ----------
   const extendRoute = (c: Civil) => {
+    c.wps = null;
     const last = c.route[c.route.length - 1];
     for (let k = 0; k < 6; k++) {
       const dest = city.nodes[Math.floor(rand() * city.nodes.length)];
       if (!dest || dest.id === last.to) continue;
       if (Math.hypot(dest.x - city.nodes[last.to].x, dest.z - city.nodes[last.to].z) < 100) continue;
-      const r = routeLanes(city, last.to, dest.id, last);
-      if (r && r.length) { c.route.push(...r); return; }
+      const r = routeLanes(city, last.to, dest.id, last); // en cache après la première demande
+      if (r && r.length) { for (const l of r) c.route.push(l); return; }
     }
     const nl = nextLane(city, last, rand());
     if (nl) c.route.push(nl);
@@ -123,11 +152,20 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     return TYPES[0];
   };
 
+  /** Emplacements du pool de civils encore libres (rangés). */
+  const freeCivilSlots = () => {
+    let n = 0;
+    for (const v of sim.vehicles) if (v.pooled && CIVIL_TYPES.has(v.def.type)) n++;
+    return n;
+  };
+
   const clearAround = (x: number, z: number, r: number) => {
+    const r2 = r * r;
     for (const v of sim.vehicles) {
-      if (v.pooled || v.dead) continue;
-      const o = read(v);
-      if (o && Math.hypot(o.x - x, o.z - z) < r) return false;
+      if (v.pooled || v.dead || !bodyOk(v.behavior.body)) continue;
+      const t = v.behavior.body.translation();
+      const dx = t.x - x, dz = t.z - z;
+      if (dx * dx + dz * dz < r2) return false;
     }
     return true;
   };
@@ -153,8 +191,8 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
       if (!v) return false; // pool vide : on réessaiera plus tard
       const cruise = spec.lo + rand() * (spec.hi - spec.lo);
       const c: Civil = {
-        ref: sim.refOf(v), mem: newDriveMem(), route: [lane], wpi: 0, cruise, fleeUntil: 0, honk: false, still: 0,
-        x, z, lastSp: 0, lastHp: v.hp, age: 0, shift: 0,
+        ref: sim.refOf(v), mem: newDriveMem(), route: [lane], wps: null, wpi: 0, cruise, fleeUntil: 0, honk: false, still: 0,
+        x, z, lastSp: 0, lastHp: v.hp, age: 0, shift: 0, slice: sliceCounter++ % AI_EVERY, n: 0, rayGap: Infinity,
       };
       extendRoute(c);
       civils.push(c);
@@ -168,31 +206,68 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     return false;
   };
 
-  const trySpawnParked = (players: [number, number][]): boolean => {
-    if (!players.length || !parkingPois.length) return false;
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const poi = parkingPois[Math.floor(rand() * parkingPois.length)];
-      if (parked.some((p) => p.poi === poi.id)) continue;
-      const d = nearestPlayerDist(poi.x, poi.z, players);
-      if (d < PARKED_SPAWN_MIN || d > PARKED_SPAWN_MAX) continue;
-      if (!clearAround(poi.x, poi.z, 6)) continue;
-      const r = rand();
-      const taxi = r < 0.3; // livrée taxi : berline livrée 1
-      const type = taxi ? 'berline' : r < 0.7 ? 'citadine' : r < 0.85 ? 'berline' : 'camionnette';
-      let v = sim.acquireVehicle(type, poi.x, poi.z, poi.yaw + (rand() < 0.5 ? 0 : Math.PI), { locked: true, y: 0.7, livery: taxi && type === 'berline' ? 1 : 0 });
-      if (!v) v = sim.acquireVehicle(type === 'citadine' ? 'berline' : 'citadine', poi.x, poi.z, poi.yaw, { locked: true, y: 0.7 });
-      if (!v) return false;
-      parked.push({ ref: sim.refOf(v), poi: poi.id, x: poi.x, z: poi.z });
-      return true;
+  /** Fait apparaître une voiture garée verrouillée sur la place `s` (livrée taxi pour ~30 % des berlines). */
+  const spawnParkedAt = (s: ParkSlot, h: number): boolean => {
+    const r = (h % 100) / 100;
+    const taxi = r < 0.28;
+    const type = taxi ? 'berline' : r < 0.65 ? 'citadine' : r < 0.85 ? 'berline' : 'camionnette';
+    let v = sim.acquireVehicle(type, s.x, s.z, s.yaw, { locked: true, y: 0.7, livery: taxi ? 1 : 0 });
+    if (!v) v = sim.acquireVehicle(type === 'citadine' ? 'berline' : 'citadine', s.x, s.z, s.yaw, { locked: true, y: 0.7 });
+    if (!v) return false;
+    parked.push({ ref: sim.refOf(v), slot: s.id, x: s.x, z: s.z });
+    return true;
+  };
+
+  /**
+   * Garantie de stationnement : pour le premier joueur qui a moins de PARKED_GUARANTEE voitures garées à moins de PARKED_NEAR m,
+   * fait apparaître une garée sur la meilleure place libre (d'abord les POI parking, hors champ de préférence, ni trop près d'un joueur).
+   * Déterministe : le choix ne dépend que de la position des joueurs et des places (une seule voiture par appel).
+   */
+  const ensureParked = (players: [number, number][]) => {
+    for (const [px, pz] of players) {
+      let near = 0;
+      for (const p of parked) { const dx = p.x - px, dz = p.z - pz; if (dx * dx + dz * dz < PARKED_NEAR * PARKED_NEAR) near++; }
+      if (near >= PARKED_GUARANTEE) continue;
+      let best = -1, bestScore = Infinity;
+      for (let i = 0; i < slots.length; i++) {
+        const s = slots[i];
+        const d = Math.hypot(s.x - px, s.z - pz);
+        if (d > PARKED_NEAR - 2 || d < PARKED_TOO_CLOSE) continue;
+        if (nearestPlayerDist(s.x, s.z, players) < PARKED_TOO_CLOSE) continue;
+        let taken = false;
+        for (const p of parked) if (p.slot === s.id) { taken = true; break; }
+        if (taken) continue;
+        const score = (s.poi ? 0 : 1000) + (d >= PARKED_VISIBLE ? 0 : 500) + slotHash[i] % 400;
+        if (score < bestScore) { bestScore = score; best = i; }
+      }
+      // les 3 meilleures places pourraient être occupées par un civil de passage : on essaie la meilleure puis la suivante par score
+      if (best < 0) continue;
+      if (parked.length >= PARKED_MAX && !dropFarthestParked(players)) return;
+      if (freeCivilSlots() < 1) return;
+      const s = slots[best];
+      if (!clearAround(s.x, s.z, 6)) continue; // un civil passe là : au prochain essai (la place reste la meilleure)
+      if (spawnParkedAt(s, slotHash[best])) return; // une seule par appel
     }
-    return false;
+  };
+
+  /** Libère la voiture garée la plus éloignée de tous les joueurs (> PARKED_NEAR) pour faire de la place. */
+  const dropFarthestParked = (players: [number, number][]): boolean => {
+    let bi = -1, bd = PARKED_NEAR;
+    for (let i = 0; i < parked.length; i++) {
+      const d = nearestPlayerDist(parked[i].x, parked[i].z, players);
+      if (d > bd) { bd = d; bi = i; }
+    }
+    if (bi < 0) return false;
+    const v = sim.resolveRef(parked[bi].ref);
+    if (v && !v.driver) sim.releaseVehicle(v);
+    parked.splice(bi, 1);
+    return true;
   };
 
   const forgetDriven = (v: SimVehicle) => { v.ai = null; }; // un joueur au volant : plus de pilote automatique résiduel
 
-  const manage = () => {
-    const players = playerPositions();
-    // Revalidation, disparition (> 140 m de tous les joueurs, sans conducteur), sortie du trafic (volé)
+  /** Revalidation, disparition (> 140 m de tous les joueurs, sans conducteur), sortie du trafic (volé). Toutes les 0,5 s. */
+  const cull = (players: [number, number][]) => {
     const keepC: Civil[] = [];
     for (const c of civils) {
       const v = sim.resolveRef(c.ref);
@@ -212,28 +287,23 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
       keepP.push(p);
     }
     parked = keepP;
-
-    if (!players.length) return;
-    const room = TRAFFIC_MAX - civils.length - parked.length;
-    const target = Math.min(TRAFFIC_MAX - PARKED_MAX, 12 + 5 * players.length);
-    let spawned = 0;
-    for (let n = 0; n < 3 && civils.length < target && spawned < room; n++) if (trySpawnCivil(players)) spawned++; else break;
-    if (parked.length < PARKED_MAX && civils.length + parked.length < TRAFFIC_MAX && tick % 90 === 0) trySpawnParked(players);
   };
 
   // ---------- IA ----------
-  const buildObs = (): Obs[] => {
-    const out: Obs[] = [];
-    const civilIds = new Set<number>(), parkedIds = new Set<number>();
-    for (const c of civils) civilIds.add(c.ref.id);
-    for (const p of parked) parkedIds.add(p.ref.id);
+  const buildObs = () => {
+    kinds.clear();
+    for (const c of civils) kinds.set(c.ref.id, 1);
+    for (const p of parked) kinds.set(p.ref.id, 2);
+    obsN = 0;
     for (const v0 of sim.vehicles) {
       if (v0.pooled || v0.dead) continue;
-      const o = read(v0);
-      if (!o) continue;
-      out.push({ id: o.v.id, x: o.x, z: o.z, fx: o.fx, fz: o.fz, vx: o.vx, vz: o.vz, sp: o.sp, kind: parkedIds.has(o.v.id) ? 2 : civilIds.has(o.v.id) ? 1 : 0 });
+      const v = read(v0);
+      if (!v) continue;
+      const o = obs[obsN] ?? (obs[obsN] = newObs());
+      obsN++;
+      o.id = rd.id; o.x = rd.x; o.z = rd.z; o.fx = rd.fx; o.fz = rd.fz; o.vx = rd.vx; o.vz = rd.vz; o.sp = rd.sp;
+      o.kind = kinds.get(v.id) ?? 0;
     }
-    return out;
   };
 
   const pedsOf = (): readonly PedState[] => {
@@ -241,10 +311,9 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     return s && Array.isArray(s.peds) ? s.peds : [];
   };
 
-  const driveCivil = (c: Civil, v: SimVehicle, obs: Obs[], peds: readonly PedState[], time: number) => {
-    const o = read(v);
-    if (!o || !v.ai) return;
-    const { x, z, fx, fz, sp } = o;
+  const driveCivil = (c: Civil, v: SimVehicle, peds: readonly PedState[], time: number, doRay: boolean) => {
+    if (!read(v) || !v.ai) return;
+    const x = rd.x, z = rd.z, fx = rd.fx, fz = rd.fz, sp = rd.sp;
     const rx = -fz, rz = fx; // droite
     c.x = x; c.z = z; c.age += AI_DT;
 
@@ -262,8 +331,8 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
 
     // ---- Itinéraire ----
     if (c.route.length - c.wpi < 3) extendRoute(c);
-    if (c.wpi > 8) { c.route.splice(0, 6); c.wpi -= 6; }
-    const wps = laneWaypoints(c.route);
+    if (c.wpi > 8) { c.route.splice(0, 6); c.wpi -= 6; c.wps = null; }
+    const wps = c.wps ?? (c.wps = laneWaypoints(c.route));
     while (c.wpi < wps.length - 1) {
       const turn = turnKind(c.route[c.wpi], c.route[c.wpi + 1]) !== 'straight';
       const reach = turn ? 3.5 : 2.5 + 0.1 * Math.max(0, sp);
@@ -285,32 +354,36 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     const dw = Math.hypot(wp.x - x, wp.z - z);
     if (turnAhead && dw < 40) maxSpeed = Math.min(maxSpeed, (flee ? 7 : 5) + (flee ? 0.7 : 0.55) * dw);
 
-    // ---- Obstacles : voitures devant (liste + raycast), piétons, intersections ----
+    // ---- Obstacles : voitures devant (liste + rayon), piétons, intersections ----
     const Lmax = clamp(10 + Math.max(0, sp) * 1.6, 12, 38);
     let gap = Infinity, leadSp = 0, shiftWant = 0;
     const consider = (g: number, ls: number) => { if (g < gap) { gap = Math.max(0, g); leadSp = Math.max(0, ls); } };
-    for (const q of obs) {
+    for (let i = 0; i < obsN; i++) {
+      const q = obs[i];
       if (q.id === v.id) continue;
       const dx = q.x - x, dz = q.z - z;
       if (dx * dx + dz * dz > 1700) continue;
       const ahead = dx * fx + dz * fz, lat = dx * rx + dz * rz;
       const latLane = lat - c.shift; // écart à l'axe de MA voie (sans mon décalage)
-      if (q.kind === 2 && ahead > -5 && ahead < Lmax + 6 && latLane >= -0.4 && latLane < 2.6) { // voiture garée sur le bord de ma voie : on se décale
-        shiftWant = Math.max(shiftWant, clamp(3.0 - Math.abs(latLane), 0, 1.7));
-        const need = clamp(3.0 - Math.abs(latLane), 0, 1.7);
+      if (q.kind === 2 && ahead > -5 && ahead < Lmax + 6 && latLane >= -0.6 && latLane < 3.4) { // voiture garée au bord de ma voie : on se décale si besoin
+        const need = clamp(0.5 - (latLane - 2.1), 0, 1.7); // jeu latéral voulu 0,5 m entre les carrosseries (demi-largeurs ~1,05 chacune)
+        shiftWant = Math.max(shiftWant, need);
         if (ahead > 0 && c.shift < need - 0.35) consider(ahead - 2 * HALF_LEN + 1, 0); // pas encore assez décalé : on ralentit
         continue;
       }
       if (ahead <= 0 || ahead > Lmax + 3 || Math.abs(lat) > 2.0) continue;
       consider(ahead - 2 * HALF_LEN, q.vx * fx + q.vz * fz);
     }
-    org.set(x + fx * (HALF_LEN + 0.1), 0.7, z + fz * (HALF_LEN + 0.1));
-    dir.set(fx, 0, fz);
-    const hit = sim.raycast(org, dir, Lmax, v.behavior.body);
-    if (hit) {
-      if (hit.kind === 'player' || (hit.kind === 'prop' && hit.dist < 12)) consider(hit.dist, 0);
-      else if (hit.kind === 'vehicle' && hit.vehicle && !parked.some((p) => p.ref.id === hit.vehicle!.id)) consider(hit.dist, 0);
-    }
+    if (doRay) {
+      c.rayGap = Infinity;
+      org.set(x + fx * (HALF_LEN + 0.1), 0.7, z + fz * (HALF_LEN + 0.1));
+      const hit = sim.raycastProbe(org.x, org.y, org.z, fx, 0, fz, Lmax, v.behavior.body);
+      if (hit) {
+        if (hit.kind === 'player' || (hit.kind === 'prop' && hit.dist < 12)) c.rayGap = hit.dist;
+        else if (hit.kind === 'vehicle' && hit.vehicle && kinds.get(hit.vehicle.id) !== 2) c.rayGap = hit.dist;
+      }
+    } else if (c.rayGap < Infinity) c.rayGap = Math.max(0, c.rayGap - Math.max(0, sp) * AI_DT); // résultat précédent, rapproché
+    if (c.rayGap < Infinity) consider(c.rayGap, 0);
     for (const p of peds) {
       if (p.st === PED_ST.KNOCKED || p.gone) continue;
       const dx = p.x - x, dz = p.z - z;
@@ -323,7 +396,8 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
       const node = city.nodes[lane.to];
       const nx = node.x - x, nz = node.z - z, dn = Math.hypot(nx, nz);
       if (nx * fx + nz * fz > 0 && dn < 24 && dn > 7) {
-        for (const q of obs) {
+        for (let i = 0; i < obsN; i++) {
+          const q = obs[i];
           if (q.id === v.id || q.kind === 2) continue;
           const ox = q.x - node.x, oz = q.z - node.z, od = Math.hypot(ox, oz);
           if (od > 20 || Math.abs(q.fx * fx + q.fz * fz) > 0.7) continue; // pas perpendiculaire
@@ -351,7 +425,7 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     if (f > 0) f = Math.min(f, flee ? 1 : 0.55); // accélération douce
     if (gap < 6 && Math.abs(sp) < 1 && !(c.mem.rev > 0)) f = Math.min(f, 0); // à l'arrêt derrière un obstacle : pas de reculade
     if (maxSpeed < 0.5 && Math.abs(sp) < 1 && !(c.mem.rev > 0)) f = 0;
-    // Coincé plus de 4 s : marche arrière (le recyclage hors champ est dans manage)
+    // Coincé plus de 4 s : marche arrière (le recyclage hors champ est dans cull)
     if (c.still > 4 && c.mem.rev <= 0 && c.still < 4 + AI_DT * 1.5) c.mem.rev = 1.5;
     const inp = v.ai.input;
     inp.f = f; inp.s = clamp(s, -1, 1); inp.jump = 0;
@@ -361,14 +435,24 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
 
   const preStep = () => {
     tick++;
-    if (tick % MANAGE_EVERY === 0) manage();
-    if (tick % AI_EVERY !== 0 || !civils.length) return;
-    const obs = buildObs();
+    const players = (tick % CULL_EVERY === 0 || tick % SPAWN_CIVIL_AT === 3 || tick % SPAWN_PARKED_AT === 7) ? playerPositions() : null;
+    if (players) {
+      if (tick % CULL_EVERY === 0) cull(players);
+      if (players.length) {
+        // Apparition : une voiture par essai, jamais plusieurs dans le même tick (pas de pic) ; le pool garde POOL_RESERVE places libres
+        if (tick % SPAWN_CIVIL_AT === 3 && civils.length < movingTarget(players.length) && freeCivilSlots() > POOL_RESERVE) trySpawnCivil(players);
+        if (tick % SPAWN_PARKED_AT === 7) ensureParked(players);
+      }
+    }
+    if (!civils.length) return;
+    const phase = tick % AI_EVERY;
+    if (phase === 0) buildObs();
     const peds = pedsOf();
     const time = sim.time;
     for (const c of civils) {
+      if (c.slice !== phase) continue;
       const v = sim.resolveRef(c.ref);
-      if (v && !v.driver) driveCivil(c, v, obs, peds, time);
+      if (v && !v.driver) driveCivil(c, v, peds, time, (c.n++ & 1) === 0);
     }
   };
 
@@ -386,8 +470,7 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
   });
   bus.on('pedKnocked', (e) => scare(e.x, e.z, 22, 6));
   bus.on('vehicleDestroyed', (e) => {
-    const r = read(e.v);
-    if (r) scare(r.x, r.z, 40, 9);
+    if (read(e.v)) scare(rd.x, rd.z, 40, 9);
   });
 
   return {
@@ -402,6 +485,11 @@ export const createTraffic: SystemFactory = (ctx): TrafficSystem => {
     },
     isParked: (v) => parked.some((q) => q.ref.id === v.id && q.ref.gen === v.gen),
     isCivil: (v) => civils.some((q) => q.ref.id === v.id && q.ref.gen === v.gen),
+    parkedNear(x, z, r) {
+      let n = 0;
+      for (const p of parked) { const dx = p.x - x, dz = p.z - z; if (dx * dx + dz * dz < r * r) n++; }
+      return n;
+    },
     serialize() { return { v: 1, seed: rng }; },
     restore(data) {
       const d = data as { seed?: unknown } | null;

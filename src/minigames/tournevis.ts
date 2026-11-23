@@ -2,7 +2,7 @@
 // Tournevis dans le contact : maintenir le clic pour enfoncer, puis décrire des cercles rapides autour du barillet jusqu'à briser le verrou.
 // Données envoyées : [tours accomplis, ms d'enfoncement]. Règle : shared/minigames/rules.ts (tournevisSpec).
 import { tournevisSpec } from '../../shared/minigames/rules';
-import { H, INK, PAL, W, box, burst, clamp, disc, line, type MgFactory } from './kit';
+import { H, INK, PAL, W, box, burst, clamp, disc, googly, line, type MgFactory } from './kit';
 
 const CX = W / 2;
 const CY = H / 2 + 10;
@@ -16,48 +16,73 @@ export const createTournevis: MgFactory = (env) => {
   let lastAng: number | null = null;
   let tickAt = 0;
   let shake = 0;
+  let turnsSq = 0; // tours entiers déjà fêtés par un couinement du canard
+  let squeeze = 0; // écrasement du canard porte-clés (0..1)
+  const maxR = 190 - 60 * env.start.difficulty; // plus dur : il faut tourner plus près du barillet
   let done = false;
   const sparks: { x: number; y: number; vx: number; vy: number; life: number }[] = [];
   const goal = spec.turns * TWO_PI;
 
+  let lastT = env.now();
+  let holding = false; // état du bouton intégré par advance() (env.down a déjà changé quand onDown/onUp arrivent)
   const angOf = () => Math.atan2(env.cursor.y - CY, env.cursor.x - CX);
 
+  /** Enfoncement en temps réel (indépendant du nombre d'images par seconde). */
+  const advance = () => {
+    const t = env.now();
+    const dt = Math.min(0.25, Math.max(0, (t - lastT) / 1000));
+    lastT = t;
+    push = clamp(push + (holding ? dt / 0.22 : -dt / 0.12), 0, 1);
+    if (holding) pressMs += dt * 1000;
+  };
+
+  /** Cumule l'angle parcouru autour du barillet à chaque mouvement de souris (pas par image : robuste aux machines lentes). */
+  const track = () => {
+    if (done) return;
+    advance();
+    const a = angOf();
+    const dist = Math.hypot(env.cursor.x - CX, env.cursor.y - CY);
+    if (push > 0.85 && dist > 20 && dist < maxR) {
+      if (lastAng !== null) {
+        let d = a - lastAng;
+        if (d > Math.PI) d -= TWO_PI;
+        if (d < -Math.PI) d += TWO_PI;
+        d *= spec.dir;
+        if (d > 0) acc += d;
+        else acc = Math.max(0, acc + d * 0.5); // tourner à l'envers défait un peu
+      }
+      lastAng = a;
+    } else lastAng = null;
+    const step = Math.floor(acc / (Math.PI / 6)); // un cran tous les 30°
+    if (step > tickAt) {
+      tickAt = step;
+      env.sfx('mg_ratchet', Math.floor((acc / goal) * 8));
+      sparks.push({ x: CX + (Math.random() - 0.5) * 60, y: CY + (Math.random() - 0.5) * 60, vx: (Math.random() - 0.5) * 240, vy: -Math.random() * 200, life: 0.35 });
+      shake = 0.12;
+    }
+    const tn = Math.floor(acc / TWO_PI);
+    if (tn > turnsSq && acc < goal) { turnsSq = tn; squeeze = 1; env.sfx('mg_squeak'); } // chaque tour complet : le canard porte-clés couine
+    if (acc >= goal) {
+      done = true;
+      env.sfx('mg_crack');
+      env.finish(true, [Math.floor(acc / TWO_PI + 1e-6), Math.round(pressMs)]);
+    }
+  };
+
   return {
-    onDown() { env.sfx('mg_push'); },
+    probe: () => ({ cx: CX, cy: CY, acc, push }),
+    onDown(btn) { if (btn !== 0) return; advance(); holding = true; env.sfx('mg_push'); },
+    onUp(btn) { if (btn !== 0) return; advance(); holding = false; },
+    onMove: track,
     update(dt) {
       if (done) return;
-      push = clamp(push + (env.down ? dt / 0.22 : -dt / 0.12), 0, 1);
-      if (env.down) pressMs += dt * 1000;
-      const a = angOf();
-      const dist = Math.hypot(env.cursor.x - CX, env.cursor.y - CY);
-      if (push > 0.85 && dist > 20 && dist < 190) {
-        if (lastAng !== null) {
-          let d = a - lastAng;
-          if (d > Math.PI) d -= TWO_PI;
-          if (d < -Math.PI) d += TWO_PI;
-          d *= spec.dir;
-          if (d > 0) acc += d;
-          else acc = Math.max(0, acc + d * 0.5); // tourner à l'envers défait un peu
-        }
-        lastAng = a;
-      } else lastAng = null;
-      const step = Math.floor(acc / (Math.PI / 6)); // un cran tous les 30°
-      if (step > tickAt) {
-        tickAt = step;
-        env.sfx('mg_tick', Math.floor((acc / goal) * 8));
-        sparks.push({ x: CX + (Math.random() - 0.5) * 60, y: CY + (Math.random() - 0.5) * 60, vx: (Math.random() - 0.5) * 240, vy: -Math.random() * 200, life: 0.35 });
-        shake = 0.12;
-      }
+      track();
       shake = Math.max(0, shake - dt);
+      squeeze = Math.max(0, squeeze - dt * 3);
       for (const s of sparks) { s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 600 * dt; s.life -= dt; }
       while (sparks.length && sparks[0].life <= 0) sparks.shift();
-      if (acc >= goal) {
-        done = true;
-        env.sfx('mg_crack');
-        env.finish(true, [Math.floor(acc / TWO_PI + 1e-6), Math.round(pressMs)]);
-      }
     },
-    draw(g) {
+    draw(g, t) {
       const p = clamp(acc / goal, 0, 1);
       const sx = shake > 0 ? (Math.random() - 0.5) * 8 : 0;
       g.save();
@@ -87,6 +112,25 @@ export const createTournevis: MgFactory = (env) => {
       }
       g.stroke();
       g.restore();
+      // canard porte-clés : se balance, se fait écraser et écarquille les yeux à chaque tour
+      {
+        const sw = Math.sin(t / 260) * 0.12 + (shake > 0 ? 0.35 : 0);
+        g.save();
+        g.translate(CX + 118, CY + 62);
+        g.rotate(sw);
+        g.lineWidth = 3;
+        g.strokeStyle = INK;
+        g.beginPath();
+        g.moveTo(0, -48);
+        g.lineTo(0, -10);
+        g.stroke();
+        g.scale(1 + 0.3 * squeeze, 1 - 0.25 * squeeze);
+        disc(g, 0, 10, 22, PAL.yellow, 5);
+        disc(g, 12, -10, 14, PAL.yellow, 5);
+        box(g, 19, -9, 18, 9, PAL.orange, 4, 3);
+        googly(g, 11, -14, 5, env.cursor.x - (CX + 118), env.cursor.y - (CY + 62), p > 0.5 || squeeze > 0.3);
+        g.restore();
+      }
       // tournevis (suit le curseur ; s'enfonce quand on maintient)
       const tx = env.cursor.x;
       const ty = env.cursor.y;

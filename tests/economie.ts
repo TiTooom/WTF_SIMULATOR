@@ -4,8 +4,8 @@ import { DISTRICT_IDS, GANG_IDS, GOOD_IDS, type DistrictId, type GoodId } from '
 import { GOODS } from '../shared/economy/goods';
 import { GANGS, territoryMult, GANG_OF_DISTRICT } from '../shared/economy/gangs';
 import {
-  advanceMarket, applyTrade, camsIntactRatio, createEvent, eventMult, makeRng, newMarketState, parseMarket, quote, rollTip, serializeMarket, setCameras,
-  tipSendProbability, unitPrice, MAX_PRICE_FACTOR, NOISE_MAX, NOISE_MIN, NOISE_PERIOD_MS, TIP_SEND_PROB,
+  advanceMarket, applyTrade, camsIntactRatio, createEvent, eventMult, flowOf, makeRng, newMarketState, parseMarket, quote, quoteLot, rollTip, serializeMarket, setCameras,
+  tipSendProbability, tradeTotal, unitPrice, FLOW_HALF_LIFE_MS, FLOW_IMPACT, FLOW_MAX, FLOW_MIN, MAX_PRICE_FACTOR, NOISE_MAX, NOISE_MIN, NOISE_PERIOD_MS, TIP_SEND_PROB,
 } from '../shared/economy/prices';
 import { tipOf, tipText } from '../shared/economy/tips';
 import { Sim } from '../shared/sim';
@@ -88,7 +88,7 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   w.noise[`${g}:les_hauts`] = NOISE_MAX;
   check('pire cas haut : plafonné', unitPrice(g, 'les_hauts', w, 10) <= GOODS[g].base * MAX_PRICE_FACTOR);
   const lo = newMarketState();
-  lo.police.golfeurs = 0;
+  lo.police.zone_indus = 0;
   lo.events.push({ good: 'ecrous_de_12', district: 'zone_indus', mult: 0.35, start: 0, until: 1e9 });
   lo.noise['ecrous_de_12:zone_indus'] = NOISE_MIN;
   check('pire cas bas : jamais négatif ni nul', unitPrice('ecrous_de_12', 'zone_indus', lo, 10) >= 1 && quote('ecrous_de_12', 'zone_indus', lo, 10).sell >= 1);
@@ -198,34 +198,56 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   check('graines différentes -> marchés différents', simulate(99) !== simulate(100));
 }
 
-// ---- 9. Pas d'argent gratuit ----
+// ---- 9. Pas d'argent gratuit (lot facturé au prix moyen du glissement) ----
 {
   const rnd = makeRng(2024);
-  let worst = Infinity, ok = true;
+  let worst = Infinity, ok = true, okMono = true;
   for (let i = 0; i < 20_000; i++) {
     const s = newMarketState();
     advanceMarket(s, NOISE_PERIOD_MS, rnd); // ε aléatoire
     for (const d of DISTRICT_IDS) s.police[d] = rnd();
     const g = pick(GOOD_IDS, rnd), d = pick(DISTRICT_IDS, rnd);
+    if (rnd() < 0.5) applyTrade(s, g, d, rnd() < 0.5 ? 'buy' : 'sell', 1 + Math.floor(rnd() * 40)); // marché déjà saturé dans un sens ou l'autre
     const qty = 1 + Math.floor(rnd() * 40);
-    const t0 = quote(g, d, s, 0);
-    // achat de qty, impact, puis recalcul des ε (pire cas pour nous : ε passe au maximum) puis revente
+    const buyUnit = quoteLot(g, d, s, 0, 'buy', qty);
     applyTrade(s, g, d, 'buy', qty);
-    const same = quote(g, d, s, 0);
-    ok &&= same.sell < t0.buy; // revente immédiate dans le même quartier
-    s.noise[`${g}:${d}`] = NOISE_MAX; // pire cas : ε monte au plafond
-    s.noise[`${g}:${d}`] = Math.max(s.noise[`${g}:${d}`], NOISE_MIN);
-    // l'achat initial était fait avec ε d'origine ; le pire est ε0 = 0,92 : on vérifie ce cas extrême
-    const lowBuy = (() => { const z = newMarketState(); z.police[d] = s.police[d]; z.noise[`${g}:${d}`] = NOISE_MIN; return quote(g, d, z, 0).buy; })();
-    const highSell = quote(g, d, s, 0).sell;
-    worst = Math.min(worst, lowBuy - highSell);
+    const sellUnit = quoteLot(g, d, s, 0, 'sell', qty); // revente immédiate de la même quantité, même quartier
+    ok &&= sellUnit < buyUnit;
+    worst = Math.min(worst, buyUnit - sellUnit);
+    // pire cas : ε passe de 0,92 (achat) à 1,08 (revente) entre-temps
+    const z = newMarketState(); z.police[d] = s.police[d];
+    z.noise[`${g}:${d}`] = NOISE_MIN;
+    const lowBuy = quoteLot(g, d, z, 0, 'buy', qty);
+    z.noise[`${g}:${d}`] = NOISE_MAX;
+    applyTrade(z, g, d, 'buy', qty);
+    const highSell = quoteLot(g, d, z, 0, 'sell', qty);
     ok &&= highSell < lowBuy;
-    // et la vente fait baisser le prix
-    const b = quote(g, d, s, 0).sell;
+    // acheter fait monter le prix, vendre le fait baisser, jamais hors bornes
+    const before = flowOf(s, g, d);
     applyTrade(s, g, d, 'sell', qty);
-    ok &&= quote(g, d, s, 0).sell <= b;
+    okMono &&= flowOf(s, g, d) <= before && flowOf(s, g, d) >= FLOW_MIN && flowOf(s, g, d) <= FLOW_MAX;
   }
-  check('aller-retour achat/revente : jamais de gain (même ε 0,92 -> 1,08)', ok, `marge pire cas ${worst}`);
+  check("aller-retour achat/revente d'un lot : jamais de gain (même ε 0,92 -> 1,08, même marché saturé)", ok, `marge pire cas ${worst} €/pièce`);
+  check('flux Φ : acheter monte, vendre baisse, toujours dans [0,6 ; 1,5]', okMono);
+  const f = newMarketState();
+  const k0 = quote('cafe_machine', 'campus', f, 0).buy;
+  applyTrade(f, 'cafe_machine', 'campus', 'buy', 5);
+  check('acheter 5 unités fait monter le prix de la suivante', quote('cafe_machine', 'campus', f, 0).buy > k0 && Math.abs(flowOf(f, 'cafe_machine', 'campus') - (1 + 5 * FLOW_IMPACT)) < 1e-9);
+  const m1 = tradeTotal('annales_secretes', 'les_hauts', f, 0, 'buy', 5);
+  check('tradeTotal : prix du lot = prix moyen × quantité, jamais moins que 5 × la 1re unité', m1 >= 5 * quote('annales_secretes', 'les_hauts', f, 0).buy);
+  const r2 = newMarketState();
+  applyTrade(r2, 'cafe_machine', 'campus', 'buy', 10);
+  const f0 = flowOf(r2, 'cafe_machine', 'campus') - 1;
+  advanceMarket(r2, FLOW_HALF_LIFE_MS, makeRng(1));
+  const f1 = flowOf(r2, 'cafe_machine', 'campus') - 1;
+  check('flux Φ : revient vers 1 avec la demi-vie annoncée', Math.abs(f1 / f0 - 0.5) < 0.02, `${(f1 / f0).toFixed(3)}`);
+  advanceMarket(r2, FLOW_HALF_LIFE_MS * 30, makeRng(1));
+  check('flux Φ : retombe à 1 (clé effacée) bien après', flowOf(r2, 'cafe_machine', 'campus') === 1 && Object.keys(r2.flow).length === 0);
+  const sat = newMarketState();
+  for (let i = 0; i < 50; i++) applyTrade(sat, 'cafe_machine', 'campus', 'buy', 100);
+  check('flux Φ saturé : plafonné à ×1,5 et prix <= base × 10', flowOf(sat, 'cafe_machine', 'campus') === FLOW_MAX && unitPrice('cafe_machine', 'campus', sat, 0) <= GOODS.cafe_machine.base * MAX_PRICE_FACTOR);
+  for (let i = 0; i < 50; i++) applyTrade(sat, 'cafe_machine', 'campus', 'sell', 100);
+  check('flux Φ vidé : plancher ×0,6 et prix >= 1', flowOf(sat, 'cafe_machine', 'campus') === FLOW_MIN && quote('cafe_machine', 'campus', sat, 0).sell >= 1);
 }
 
 // ---- 10. Sérialisation ----
@@ -236,6 +258,7 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   setCameras(s, 'docks', 1, 3);
   s.police.campus = 0.77;
   applyTrade(s, 'cafe_machine', 'campus', 'buy', 7);
+  check('sérialisation : le flux Φ est sauvegardé', serializeMarket(s).flow!.length >= 1);
   const save = JSON.parse(JSON.stringify(serializeMarket(s)));
   const back = parseMarket(save);
   check('aller-retour JSON identique', JSON.stringify(serializeMarket(back)) === JSON.stringify(serializeMarket(s)));
@@ -257,6 +280,8 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
     } catch { ok = false; }
   }
   check('parseMarket résiste aux données hostiles', ok);
+  const hostile = parseMarket(JSON.parse('{"flow":[["cafe_machine","campus",1e99],["__proto__","campus",2],["cafe_machine","campus","x"]],"flowAt":"y","events":[["cafe_machine","campus",3,5,1],["cafe_machine","campus",3,0,1e15],["cafe_machine","docks",3,10,20]]}'));
+  check('parseMarket : flux borné, événements sans durée positive ignorés, durée plafonnée', flowOf(hostile, 'cafe_machine', 'campus') <= FLOW_MAX && hostile.events.length === 2 && hostile.events.every((e) => e.until > e.start && e.until - e.start <= 2 * 180_000));
 }
 
 
@@ -299,8 +324,11 @@ async function serverSuite(): Promise<void> {
   const at = (p: SimPlayer, x: number, z: number) => sim.teleportPlayer(p, x, 1, z);
   const blank = (): PrivateState => ({ money: 0, bag: {}, bagCap: 0, stars: 0, starProgress: 0, district: 'campus', marks: [], medals: {}, unread: 0 });
   const view = (p: SimPlayer): PrivateState => { const o = blank(); eco.privateView!(p, o); return o; };
-  const msg = (p: SimPlayer, raw: unknown) => { const m = parseGameMsg(raw); if (m) eco.onMessage!(p, m); return m; };
-  const direct = (p: SimPlayer, m: unknown) => eco.onMessage!(p, m as GameClientMsg); // contourne parseGameMsg (défense en profondeur)
+  // Le serveur ignore une 2e transaction du même joueur dans les 200 ms (double clic) : les tests laissent passer ~230 ms de temps simulé entre deux transactions.
+  const pass = (steps = 14) => { for (let i = 0; i < steps; i++) sim.step(); };
+  const isTrade = (raw: unknown) => !!raw && typeof raw === 'object' && (raw as { k?: unknown }).k === 'trade';
+  const msg = (p: SimPlayer, raw: unknown) => { if (isTrade(raw)) pass(); const m = parseGameMsg(raw); if (m) eco.onMessage!(p, m); return m; };
+  const direct = (p: SimPlayer, m: unknown) => { if (isTrade(m)) pass(); eco.onMessage!(p, m as GameClientMsg); }; // contourne parseGameMsg (défense en profondeur)
   const snap = () => JSON.stringify([eco.moneyOf(p1), [...eco.bagOf(p1)]]);
   const D = dealers[0]; // dealer_campus_0 : loin de toute caméra
   const D2 = dealers[2];
@@ -318,9 +346,10 @@ async function serverSuite(): Promise<void> {
   check('argent individuel : Bob a aussi 200 €', view(p2).money === START_MONEY && eco.moneyOf(p1) === START_MONEY);
 
   const cafe: GoodId = 'cafe_machine'; // poids 2
-  const q0 = quote(cafe, D.district, eco.market, sim.time);
+  const q0 = quoteLot(cafe, D.district, eco.market, sim.time, 'buy', 3);
+  const toasts0 = out.length;
   msg(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 3, side: 'buy' });
-  check('achat valide : argent débité au prix serveur, sac crédité, événement trade', eco.moneyOf(p1) === START_MONEY - q0.buy * 3 && eco.bagOf(p1).get(cafe) === 3 && trades.length === 1);
+  check('achat valide : argent débité au prix moyen du lot, sac crédité, événement trade, toast de confirmation', eco.moneyOf(p1) === START_MONEY - q0 * 3 && out.slice(toasts0).some((o) => o.to === 'p1' && o.ev.k === 'toast' && /Acheté 3/.test(o.ev.text)) && eco.bagOf(p1).get(cafe) === 3 && trades.length === 1);
   check('privateView reflète le sac', view(p1).bag[cafe] === 3);
   const before = snap();
   for (const bad of [0, -1, 1.5, NaN, Infinity, MAX_TRADE_QTY + 1, 1e9, '3', null, undefined, [1], {}]) direct(p1, { k: 'trade', dealer: D.id, good: cafe, qty: bad, side: 'buy' });
@@ -356,9 +385,9 @@ async function serverSuite(): Promise<void> {
   check('vente de plus que le stock : refusée', eco.moneyOf(p1) === money1 && eco.bagOf(p1).get('fromage_clandestin') === own);
   msg(p1, { k: 'trade', dealer: D.id, good: 'copies_blanches', qty: 1, side: 'sell' });
   check('vente d\'une marchandise absente : refusée', eco.moneyOf(p1) === money1);
-  const qs = quote('fromage_clandestin', D.district, eco.market, sim.time);
+  const qs = quoteLot('fromage_clandestin', D.district, eco.market, sim.time, 'sell', own);
   msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: own, side: 'sell' });
-  check('vente valide : crédit au prix serveur', eco.moneyOf(p1) === money1 + qs.sell * own && !eco.bagOf(p1).has('fromage_clandestin'));
+  check('vente valide : crédit au prix moyen du lot', eco.moneyOf(p1) === money1 + qs * own && !eco.bagOf(p1).has('fromage_clandestin'));
 
   // planque
   const PL = planques[0];
@@ -443,6 +472,7 @@ async function serverSuite(): Promise<void> {
   const mm = eco.moneyOf(p1), hadBag = eco.bagOf(p1).size > 0;
   bus.emit('playerBusted', { p: p1 });
   check('arrestation : sac perdu et 25 % de l\'argent', hadBag && eco.bagOf(p1).size === 0 && eco.moneyOf(p1) === mm - Math.floor(mm * 0.25));
+  pass(120); // l'arrestation gèle les transactions 1,5 s : on laisse passer ce délai pour la suite
 
   // caméras
   const fakePeds = { id: 'peds', peds: [] as { kind: string; x: number; z: number; gone?: boolean }[] };
@@ -555,6 +585,125 @@ async function serverSuite(): Promise<void> {
     for (const e of Object.values(t.eco.market.noise)) ok &&= e >= NOISE_MIN && e <= NOISE_MAX;
     check('6000 ticks de postStep : marché valide', ok);
   }
+  // ---- Cas limites ----
+  {
+    const t = mk();
+    const e = t.eco;
+    const tradeMsg = (p: SimPlayer, qty = 1, side: 'buy' | 'sell' = 'buy', good: GoodId = cafe) => { const m = parseGameMsg({ k: 'trade', dealer: D.id, good, qty, side }); if (m) e.onMessage!(p, m); };
+    at(p1, D.x + 1, D.z);
+    pass(30);
+    // double clic : une seule transaction dans les 200 ms, la suivante passe après
+    tradeMsg(p1); tradeMsg(p1);
+    check('double clic : la 2e transaction du même instant est ignorée', e.bagOf(p1).get(cafe) === 1);
+    pass(14); tradeMsg(p1);
+    check('après 200 ms une nouvelle transaction passe', e.bagOf(p1).get(cafe) === 2);
+    // arrestation : transactions gelées 1,5 s même si le joueur est encore devant le dealer (message déjà en vol)
+    const mBefore = e.moneyOf(p1);
+    t.bus.emit('playerBusted', { p: p1 });
+    const mBusted = e.moneyOf(p1);
+    pass(14); tradeMsg(p1);
+    check('arrestation : le sac est vidé et une transaction envoyée juste après est refusée', e.bagOf(p1).size === 0 && e.moneyOf(p1) === mBusted && mBusted === mBefore - Math.floor(mBefore * 0.25));
+    pass(90); tradeMsg(p1);
+    check('arrestation : le gel (1,5 s) n\'est pas définitif', e.bagOf(p1).get(cafe) === 1);
+    // mort : même protection, et hp <= 0 refuse aussi la planque
+    t.bus.emit('playerDied', { p: p1, by: null, cause: 'test' });
+    pass(14); tradeMsg(p1);
+    check('mort : transaction refusée juste après', e.bagOf(p1).get(cafe) === 1);
+    pass(120);
+    const hp0 = p1.hp;
+    p1.hp = 0; pass(14); tradeMsg(p1);
+    check('joueur à 0 pv : transaction refusée', e.bagOf(p1).get(cafe) === 1);
+    p1.hp = hp0;
+    // pendant une arrestation en cours, le client peut envoyer n'importe quoi : un dealer inexistant ou un joueur sans compte ne crée rien
+    const ghost = { ...p2, id: 'zzz', name: 'Fantome' } as SimPlayer;
+    const nAcc = e.accountNames().length;
+    e.onMessage!(ghost, { k: 'trade', dealer: D.id, good: cafe, qty: 1, side: 'buy' });
+    e.onMessage!(ghost, { k: 'stash', op: 'put', good: cafe, qty: 1 });
+    e.onMessage!(ghost, { k: 'sms_lu', id: 1 });
+    check('message d\'un joueur absent du jeu : ignoré, aucun compte créé', e.accountNames().length === nAcc && !e.accountNames().includes('Fantome'));
+  }
+  {
+    // déconnexion pendant la boutique : le compte reste (clé = pseudo), les messages en vol sont ignorés, le retour retrouve argent et sac
+    const t = mk();
+    const e = t.eco;
+    sim.addPlayer('p3', 'Carl');
+    const p3 = sim.players.get('p3')!;
+    e.onJoin!(p3);
+    at(p3, D.x + 1, D.z);
+    pass(14);
+    const buy3 = () => { const m = parseGameMsg({ k: 'trade', dealer: D.id, good: cafe, qty: 2, side: 'buy' }); if (m) e.onMessage!(p3, m); };
+    buy3();
+    const moneyCarl = e.moneyOf(p3), bagCarl = JSON.stringify([...e.bagOf(p3)]);
+    check('Carl a acheté 2 cafés', e.bagOf(p3).get(cafe) === 2 && moneyCarl < START_MONEY);
+    e.onLeave!(p3);
+    sim.removePlayer('p3');
+    pass(14); buy3();
+    check('déconnexion pendant la boutique : le message en vol d\'un joueur parti est ignoré', e.moneyOf(p3) === moneyCarl && JSON.stringify([...e.bagOf(p3)]) === bagCarl);
+    check('le compte d\'un joueur parti est conservé', e.accountNames().includes('Carl'));
+    // /donner vers un joueur déconnecté
+    const r1 = say(p1, '/donner Carl 5');
+    check('/donner vers un joueur déconnecté : refusé avec un message clair, rien ne bouge', /hors ligne/.test(r1) && e.moneyOf(p3) === moneyCarl, r1);
+    const r1b = say(p1, '/donner Alice 5');
+    check('/donner à soi-même : refusé', /soi-même/.test(r1b), r1b);
+    // retour du joueur : retrouve ses affaires
+    sim.addPlayer('p3', 'Carl');
+    const p3b = sim.players.get('p3')!;
+    e.onJoin!(p3b);
+    check('retour du joueur : argent et sac retrouvés', e.moneyOf(p3b) === moneyCarl && JSON.stringify([...e.bagOf(p3b)]) === bagCarl);
+    e.onLeave!(p3b);
+    sim.removePlayer('p3');
+  }
+  {
+    // restauration d'une sauvegarde corrompue : atomique, ne casse rien
+    const t = mk();
+    const e = t.eco;
+    e.addMoney(p1, 77);
+    t.bus.emit('crime', { kind: 'explosion', by: p2, x: cams[0].x, z: cams[0].z });
+    const state = () => JSON.stringify([...e.accountNames().map((n) => [n, e.moneyOf({ ...p1, name: n } as SimPlayer)]), e.camerasDown(), JSON.stringify(serializeMarket(e.market).events)]);
+    const s0 = state();
+    const bads: unknown[] = ['{"accounts"', 5, null, true, [], [[]], { accounts: 'x' }, { accounts: 5, camsDown: 7 }, { camsDown: 'x' },
+      { get accounts(): unknown { throw new Error('boum'); } }, { accounts: [{ get length(): number { throw new Error('boum'); } }] }];
+    let threw = false;
+    for (const b of bads) { try { e.restore!(b); } catch { threw = true; } }
+    check('sauvegarde corrompue (types inattendus, getters qui jettent) : ne jette jamais et ne modifie rien', !threw && state() === s0);
+    const before = e.camerasDown();
+    e.restore!({ accounts: [['Zed', 5, [], [], 1]] });
+    check('sauvegarde partielle : seuls les comptes sont remplacés, caméras et marché conservés', e.camerasDown() === before && e.accountNames().join() === 'Zed');
+    e.restore!({ market: { events: [['cafe_machine', 'campus', 3, 5, 1], ['cafe_machine', 'campus', 3, 0, 1e15]], flow: [['cafe_machine', 'campus', 1e99]] } });
+    check('marché corrompu : événements invalides ignorés, flux borné', e.market.events.length === 1 && e.market.events.every((v) => v.until > v.start) && flowOf(e.market, 'cafe_machine', 'campus') <= FLOW_MAX);
+    const t2 = mk();
+    t2.eco.restore!(JSON.parse('{"accounts":[["Zed",5,[],[],1],["Zed",999999,[],[],1]]}'));
+    check('doublon de pseudo dans la sauvegarde : le premier gagne', t2.eco.moneyOf({ ...p1, name: 'Zed' } as SimPlayer) === 5);
+  }
+  {
+    // flux sauvegardé / restauré avec le temps relatif
+    const t = mk();
+    applyTrade(t.eco.market, 'cafe_machine', 'campus', 'buy', 6);
+    t.eco.market.flowAt = sim.time;
+    const t2 = mk();
+    t2.eco.restore!(JSON.parse(JSON.stringify(t.eco.serialize!())));
+    check('flux Φ restauré avec la sauvegarde', Math.abs(flowOf(t2.eco.market, 'cafe_machine', 'campus') - flowOf(t.eco.market, 'cafe_machine', 'campus')) < 1e-9);
+  }
+  {
+    // budget réseau : repères et boutique
+    const t = mk();
+    const e = t.eco;
+    const viewOf = (p: SimPlayer) => { const o = blank(); e.privateView!(p, o); return o; };
+    at(p1, 0, 0);
+    const v0 = viewOf(p1);
+    const dist = (m: { x: number; z: number }) => Math.hypot(m.x, m.z);
+    check('repères : au plus 4, dealers/planques, du plus proche au plus lointain', v0.marks.length <= 4 && v0.marks.every((m) => m.k === 'dealer' || m.k === 'planque') && v0.marks.every((m, i) => i === 0 || dist(v0.marks[i - 1]) <= dist(m) + 1e-6));
+    at(p1, PL.x + 1, PL.z);
+    check('repères : à la planque, la plus proche est la première', viewOf(p1).marks.length >= 1);
+    at(p1, D.x + 1, D.z);
+    const v1 = viewOf(p1);
+    v1.stars = 5; v1.starProgress = 0.5; v1.medals = { m1: 'or', m2: 'argent' } as PrivateState['medals']; v1.unread = 12;
+    check('boutique ouverte : pas de repères superflus et `me` reste largement sous 1 Ko', v1.marks.length === 0 && Buffer.byteLength(JSON.stringify(v1)) < 800, `${Buffer.byteLength(JSON.stringify(v1))} o`);
+    at(p1, 40, 40);
+    const v2 = viewOf(p1);
+    check('à pied en ville : `me` (repères inclus) < 500 o avec l\'économie seule', Buffer.byteLength(JSON.stringify(v2)) < 500, `${Buffer.byteLength(JSON.stringify(v2))} o`);
+  }
+
   at(p1, D.x + 1, D.z);
   const nearOk = eco.onInteract!(p1) === true;
   at(p1, 40, 40);

@@ -38,6 +38,8 @@ export interface PoliceSystem extends GameSystem {
   heatOf(playerId: string): number;
   /** Nombre de voitures de police actuellement pilotées par ce système. */
   readonly carCount: number;
+  /** Fixe l'indice d'un joueur (0..5 ; missions, activités). Sans effet si le joueur est inconnu. */
+  setStars(playerId: string, stars: number): void;
 }
 
 interface PState { w: WantedState; bust: number; ws: number; last: Map<CrimeKind, number>; seenBy: boolean }
@@ -349,6 +351,13 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     get carCount() { return cars.size; },
     starsOf: (id) => starsOf(states.get(id)?.w.heat ?? 0),
     heatOf: (id) => states.get(id)?.w.heat ?? 0,
+    setStars(id, n) {
+      const p = sim.players.get(id);
+      if (!p || typeof n !== 'number' || !Number.isFinite(n)) return;
+      const s = ensure(p);
+      s.w = { heat: heatOfStars(Math.max(0, Math.min(5, n))), kills: 0, calm: 0 };
+      publish(p, s);
+    },
     postStep() {
       tick++;
       if (hospitalQueue.size) hospitalTransfer();
@@ -364,7 +373,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     privateView(p, out: PrivateState) {
       const s = states.get(p.id);
       out.stars = starsOf(s?.w.heat ?? 0);
-      out.starProgress = s ? starProgress(s.w.heat) : 0;
+      out.starProgress = s ? Math.round(starProgress(s.w.heat) * 100) / 100 : 0;
       if (!cars.size) return;
       const pos = sim.playerPos(p);
       const list: { d: number; m: Mark }[] = [];

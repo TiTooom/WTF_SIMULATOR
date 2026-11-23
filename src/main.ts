@@ -20,7 +20,10 @@ import { launcher, loadSettings, saveSettings } from './settings';
 import { Pda } from './ui/pda';
 import { installMarcheTab, notePrices, resetMarket } from './ui/pda/marche';
 import { ShopUi } from './ui/shop';
-import { showVignettes } from './ui/comic';
+import './ui/pda/missions'; // enregistre l'onglet Missions (et ses vignettes) : surtout pas depuis pda.ts (cycle)
+import { noteGameEvent, noteMe } from './ui/pda/stats';
+import { showMissionResult, showVignettes } from './ui/comic';
+import { missionById } from '../shared/missions';
 import { getLayout, keyLabel, openSettings } from './ui/settingsPanel';
 import { viewFor } from './vehicles';
 import type { VehicleView } from './vehicles/types';
@@ -81,6 +84,10 @@ document.addEventListener('click', (e) => {
 
 // ---------- Entrées ----------
 const keys = new Set<string>();
+/** Touches physiquement maintenues, même pendant un mini-jeu / le PDA : restituées à la fermeture pour ne pas casser la conduite. */
+const held = new Set<string>();
+addEventListener('keydown', (e) => { if ((e.target as HTMLElement)?.tagName !== 'INPUT') held.add(e.code); }, true);
+addEventListener('keyup', (e) => held.delete(e.code), true);
 const blockedAim = () => chat.isOpen() || settingsOpen || pda.isOpen() || shop.isOpen() || mg.active();
 /** Les touches sont lues par code physique (event.code) : le même réglage marche en AZERTY et en QWERTY. */
 const isDown = (a: ActionId) => !!settings.keys[a] && keys.has(settings.keys[a]);
@@ -148,7 +155,7 @@ addEventListener('keydown', (e) => {
   if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'Tab') e.preventDefault();
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
-addEventListener('blur', () => { keys.clear(); m1 = m2 = 0; });
+addEventListener('blur', () => { keys.clear(); held.clear(); m1 = m2 = 0; });
 
 const readInput = (): Input => {
   const blocked = chat.isOpen() || settingsOpen || pda.isOpen() || shop.isOpen() || mg.active();
@@ -180,12 +187,13 @@ let curMe: PlayerSnap | null = null; // moi dans le dernier snapshot échantillo
 let mates: { name: string; x: number; z: number }[] = [];
 let me_: PrivateState | null = null; // dernier état privé (argent, étoiles, repères…)
 let simT = 0; // temps de simulation du dernier snapshot échantillonné (ms) : compte à rebours du PDA
-net.onMe = (s) => { me_ = s; pda.setState(s); shop.setState(s); notePrices(s, net.simTime); };
+net.onMe = (s) => { me_ = s; noteMe(s); pda.setState(s); shop.setState(s); notePrices(s, net.simTime); };
 const mg = createMinigames({ send: (r) => net.send({ type: 'game', m: { k: 'mg', r } }) });
 // Échap pendant un mini-jeu ou le PDA : le navigateur libère la souris ; on ne veut pas l'écran de pause pour autant
 let quietUntil = 0;
 addEventListener('keydown', (e) => { if (e.code === 'Escape' && (mg.active() || pda.isOpen() || shop.isOpen())) quietUntil = performance.now() + 600; }, true);
 net.onGame = (e) => {
+  noteGameEvent(e);
   if (e.k === 'toast') { hud.toast(e.text); chat.add({ from: '', text: e.text, sys: true }); }
   else if (e.k === 'sms') { hud.toast(`SMS · ${e.sms.from} : ${e.sms.text}`, 5000); audio.play('chat'); }
   else if (e.k === 'vignettes') { keys.clear(); m1 = m2 = 0; void showVignettes(e.id); }
@@ -193,7 +201,17 @@ net.onGame = (e) => {
   else if (e.k === 'mg_end') mg.end(e.sid);
   else if (e.k === 'mort') hud.alert('ko');
   else if (e.k === 'arrete') hud.alert('arrete');
-  else if (e.k === 'mission') { if (e.text) hud.toast(e.text); }
+  else if (e.k === 'mission') {
+    if (e.ev === 'done') {
+      keys.clear(); m1 = m2 = 0;
+      const def = missionById(e.id);
+      void showMissionResult({
+        title: def?.name ?? e.id, medal: e.medal ?? null,
+        stats: { ms: e.ms, damage: e.damage, accuracy: e.accuracy }, reward: e.reward,
+        par: e.par ? { ms: e.par.ms, maxDamage: e.par.maxDamage, minAccuracy: e.par.minAccuracy } : undefined,
+      });
+    } else if (e.text) hud.toast(e.text);
+  }
 };
 const $ = (id: string) => document.getElementById(id)!;
 const hudText = $('hud');
@@ -406,6 +424,11 @@ let last = performance.now();
 let prevPos: [number, number] | null = null;
 let walkSpeed = 0;
 let prevHp = 100;
+let wasFrozen = false;
+let wasDead = false;
+let lastFocus: [number, number] | null = null;
+/** Vitesses de pointe (m/s) des voitures, pour le zoom de la caméra (cf. shared/vehicles/*.ts). */
+const VMAX: Record<string, number> = { citadine: 24.5, berline: 27, camionnette: 19.5, police: 30 };
 const tmpV = new THREE.Vector3();
 const prevDead: boolean[] = [];
 const FALLBACK_ME: PlayerSnap = { id: '', name: '', p: [0, 2, 5], yaw: 0, veh: -1, seat: 0, hp: 100 };
@@ -522,8 +545,18 @@ ${L('interact')} : monter dans ${d.name ?? v.type}`;
       + (multi ? ` · ${L('chat')} : chat` : '') + hint + (shop.canInteract() ? `
 ${L('interact')} : parler au dealer` : '');
   }
-  const frozen = mg.active(); // mini-jeu ouvert : caméra et visée figées, entrées nulles
-  if (!frozen) rig.update(dt, { pos: focus, veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance } : undefined });
+  const frozen = mg.active(); // mini-jeu ouvert : caméra et visée figées, entrées nulles, scène non rendue
+  if (frozen !== wasFrozen) {
+    wasFrozen = frozen;
+    hud.setVisible(!frozen);
+    if (!frozen) { keys.clear(); for (const k of held) keys.add(k); } // les touches encore maintenues repartent
+  }
+  // Téléportation (réapparition, hôpital, commissariat) : la caméra saute au lieu de traverser la ville
+  const jumped = lastFocus !== null && Math.hypot(focus[0] - lastFocus[0], focus[2] - lastFocus[1]) > 30;
+  if (jumped || (wasDead && me.hp > 0)) rig.teleported();
+  wasDead = me.hp <= 0;
+  lastFocus = [focus[0], focus[2]];
+  if (!frozen) rig.update(dt, { pos: focus, veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance, vmax: VMAX[veh.type] } : undefined });
   city.update(focus);
   markers.update(me_?.marks ?? [], dt, focus);
 
@@ -555,7 +588,7 @@ ${L('interact')} : parler au dealer` : '');
         const kind = PED_KINDS[pd[o2 + 1]];
         if ((kind === 'flic' || kind === 'gang') && pd[o2 + 5] !== 2) targets.push({ id: pd[o2], pos: [pd[o2 + 2], me.p[1], pd[o2 + 3]], aimHeight: 1.2 });
       }
-      const t = autoLock.update(me.p, cursorYaw, targets, !blockedAim() && !m2);
+      const t = autoLock.update(me.p, cursorYaw, targets, !blockedAim() && !m2, performance.now());
       const aim = computeAim(me.p, cursorYaw, t?.pos ?? null);
       if (t) { lockPos = t.pos; aimO = aim.origin; aimD = aim.dir; yaw = aim.yaw; } else yaw = cursorYaw;
     } else { autoLock.reset(); if (!veh) yaw = cursorYaw; }
@@ -598,6 +631,6 @@ ${L('interact')} : parler au dealer` : '');
   }, me_);
 
   playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');
-  renderer.render(scene, camera);
+  if (!frozen) renderer.render(scene, camera); // sous un mini-jeu plein écran, la dernière image reste affichée
 }
 requestAnimationFrame(frame);

@@ -21,6 +21,8 @@ export interface CarSpec {
   /** Pièces spécifiques (le châssis, la cabine, les feux et les pare-chocs sont déjà posés). `paint` pour les pièces repeignables. */
   detail?: (b: PartBuilder, spec: CarSpec) => void;
   beacons?: boolean; // gyrophares (police)
+  /** Livrée taxi : quand `VehicleSnap.lv === lv`, peinture jaune fixe + lanterne « TAXI » sur le toit + damier sur les portières. */
+  taxi?: { lv: number; color: number };
   cam: { height: number; distance: number; pitch: number };
   engine: EngineParams;
   enterRadius?: number;
@@ -54,6 +56,35 @@ function haloMat(k: 'red' | 'blue'): THREE.SpriteMaterial {
     haloTex = new THREE.CanvasTexture(c);
   }
   return (haloMats[k] ??= new THREE.SpriteMaterial({ map: haloTex, color: k === 'red' ? 0xff2a2a : 0x2a6bff, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false }));
+}
+
+// Lanterne de taxi : une boîte, une texture « TAXI » partagée (lisible aussi vue de dessus)
+let taxiMat: THREE.MeshBasicMaterial | null = null;
+const lanternGeo = new THREE.BoxGeometry(0.8, 0.22, 0.38);
+function lanternMat(): THREE.MeshBasicMaterial {
+  if (taxiMat) return taxiMat;
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 48;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#fff6b0'; g.fillRect(0, 0, 128, 48);
+  g.strokeStyle = '#14141f'; g.lineWidth = 6; g.strokeRect(3, 3, 122, 42);
+  g.font = '900 34px Impact,"Arial Black",sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#14141f';
+  g.fillText('TAXI', 64, 26);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return (taxiMat = new THREE.MeshBasicMaterial({ map: t }));
+}
+const checkerCache = new Map<string, THREE.BufferGeometry>();
+function checkerGeo(spec: CarSpec): THREE.BufferGeometry {
+  let g = checkerCache.get(spec.type);
+  if (!g) {
+    const b = new PartBuilder();
+    const n = 12, len = spec.l * 0.62, step = len / n;
+    for (let i = 0; i < n; i++) for (const sx of [-1, 1]) b.box(0.05, 0.075, step, i % 2 ? 0x14141f : 0xffffff, sx * (spec.w / 2 + 0.03), 0.17 + (i % 2 ? 0 : 0), -len / 2 + step * (i + 0.5) + 0.1);
+    for (let i = 0; i < n; i++) for (const sx of [-1, 1]) b.box(0.05, 0.075, step, i % 2 ? 0xffffff : 0x14141f, sx * (spec.w / 2 + 0.03), 0.245, -len / 2 + step * (i + 0.5) + 0.1);
+    checkerCache.set(spec.type, (g = b.build()));
+  }
+  return g;
 }
 
 interface Shared { geo: THREE.BufferGeometry; hull: THREE.BufferGeometry }
@@ -122,6 +153,18 @@ export function makeCarView(spec: CarSpec): VehicleViewDef {
         wheels.push({ pivot, spin, front });
       }
 
+      // Taxi : lanterne + damier, visibles seulement avec la livrée taxi
+      let taxiKit: THREE.Group | null = null;
+      if (spec.taxi) {
+        taxiKit = new THREE.Group();
+        const lantern = new THREE.Mesh(lanternGeo, lanternMat());
+        lantern.position.set(0, 0.33 + spec.cab.h + 0.2, spec.cab.z);
+        const checker = new THREE.Mesh(checkerGeo(spec), toonVC);
+        taxiKit.add(lantern, checker);
+        taxiKit.visible = false;
+        group.add(taxiKit);
+      }
+
       let beaconR: THREE.Mesh | null = null, beaconB: THREE.Mesh | null = null;
       if (spec.beacons) {
         beaconR = new THREE.Mesh(beaconGeo, beaconMat.red);
@@ -144,10 +187,13 @@ export function makeCarView(spec: CarSpec): VehicleViewDef {
         const pal = spec.palette;
         const idx = (((seed + lv) % pal.length) + pal.length) % pal.length;
         const dmg = hp < 0.3 ? Math.round((1 - hp / 0.3) * 4) : 0; // 0..4
-        const key = idx * 8 + dmg;
+        const taxi = !!spec.taxi && lv === spec.taxi.lv;
+        const base = taxi ? spec.taxi!.color : pal[idx];
+        const key = (taxi ? 99 : idx) * 8 + dmg;
+        if (taxiKit) taxiKit.visible = taxi;
         if (key === paintKey) return;
         paintKey = key;
-        repaint(geo, dmg ? mixHex(pal[idx], 0x2a2a2a, dmg * 0.17) : pal[idx]);
+        repaint(geo, dmg ? mixHex(base, 0x2a2a2a, dmg * 0.17) : base);
       };
       applyPaint(0, 1);
 

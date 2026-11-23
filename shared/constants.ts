@@ -23,4 +23,4 @@ export const PROJECTILE_KINDS = ['bullet', 'grenade', 'rocket'] as const;
  * Taille du pool de véhicules par type (corps créés une fois pour toutes, jamais retirés du monde Rapier).
  * Le pool n'est alloué que pour les types réellement définis dans VEHICLES (vague 1 : seule la `citadine`).
  */
-export const VEHICLE_POOL: Record<VehicleType, number> = { citadine: 14, berline: 12, camionnette: 6, police: 10 };
+export const VEHICLE_POOL: Record<VehicleType, number> = { citadine: 17, berline: 14, camionnette: 7, police: 10 };

@@ -2,7 +2,7 @@
 // Brise-glace : marteler la vitre (clic gauche ou Espace) ; chaque coup agrandit la fissure, le dernier la fait voler en éclats.
 // Données envoyées : [nombre de coups]. Règle : shared/minigames/rules.ts (briseGlaceSpec).
 import { briseGlaceSpec, rng } from '../../shared/minigames/rules';
-import { H, INK, PAL, W, box, burst, clamp, line, type MgFactory } from './kit';
+import { H, INK, PAL, W, box, burst, clamp, googly, line, type MgFactory } from './kit';
 
 const CX = W / 2;
 const CY = H / 2 + 6;
@@ -40,10 +40,10 @@ export const createBriseGlace: MgFactory = (env) => {
     shake = 0.12;
     if (hits >= spec.hits) {
       done = true;
-      env.sfx('mg_crack');
+      env.sfx('mg_shatter');
       for (let i = 0; i < 26; i++) shards.push({ x: CX, y: CY, vx: (r() - 0.5) * 900, vy: (r() - 0.7) * 700, rot: r() * 6 });
       env.finish(true, [hits]);
-    } else env.sfx('mg_hit');
+    } else env.sfx('mg_hit', hits);
   };
 
   return {
@@ -54,7 +54,7 @@ export const createBriseGlace: MgFactory = (env) => {
       shake = Math.max(0, shake - dt);
       for (const s of shards) { s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 1400 * dt; s.rot += dt * 8; }
     },
-    draw(g) {
+    draw(g, t) {
       const sx = shake > 0 ? (Math.random() - 0.5) * 12 : 0;
       const sy = shake > 0 ? (Math.random() - 0.5) * 12 : 0;
       g.save();
@@ -68,7 +68,43 @@ export const createBriseGlace: MgFactory = (env) => {
         g.lineTo(CX - 90, CY - 120);
         g.lineTo(CX - 170, CY - 40);
         g.fill();
+        // l'eau monte derrière la vitre (la pression du temps) ; un poisson curieux passe et écarquille les yeux à chaque coup
+        const wl = CY + 150 - (0.15 + 0.5 * clamp(env.now() / env.start.maxMs, 0, 1)) * 300;
+        g.save();
+        g.beginPath();
+        g.roundRect(CX - 200, CY - 150, 400, 300, 18);
+        g.clip();
+        g.beginPath();
+        g.moveTo(CX - 210, CY + 160);
+        for (let x = -210; x <= 210; x += 14) g.lineTo(CX + x, wl + Math.sin(t / 260 + x / 40) * 6);
+        g.lineTo(CX + 210, CY + 160);
+        g.closePath();
+        g.fillStyle = 'rgba(58,134,255,0.55)';
+        g.fill();
+        g.lineWidth = 4;
+        g.strokeStyle = INK;
+        g.stroke();
+        const fx = CX - 160 + ((t / 9) % 360);
+        const fy = Math.min(CY + 118, wl + 45) + Math.sin(t / 300) * 8;
+        g.beginPath();
+        g.ellipse(fx, fy, 22, 13, 0, 0, Math.PI * 2);
+        g.moveTo(fx - 18, fy);
+        g.lineTo(fx - 38, fy - 12);
+        g.lineTo(fx - 38, fy + 12);
+        g.closePath();
+        g.fillStyle = PAL.orange;
+        g.fill();
+        g.lineWidth = 3;
+        g.stroke();
+        googly(g, fx + 9, fy - 3, 6, env.cursor.x, env.cursor.y, swing > 0.3);
+        g.restore();
+        // les fissures restent dans la vitre
+        g.save();
+        g.beginPath();
+        g.roundRect(CX - 196, CY - 146, 392, 292, 14);
+        g.clip();
         for (let i = 0; i < hits; i++) line(g, cracks[i], '#fff', 4);
+        g.restore();
         burst(g, CX, CY, 20 + hits * 5, PAL.yellow, 7, hits);
       }
       for (const s of shards) {

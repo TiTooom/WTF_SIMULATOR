@@ -18,6 +18,7 @@ const HIT_HP = 0.5;
 export interface MinigameDone { p: SimPlayer; kind: MinigameKind; tag: string; ok: boolean; ms: number; reason: string }
 
 interface Session {
+  p: SimPlayer; // le joueur de la session (pour clore proprement si son corps a disparu sans passage par onLeave)
   sid: number;
   kind: MinigameKind;
   tag: string;
@@ -87,7 +88,7 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
     const d = clamp01(difficulty);
     const sd = Number.isFinite(seed) ? (Math.floor(seed as number) >>> 0) % 0x7fffffff : Math.floor(Math.random() * 0x7fffffff);
     const s: Session = {
-      sid: nextSid++, kind, tag: String(tag ?? '').slice(0, 48), seed: sd, difficulty: d,
+      p, sid: nextSid++, kind, tag: String(tag ?? '').slice(0, 48), seed: sd, difficulty: d,
       startedAt: ctx.sim.time, ttlAt: ctx.sim.time + rule.maxMs + TTL_MARGIN_MS,
       pos: ctx.sim.playerPos(p), hp: p.hp, vehicle: p.vehicle, onDone,
     };
@@ -101,8 +102,11 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
   ctx.bus.on('playerBusted', ({ p }) => cancelOn(p, 'arrete'));
   ctx.bus.on('debug', ({ p, what, arg }) => {
     if (what !== 'mg') return;
-    const kind = isIn(MINIGAME_KINDS, arg) ? arg : 'tournevis';
-    startMinigame(p, kind, 'debug', 0.3);
+    // `/debug mg <kind>` ou `/debug mg <kind>@<difficulté 0..1>` (essai des difficultés)
+    const [k, d] = String(arg).split('@');
+    const kind = isIn(MINIGAME_KINDS, k) ? k : 'tournevis';
+    const diff = d !== undefined && Number.isFinite(Number(d)) ? Number(d) : 0.3;
+    startMinigame(p, kind, 'debug', diff);
   });
 
   return {
@@ -122,7 +126,8 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
       const now = ctx.sim.time;
       for (const [id, s] of [...sessions]) {
         const p = playerById(id);
-        if (!p) { sessions.delete(id); continue; }
+        // joueur disparu sans passage par onLeave : on clôt la session en silence (onDone appelé une seule fois, aucun envoi)
+        if (!p || p !== s.p) { finish(s.p, s, false, now - s.startedAt, 'depart', false); continue; }
         if (p.hp <= 0) { finish(p, s, false, now - s.startedAt, 'mort'); continue; }
         if (p.hp < s.hp - HIT_HP) { finish(p, s, false, now - s.startedAt, 'touche'); continue; }
         s.hp = Math.max(s.hp, p.hp); // les soins relèvent le seuil : on ne compte que les pertes
@@ -145,7 +150,7 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
     onMessage(p, m: GameClientMsg) {
       if (m.k !== 'mg') return;
       const s = sessions.get(p.id);
-      if (!s || s.sid !== m.r.sid) return; // sid inconnu, rejoué, ou d'un autre joueur : ignoré sans réponse
+      if (!s || s.p !== p || s.sid !== m.r.sid) return; // sid inconnu, rejoué, ou d'un autre joueur : ignoré sans réponse
       const elapsed = ctx.sim.time - s.startedAt;
       const [ok, reason] = judge(s, m.r, elapsed);
       finish(p, s, ok, ok ? m.r.ms : Math.min(m.r.ms, elapsed), reason);

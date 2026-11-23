@@ -233,7 +233,7 @@ function build(): CityLayout {
   ];
   cars.forEach(([x, z, yaw], n) => spawnAt(n, x, z, 'car', yaw));
 
-  // Parkings (~20) : en bord de chaussée au milieu de tronçons tirés au hasard (hors tronçons de départ), garés le long de la route
+  // Parkings (~40, 8 par quartier) : en bord de chaussée au milieu de tronçons tirés au hasard (hors tronçons de départ), garés le long de la route
   const spawnEdges = new Set<number>();
   for (const [x, z] of [...players, ...cars.map(([x, z]) => [x, z] as [number, number])]) {
     const e = edges.find((ed) => {
@@ -243,12 +243,18 @@ function build(): CityLayout {
     if (e) spawnEdges.add(e.id);
   }
   const cand = edges.filter((e) => !spawnEdges.has(e.id));
-  for (let n = 0; n < 20 && cand.length; n++) {
-    const e = cand.splice(Math.floor(rp() * cand.length), 1)[0];
+  const PER_DISTRICT = 8;
+  const picks: typeof edges = [];
+  for (const d of DISTRICT_IDS) {
+    const mine = cand.filter((e) => districtGrid[cellOf((nodes[e.a].z + nodes[e.b].z) / 2) * N + cellOf((nodes[e.a].x + nodes[e.b].x) / 2)] === d);
+    for (let k = 0; k < PER_DISTRICT && mine.length; k++) picks.push(mine.splice(Math.floor(rp() * mine.length), 1)[0]);
+  }
+  for (let n = 0; n < picks.length; n++) {
+    const e = picks[n];
     const a = nodes[e.a], b = nodes[e.b];
     const cx = (a.x + b.x) / 2, cz = (a.z + b.z) / 2;
     const side = rp() < 0.5 ? 1 : -1;
-    const off = (ROAD / 2 - 1.2) * side; // contre le trottoir (1,2 m de marge)
+    const off = (ROAD / 2 + 0.3) * side; // roues contre le bord de chaussée (PARK_OFFSET de lanes.ts)
     const x = e.horizontal ? cx : cx + off;
     const z = e.horizontal ? cz + off : cz;
     pois.push({ id: `parking_${n}`, kind: 'parking', x, z, yaw: e.horizontal ? -Math.PI / 2 : 0, district: districtGrid[cellOf(z) * N + cellOf(x)] });

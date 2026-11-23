@@ -2,14 +2,15 @@
 // Court-circuit sous le volant : glisser les deux bouts de câble dénudés dans la zone cuivrée et les maintenir en contact 1 s.
 // Données envoyées : [ms de contact cumulés]. Règle : shared/minigames/rules.ts (courtCircuitSpec, HOTWIRE_HOLD_MS).
 import { HOTWIRE_HOLD_MS, courtCircuitSpec } from '../../shared/minigames/rules';
-import { H, INK, PAL, W, box, burst, clamp, disc, line, type MgFactory } from './kit';
+import { H, INK, PAL, W, box, burst, clamp, disc, googly, line, type MgFactory } from './kit';
 
-const GRAB = 42; // rayon de saisie d'un bout de câble
-const CONTACT = 26; // distance de contact entre les deux bouts
-const ZONE_R = 95;
+const GRAB = 46; // rayon de saisie d'un bout de câble
 
 export const createCourtCircuit: MgFactory = (env) => {
-  const spec = courtCircuitSpec(env.start.seed);
+  const spec = courtCircuitSpec(env.start.seed, env.start.difficulty);
+  const ZONE_R = spec.zoneR; // zone dénudée
+  const CONTACT = spec.contact; // distance de contact entre les deux bouts
+  let zapAt = 0;
   const zone = { x: spec.meetX * W, y: ((spec.ay + spec.by) / 2) * H };
   const ends = [
     { x: 70, y: spec.ay * H, home: [70, spec.ay * H] },
@@ -33,6 +34,13 @@ export const createCourtCircuit: MgFactory = (env) => {
       if (best >= 0) env.sfx('mg_push');
     },
     onUp() { held = -1; },
+    probe: () => ({ zx: zone.x, zy: zone.y, e0x: ends[0].x, e0y: ends[0].y, e1x: ends[1].x, e1y: ends[1].y, hold }),
+    // le bout suit la souris à chaque mouvement (pas à chaque image : robuste aux machines lentes)
+    onMove(x, y) {
+      if (done || held < 0 || !env.down) return;
+      ends[held].x = clamp(x, 30, W - 30);
+      ends[held].y = clamp(y, 30, H - 30);
+    },
     update(dt) {
       if (done) return;
       if (held >= 0 && env.down) {
@@ -44,17 +52,18 @@ export const createCourtCircuit: MgFactory = (env) => {
         if (!wasTouching) env.sfx('mg_spark');
         hold += dt * 1000;
         flash = (flash + dt * 30) % 2;
-        if (Math.floor(hold / 120) !== Math.floor((hold - dt * 1000) / 120)) env.sfx('mg_tick', Math.floor(hold / 120));
+        if (Math.floor(hold / 90) !== Math.floor((hold - dt * 1000) / 90)) env.sfx('mg_zap', zapAt++);
       } else {
-        hold = Math.max(0, hold - dt * 1500); // le contact se perd : la jauge retombe vite
+        hold = Math.max(0, hold - dt * spec.decay); // le contact se perd : la jauge retombe vite (plus vite en difficile)
       }
       wasTouching = touching;
       if (hold >= HOTWIRE_HOLD_MS) {
         done = true;
+        env.sfx('mg_start_engine');
         env.finish(true, [Math.round(hold)]);
       }
     },
-    draw(g) {
+    draw(g, t) {
       // boîtier ouvert sous le volant
       box(g, 20, 20, W - 40, H - 40, PAL.dark, 20);
       // zone dénudée (cuivre)
@@ -76,6 +85,31 @@ export const createCourtCircuit: MgFactory = (env) => {
         disc(g, e.x, e.y, 13, '#e8c9a0', 4); // bout dénudé
         if (held === i) disc(g, e.x, e.y, 19, 'rgba(255,255,255,0.25)', 3);
       });
+      // désodorisant « sapin » qui se balance sous le rétroviseur : il écarquille les yeux à chaque étincelle
+      {
+        g.save();
+        g.translate(W - 70, 22);
+        g.rotate(Math.sin(t / 300) * 0.15 + (wasTouching ? Math.sin(t / 30) * 0.12 : 0));
+        g.lineWidth = 3;
+        g.strokeStyle = PAL.paper;
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.lineTo(0, 22);
+        g.stroke();
+        g.beginPath();
+        g.moveTo(0, 22);
+        g.lineTo(-24, 74);
+        g.lineTo(24, 74);
+        g.closePath();
+        g.fillStyle = PAL.green;
+        g.fill();
+        g.lineWidth = 4;
+        g.strokeStyle = INK;
+        g.stroke();
+        googly(g, -8, 50, 6, env.cursor.x - (W - 70), env.cursor.y - 22, wasTouching);
+        googly(g, 8, 50, 6, env.cursor.x - (W - 70), env.cursor.y - 22, wasTouching);
+        g.restore();
+      }
       // jauge + étincelles
       const p = clamp(hold / HOTWIRE_HOLD_MS, 0, 1);
       box(g, 120, H - 62, W - 240, 26, '#fff', 13);

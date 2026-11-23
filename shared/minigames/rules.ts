@@ -32,16 +32,22 @@ const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFi
 
 // ---------- tournevis : maintenir pour enfoncer, tourner en cercle jusqu'à briser le verrou ----------
 export const tournevisSpec = (_seed: number, d: number) => ({
-  turns: 3 + Math.floor(clamp01(d) * 3), // tours complets à effectuer (3..5)
+  turns: 3 + Math.floor(clamp01(d) * 2.99), // tours complets à effectuer (3..5)
   minPressMs: 150, // temps minimal d'enfoncement avant de tourner
   dir: _seed % 2 === 0 ? 1 : -1, // sens du verrou : 1 = horaire
 });
 
 // ---------- court_circuit : rapprocher deux câbles et maintenir 1 s ----------
 export const HOTWIRE_HOLD_MS = 1000;
-export function courtCircuitSpec(seed: number) {
+export function courtCircuitSpec(seed: number, d = 0) {
   const r = rng(seed);
-  return { ay: 0.2 + r() * 0.6, by: 0.2 + r() * 0.6, meetX: 0.4 + r() * 0.2 }; // hauteurs des bouts de câbles et point de contact (0..1)
+  const dd = clamp01(d);
+  return {
+    ay: 0.28 + r() * 0.52, by: 0.28 + r() * 0.52, meetX: 0.4 + r() * 0.2, // hauteurs des bouts de câbles et point de contact (0..1)
+    zoneR: 100 - 28 * dd, // rayon de la zone dénudée où il faut amener les deux bouts (px du canvas)
+    contact: 30 - 8 * dd, // distance de contact entre les deux bouts
+    decay: 1400 + 1600 * dd, // ms de jauge perdus par seconde quand le contact est rompu
+  };
 }
 
 // ---------- digicode : 3 colonnes qui défilent, une zone verte chacune, clic pour stopper ----------
@@ -74,8 +80,8 @@ export function dosageSpec(seed: number, d: number) {
 
 // ---------- fouille : balayer les détritus pour dégager l'objet brillant ----------
 export const FOUILLE_SLOTS = 5;
-export function fouilleSpec(seed: number) {
-  return { slot: Math.floor(rng(seed)() * FOUILLE_SLOTS), swipes: 3 };
+export function fouilleSpec(seed: number, d = 0) {
+  return { slot: Math.floor(rng(seed)() * FOUILLE_SLOTS), swipes: clamp01(d) >= 0.5 ? 4 : 3 }; // balayages à faire sur le bon tas
 }
 
 // ---------- brise_glace : marteler la vitre (5 ou 6 coups) ----------
@@ -83,10 +89,14 @@ export const briseGlaceSpec = (_seed: number, d: number) => ({ hits: 5 + Math.fl
 
 // ---------- desamorcage : mémoriser le fil flashé, le trancher ----------
 export const WIRE_COLORS = 4;
-export const desamorcageSpec = (seed: number) => ({ wire: Math.floor(rng(seed ^ 0x5bd1e995)() * WIRE_COLORS), flashMs: 500 });
+export const desamorcageSpec = (seed: number, d = 0) => ({ wire: Math.floor(rng(seed ^ 0x5bd1e995)() * WIRE_COLORS), flashMs: Math.round(600 - 250 * clamp01(d)) }); // le flash raccourcit avec la difficulté
 
 // ---------- liasses : glisser le bon nombre de liasses ----------
-export const liassesSpec = (seed: number) => ({ target: 3 + Math.floor(rng(seed ^ 0x1b873593)() * 4), maxOver: 1, perMs: 110 });
+export const liassesSpec = (seed: number, d = 0) => ({
+  target: 3 + Math.floor(rng(seed ^ 0x1b873593)() * 2) + (clamp01(d) >= 0.5 ? 1 : 0), // 3..5 liasses
+  maxOver: clamp01(d) >= 0.7 ? 0 : 1, // une de trop tolérée sauf en difficile
+  perMs: 110,
+});
 
 // ---------- Règles ----------
 const mk = (minMs: number, maxMs: number, validate: MinigameRule['validate'], cancelDist = 4): MinigameRule => ({ minMs, maxMs, cancelDist, validate });
@@ -97,7 +107,7 @@ export const RULES: Record<MinigameKind, MinigameRule> = {
     const [turns, pressMs] = data(r);
     return r.ok && finite(turns) && finite(pressMs) && turns >= s.turns && pressMs >= s.minPressMs && r.ms >= 350 * s.turns * 0.6;
   }),
-  court_circuit: mk(1300, 4200, (_seed, _d, r) => {
+  court_circuit: mk(1300, 4200, (_seed, _d, r) => { // la zone et le contact sont jugés par le client ; le serveur ne vérifie que la tenue et la durée
     const [holdMs] = data(r);
     return r.ok && finite(holdMs) && holdMs >= HOTWIRE_HOLD_MS && r.ms >= holdMs + 150;
   }),
@@ -122,8 +132,8 @@ export const RULES: Record<MinigameKind, MinigameRule> = {
     }
     return r.ms >= (sum / DOSAGE_FILL_RATE) * 900;
   }),
-  fouille: mk(900, 4000, (seed, _d, r) => {
-    const s = fouilleSpec(seed);
+  fouille: mk(900, 4000, (seed, d, r) => {
+    const s = fouilleSpec(seed, d);
     const [slot, swipes] = data(r);
     return r.ok && slot === s.slot && finite(swipes) && swipes >= s.swipes && r.ms >= swipes * 120;
   }),
@@ -132,13 +142,13 @@ export const RULES: Record<MinigameKind, MinigameRule> = {
     const [hits] = data(r);
     return r.ok && finite(hits) && hits >= s.hits && r.ms >= (hits / s.maxCps) * 1000;
   }),
-  desamorcage: mk(800, 4000, (seed, _d, r) => {
-    const s = desamorcageSpec(seed);
+  desamorcage: mk(800, 4000, (seed, d, r) => {
+    const s = desamorcageSpec(seed, d);
     const [cut] = data(r);
     return r.ok && cut === s.wire && r.ms >= s.flashMs + 150;
   }),
-  liasses: mk(900, 4000, (seed, _d, r) => {
-    const s = liassesSpec(seed);
+  liasses: mk(900, 4200, (seed, d, r) => {
+    const s = liassesSpec(seed, d);
     const [placed] = data(r);
     return r.ok && finite(placed) && Number.isInteger(placed) && placed >= s.target && placed <= s.target + s.maxOver && r.ms >= placed * s.perMs;
   }),
