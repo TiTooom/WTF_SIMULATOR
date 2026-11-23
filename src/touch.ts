@@ -36,13 +36,13 @@ const css = `
 body.touch { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; overscroll-behavior: none; }
 body.touch #players, body.touch #itemInfo, body.touch #crosshair.veh { display: none; }
 body.touch #vitals { top: 10px; bottom: auto; left: 10px; width: 120px; }
-body.touch #hud { top: 62px; left: 10px; font-size: 11px; max-width: 44vw; }
+body.touch #hud { top: 54px; left: 50%; transform: translateX(-50%); text-align: center; font-size: 11px; max-width: 28vw; }
 body.touch #hotbar { bottom: auto; top: 6px; pointer-events: auto; z-index: 60; gap: 2px; }
 body.touch .slot { width: 40px; height: 44px; border-width: 2px; border-radius: 8px; }
 body.touch .slot .emoji { font-size: 18px; line-height: 20px; }
 body.touch .slot .nm, body.touch .slot .num { display: none; }
 body.touch .slot.sel { transform: translateY(3px); }
-body.touch #chat { bottom: 190px; width: 46vw; z-index: 70; }
+body.touch #chat { left: 140px; bottom: 12px; width: 34vw; z-index: 70; }
 body.touch #chat.open { top: 6px; bottom: auto; width: 70vw; }
 body.touch #pause #card, body.touch #card { max-height: 92vh; overflow: auto; }
 #touch { position: fixed; inset: 0; z-index: 50; display: none; pointer-events: none; font-family: "Segoe UI", sans-serif; }
@@ -79,7 +79,7 @@ export function createTouch(o: TouchOptions) {
     <div class="zone zr"></div>
     <div class="b" data-a="fire" style="right:18px;bottom:26px;width:88px;height:88px">TIR</div>
     <div class="b" data-a="jump" style="right:122px;bottom:18px;width:62px;height:62px">SAUT</div>
-    <div class="b" data-a="alt" style="right:104px;bottom:96px;width:56px;height:56px">2<small>tir</small></div>
+    <div class="b" data-a="alt" style="right:114px;bottom:96px;width:56px;height:56px">2<small>tir</small></div>
     <div class="b" data-a="interact" style="right:18px;bottom:128px;width:64px;height:64px">🚪<small>E</small></div>
     <div class="b hide" data-a="horn" style="right:178px;bottom:96px;width:50px;height:50px">📣</div>
     <div class="b hide" data-a="far" style="right:178px;bottom:100px;width:46px;height:46px">＋</div>
@@ -92,7 +92,7 @@ export function createTouch(o: TouchOptions) {
       <div class="b sq" data-k="throttleUp">⬆<small>gaz</small></div><div class="b sq" data-k="yawLeft">↶</div>
       <div class="b sq" data-k="throttleDown">⬇<small>frein</small></div><div class="b sq" data-k="yawRight">↷</div>
     </div>
-    <div class="pad hide" id="padExca" style="right:8px;top:104px;grid-template-columns:repeat(2,52px)">
+    <div class="pad hide" id="padExca" style="right:58px;top:56px;grid-template-columns:repeat(4,52px)">
       <div class="b sq" data-k="swingLeft">⟲<small>cabine</small></div><div class="b sq" data-k="swingRight">⟳<small>cabine</small></div>
       <div class="b sq" data-k="boomUp">⤒<small>flèche</small></div><div class="b sq" data-k="boomDown">⤓<small>flèche</small></div>
       <div class="b sq" data-k="stickOut">↗<small>bras</small></div><div class="b sq" data-k="stickIn">↙<small>bras</small></div>

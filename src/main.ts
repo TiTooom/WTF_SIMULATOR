@@ -531,7 +531,7 @@ function frame(now: number) {
     camera.position.copy(tmpV.set(0, 0, cam.distance * zoom).applyEuler(eul).add(camTarget));
     camera.position.y = Math.max(camera.position.y, 0.5);
     camera.rotation.copy(eul);
-    hudText.textContent = vdef.hud(veh, L);
+    hudText.textContent = touchMode ? '' : vdef.hud(veh, L); // au toucher, l'aide clavier est inutile
   } else {
     camera.position.set(me.p[0], me.p[1] + EYE, me.p[2]);
     camera.rotation.set(pitch, yaw, 0, 'YXZ');
