@@ -140,7 +140,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (!file.startsWith(publicDir + path.sep)) return reply(res, 403, {});
       fs.readFile(file, (err, data) => {
         try {
-          if (err) return reply(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Introuvable');
+          if (err) return reply(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, urlPath === '/' ? 'Serveur WTF SIMULATOR en marche, mais le client ne se trouve pas ici. En développement, ouvre le port 5173 ; sinon lance npm run build.' : 'Introuvable');
           reply(res, 200, { 'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream' }, data);
         } catch { /* réponse impossible : on ignore */ }
       });

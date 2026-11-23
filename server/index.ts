@@ -20,8 +20,10 @@ const server = await startServer({
   log: console.log,
   onFatal: () => process.exit(1), // le serveur s'est arrêté seul (la partie a été sauvegardée)
 });
-console.log(`Jeu : http://localhost:${server.port}`);
-if (!solo) for (const ip of lanAddresses()) console.log(`Amis (même Wi-Fi) : http://${ip}:${server.port}`);
+const dev = !!process.env.npm_lifecycle_event?.startsWith('dev');
+const clientPort = dev ? 5173 : server.port; // en dev, le client est servi par Vite (5173)
+console.log(`Jeu : http://localhost:${clientPort}`);
+if (!solo) for (const ip of lanAddresses()) console.log(`Amis (même Wi-Fi) : http://${ip}:${clientPort}`);
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const)
   process.on(sig, async () => {
