@@ -355,7 +355,7 @@ async function partServer() {
     // état privé : au moins un message `me`, bien formé, et pas de déluge (envoyé seulement s'il change)
     const meMsgs = B.msgs.filter((m) => m.type === 'me');
     const s0 = (meMsgs[0]?.s ?? {}) as { money?: number; stars?: number; district?: string; marks?: unknown[]; bag?: object };
-    check('message `me` reçu : état privé bien formé', meMsgs.length >= 1 && s0.money === 0 && s0.stars === 0 && typeof s0.district === 'string' && Array.isArray(s0.marks) && typeof s0.bag === 'object');
+    check('message `me` reçu : état privé bien formé', meMsgs.length >= 1 && typeof s0.money === 'number' && s0.money >= 0 && s0.stars === 0 && typeof s0.district === 'string' && Array.isArray(s0.marks) && typeof s0.bag === 'object');
     const n0 = B.msgs.filter((m) => m.type === 'me').length;
     await sleep(1200);
     check('message `me` : pas renvoyé tant que l état ne change pas', B.msgs.filter((m) => m.type === 'me').length - n0 <= 1, String(B.msgs.filter((m) => m.type === 'me').length - n0));

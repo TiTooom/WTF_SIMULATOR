@@ -1,6 +1,6 @@
 // Suite « economie » : logique pure de shared/economy (prix, événements, tuyaux, caméras, sérialisation). Aucun serveur, aucun port.
 // Lancement : npx tsx tests/economie.ts
-import { DISTRICT_IDS, GANG_IDS, GOOD_IDS, type GoodId } from '../shared/ids';
+import { DISTRICT_IDS, GANG_IDS, GOOD_IDS, type DistrictId, type GoodId } from '../shared/ids';
 import { GOODS } from '../shared/economy/goods';
 import { GANGS, territoryMult, GANG_OF_DISTRICT } from '../shared/economy/gangs';
 import {
@@ -8,6 +8,14 @@ import {
   tipSendProbability, unitPrice, MAX_PRICE_FACTOR, NOISE_MAX, NOISE_MIN, NOISE_PERIOD_MS, TIP_SEND_PROB,
 } from '../shared/economy/prices';
 import { tipOf, tipText } from '../shared/economy/tips';
+import { Sim } from '../shared/sim';
+import { GameBus, parseGameMsg, type GameCtx, type GameSystem } from '../shared/game';
+import { getCity } from '../shared/city/layout';
+import type { GameClientMsg, GameServerEvent, PrivateState } from '../shared/protocol';
+import type { SimPlayer } from '../shared/api';
+import { runCommand } from '../server/commands';
+import { createEconomy, type EconomySystem } from '../server/systems/economy';
+import { BAG_CAP, MAX_TRADE_QTY, START_MONEY, STASH_CAP, bagVolume, bustLoss, parseAmount, rayMissDistance } from '../shared/economy/trade';
 
 let fails = 0;
 function check(name: string, ok: boolean, detail = ''): void {
@@ -251,5 +259,309 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   check('parseMarket résiste aux données hostiles', ok);
 }
 
-console.log(fails === 0 ? '\neconomie : TOUT VERT' : `\neconomie : ${fails} échec(s)`);
-process.exit(fails === 0 ? 0 : 1);
+
+// ---- 11. Règles pures du commerce ----
+{
+  check('parseAmount : refuse négatif, décimal, exposant, hexadécimal, vide', ['-5', '2.5', '1e3', '0x10', '', '0', ' 5', '9999999999'].every((x) => parseAmount(x) === null) && parseAmount('50') === 50 && parseAmount(50 as unknown) === null);
+  check('bustLoss : 25 % de l\'argent, jamais négatif ni supérieur au solde', bustLoss(1000) === 250 && bustLoss(0) === 0 && bustLoss(1) === 0 && bustLoss(-5) === 0 && bustLoss(NaN) === 0);
+  check('rayMissDistance : devant / derrière / hors portée', rayMissDistance(0, 0, 0, -1, 0, -10, 45) === 0 && rayMissDistance(0, 0, 0, -1, 0, 10, 45) === null && rayMissDistance(0, 0, 0, -1, 0, -100, 45) === null && rayMissDistance(0, 0, 0, 0, 0, -5, 45) === null);
+}
+
+// ---- 12. Système serveur sur un vrai Sim (sans réseau, sans port) ----
+async function serverSuite(): Promise<void> {
+  const sim = await Sim.create();
+  sim.log = () => {};
+  sim.onAnnounce = () => {};
+  sim.addPlayer('p1', 'Alice');
+  sim.addPlayer('p2', 'Bob');
+  const p1 = sim.players.get('p1')!, p2 = sim.players.get('p2')!;
+  const city = getCity();
+  const dealers = city.poisOf('dealer'), planques = city.poisOf('planque'), cams = city.poisOf('camera');
+  const out: { to: string; ev: GameServerEvent }[] = [];
+  const mk = () => {
+    const bus = new GameBus();
+    const systems = new Map<string, GameSystem>();
+    const ctx: GameCtx = {
+      sim, bus, city, mode: 'multi',
+      sendTo: (to, ev) => out.push({ to, ev }), broadcast: (ev) => out.push({ to: '*', ev }),
+      get: ((id: string) => systems.get(id)) as GameCtx['get'],
+    };
+    const eco = createEconomy(ctx) as EconomySystem;
+    systems.set('economy', eco);
+    return { bus, systems, eco };
+  };
+  const { bus, systems, eco } = mk();
+  const crimes: string[] = [];
+  const trades: unknown[] = [];
+  bus.on('crime', (e) => crimes.push(e.kind));
+  bus.on('trade', (e) => trades.push(e));
+  eco.onJoin?.(p1); eco.onJoin?.(p2);
+  const at = (p: SimPlayer, x: number, z: number) => sim.teleportPlayer(p, x, 1, z);
+  const blank = (): PrivateState => ({ money: 0, bag: {}, bagCap: 0, stars: 0, starProgress: 0, district: 'campus', marks: [], medals: {}, unread: 0 });
+  const view = (p: SimPlayer): PrivateState => { const o = blank(); eco.privateView!(p, o); return o; };
+  const msg = (p: SimPlayer, raw: unknown) => { const m = parseGameMsg(raw); if (m) eco.onMessage!(p, m); return m; };
+  const direct = (p: SimPlayer, m: unknown) => eco.onMessage!(p, m as GameClientMsg); // contourne parseGameMsg (défense en profondeur)
+  const snap = () => JSON.stringify([eco.moneyOf(p1), [...eco.bagOf(p1)]]);
+  const D = dealers[0]; // dealer_campus_0 : loin de toute caméra
+  const D2 = dealers[2];
+  at(p2, 0, 0);
+
+  at(p1, 40, 40);
+  let v = view(p1);
+  check('départ : 200 €, sac vide, capacité 30, pas de boutique ni de planque au loin', v.money === START_MONEY && Object.keys(v.bag).length === 0 && v.bagCap === BAG_CAP && !v.shop && !v.stash);
+  at(p1, D.x + 1, D.z + 1);
+  v = view(p1);
+  check('à moins de 3 m d\'un dealer : shop rempli (un prix par marchandise)', !!v.shop && v.shop.dealer === D.id && v.shop.goods.length === GOOD_IDS.length && v.shop.district === D.district);
+  at(p1, D.x + 5, D.z);
+  check('à 5 m : boutique fermée', !view(p1).shop);
+  at(p1, D.x + 1, D.z);
+  check('argent individuel : Bob a aussi 200 €', view(p2).money === START_MONEY && eco.moneyOf(p1) === START_MONEY);
+
+  const cafe: GoodId = 'cafe_machine'; // poids 2
+  const q0 = quote(cafe, D.district, eco.market, sim.time);
+  msg(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 3, side: 'buy' });
+  check('achat valide : argent débité au prix serveur, sac crédité, événement trade', eco.moneyOf(p1) === START_MONEY - q0.buy * 3 && eco.bagOf(p1).get(cafe) === 3 && trades.length === 1);
+  check('privateView reflète le sac', view(p1).bag[cafe] === 3);
+  const before = snap();
+  for (const bad of [0, -1, 1.5, NaN, Infinity, MAX_TRADE_QTY + 1, 1e9, '3', null, undefined, [1], {}]) direct(p1, { k: 'trade', dealer: D.id, good: cafe, qty: bad, side: 'buy' });
+  direct(p1, { k: 'trade', dealer: D.id, good: 'bombe', qty: 1, side: 'buy' });
+  direct(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 1, side: 'donne' });
+  direct(p1, { k: 'trade', dealer: '__proto__', good: cafe, qty: 1, side: 'buy' });
+  direct(p1, { k: 'trade', dealer: 'nimporte', good: cafe, qty: 1, side: 'buy' });
+  check('quantités invalides, marchandise/côté/dealer inconnus : rien ne change', before === snap());
+  check('parseGameMsg refuse qty fractionnaire / négatif / NaN', parseGameMsg({ k: 'trade', dealer: D.id, good: cafe, qty: 1.5, side: 'buy' }) === null && parseGameMsg({ k: 'trade', dealer: D.id, good: cafe, qty: -2, side: 'sell' }) === null && parseGameMsg({ k: 'trade', dealer: D.id, good: cafe, qty: NaN, side: 'buy' }) === null);
+  msg(p1, { k: 'trade', dealer: D2.id, good: cafe, qty: 1, side: 'buy' });
+  check('dealer trop loin : refusé', before === snap());
+  at(p1, D.x + 6, D.z);
+  msg(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 1, side: 'buy' });
+  check('à 6 m du bon dealer : refusé', before === snap());
+  at(p1, D.x + 1, D.z);
+
+  eco.addMoney(p1, -eco.moneyOf(p1) + 10);
+  const b2 = eco.bagOf(p1).get(cafe);
+  msg(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 5, side: 'buy' });
+  check('impossible d\'acheter à découvert (10 € pour 5 cafés)', eco.moneyOf(p1) === 10 && eco.bagOf(p1).get(cafe) === b2);
+  check('l\'argent ne devient jamais négatif', eco.addMoney(p1, -1e12) === 0 && eco.moneyOf(p1) === 0);
+
+  eco.addMoney(p1, 100000);
+  for (let i = 0; i < 6; i++) msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: 1, side: 'buy' });
+  const vol = bagVolume(eco.bagOf(p1));
+  check('sac plein : le volume ne dépasse jamais la capacité', vol <= BAG_CAP && vol >= BAG_CAP - 5, `volume ${vol}/${BAG_CAP}`);
+  const money1 = eco.moneyOf(p1);
+  msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: 50, side: 'buy' });
+  check('sac plein : achat refusé sans débit', eco.moneyOf(p1) === money1 && bagVolume(eco.bagOf(p1)) === vol);
+
+  const own = eco.bagOf(p1).get('fromage_clandestin')!;
+  msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: own + 1, side: 'sell' });
+  check('vente de plus que le stock : refusée', eco.moneyOf(p1) === money1 && eco.bagOf(p1).get('fromage_clandestin') === own);
+  msg(p1, { k: 'trade', dealer: D.id, good: 'copies_blanches', qty: 1, side: 'sell' });
+  check('vente d\'une marchandise absente : refusée', eco.moneyOf(p1) === money1);
+  const qs = quote('fromage_clandestin', D.district, eco.market, sim.time);
+  msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: own, side: 'sell' });
+  check('vente valide : crédit au prix serveur', eco.moneyOf(p1) === money1 + qs.sell * own && !eco.bagOf(p1).has('fromage_clandestin'));
+
+  // planque
+  const PL = planques[0];
+  at(p1, 40, 40);
+  const bagBefore = JSON.stringify([...eco.bagOf(p1)]);
+  msg(p1, { k: 'stash', op: 'put', good: cafe, qty: 1 });
+  check('planque trop loin : dépôt refusé', JSON.stringify([...eco.bagOf(p1)]) === bagBefore && eco.stashOf(p1).size === 0);
+  at(p1, PL.x + 1, PL.z);
+  check('près d\'une planque : privateView.stash présent, pas de boutique', view(p1).stash !== undefined && !view(p1).shop);
+  msg(p1, { k: 'stash', op: 'put', good: cafe, qty: 2 });
+  check('dépôt : sac -> planque', eco.stashOf(p1).get(cafe) === 2 && eco.bagOf(p1).get(cafe) === 1 && view(p1).stash![cafe] === 2);
+  msg(p1, { k: 'stash', op: 'put', good: cafe, qty: 5 });
+  msg(p1, { k: 'stash', op: 'take', good: cafe, qty: 3 });
+  msg(p1, { k: 'stash', op: 'put', good: 'copies_blanches', qty: 1 });
+  for (const bad of [0, -1, 0.5, NaN, 1e6]) direct(p1, { k: 'stash', op: 'take', good: cafe, qty: bad });
+  check('planque : excès et quantités invalides refusés', eco.stashOf(p1).get(cafe) === 2 && eco.bagOf(p1).get(cafe) === 1);
+  // sac presque plein puis retrait refusé
+  at(p1, D.x + 1, D.z);
+  for (let i = 0; i < 12; i++) msg(p1, { k: 'trade', dealer: D.id, good: 'balles_dorees', qty: 1, side: 'buy' });
+  at(p1, PL.x + 1, PL.z);
+  const full = bagVolume(eco.bagOf(p1));
+  msg(p1, { k: 'stash', op: 'take', good: cafe, qty: 2 });
+  check('retrait refusé si le sac n\'a pas la place', full + 4 > BAG_CAP ? eco.stashOf(p1).get(cafe) === 2 : true, `sac ${full}/${BAG_CAP}`);
+
+  // sauvegarde / restauration
+  eco.addMoney(p2, 123);
+  const stashBefore = [...eco.stashOf(p1)], bagB = [...eco.bagOf(p1)], mA = eco.moneyOf(p1), mB = eco.moneyOf(p2);
+  const saved = JSON.parse(JSON.stringify(eco.serialize!()));
+  const second = mk();
+  second.eco.restore!(saved);
+  check('restauration : argent, sac et planque de chaque joueur', second.eco.moneyOf(p1) === mA && second.eco.moneyOf(p2) === mB && JSON.stringify([...second.eco.stashOf(p1)]) === JSON.stringify(stashBefore) && JSON.stringify([...second.eco.bagOf(p1)]) === JSON.stringify(bagB));
+  check('restauration : marché identique', JSON.stringify(serializeMarket(second.eco.market)) === JSON.stringify(serializeMarket(eco.market)));
+  check('la sauvegarde est un JSON pur sans Rapier', !/body|world|Rapier/i.test(JSON.stringify(saved)));
+  const evil: unknown[] = [null, 5, 'x', [], {}, { accounts: 'x' },
+    { accounts: [null, 5, ['__proto__', 1e99, [['cafe_machine', 5]], [], 1], ['constructor', 5], ['Eve', -50, [['cafe_machine', 1e9], ['zzz', 3], ['cafe_machine', -1], ['fromage_clandestin', 1.5]], 'x', 'y']], market: { events: [[1]] }, camsDown: ['x', 3, '__proto__'] },
+    JSON.parse('{"accounts":[["__proto__",5,[],[],1],["Zed",null,[["cafe_machine",null]],[["copies_blanches",4]],-3]],"market":"x"}')];
+  let okEvil = true;
+  for (const e of evil) {
+    const t = mk();
+    try {
+      t.eco.restore!(e);
+      for (const p of [p1, p2]) { const m = t.eco.moneyOf(p); okEvil &&= Number.isInteger(m) && m >= 0 && bagVolume(t.eco.bagOf(p)) <= BAG_CAP && bagVolume(t.eco.stashOf(p)) <= STASH_CAP; }
+      okEvil &&= ({} as Record<string, unknown>).polluted === undefined;
+    } catch { okEvil = false; }
+  }
+  check('restore résiste aux données hostiles', okEvil);
+  const np = mk();
+  np.eco.restore!(JSON.parse('{"accounts":[["__proto__",999,[],[],1],["Eve",-50,[["cafe_machine",1e9]],[],1]]}'));
+  const as = (name: string) => ({ ...p1, name }) as SimPlayer;
+  check('restore : « __proto__ » ignoré, argent négatif et quantités folles bornés', np.eco.moneyOf(as('__proto__')) === START_MONEY && np.eco.moneyOf(as('Eve')) === 0 && bagVolume(np.eco.bagOf(as('Eve'))) === 0);
+  {
+    const t = mk();
+    t.eco.market.events.push({ good: 'cafe_machine', district: 'campus', mult: 3, start: sim.time, until: sim.time + 100_000 });
+    const t2 = mk();
+    t2.eco.restore!(JSON.parse(JSON.stringify(t.eco.serialize!())));
+    const e = t2.eco.market.events.find((x) => x.good === 'cafe_machine' && x.district === 'campus');
+    check('événement de marché restauré avec sa durée restante', !!e && Math.abs(e.until - e.start - 100_000) < 1);
+  }
+
+  // /donner (la commande vise le dernier système créé pour ce Sim : on en crée un dédié)
+  const dn = mk();
+  const replies: string[] = [];
+  const say = (p: SimPlayer, line: string) => { replies.length = 0; runCommand(sim, p, line, (t) => replies.push(t)); return replies.join(' | '); };
+  dn.eco.addMoney(p1, -dn.eco.moneyOf(p1) + 100);
+  const bobBefore = dn.eco.moneyOf(p2);
+  const b1 = [dn.eco.moneyOf(p1), dn.eco.moneyOf(p2)];
+  for (const l of ['/donner', '/donner Bob', '/donner Bob -5', '/donner Bob 2.5', '/donner Bob 1e3', '/donner Bob 0', '/donner Bob abc', '/donner Bob 101', '/donner Bob 99999999999', '/donner Alice 5', '/donner Zorglub 5', '/donner Bob 5 6']) say(p1, l);
+  check('/donner invalide (montant, découvert, soi-même, inconnu) : rien ne bouge', dn.eco.moneyOf(p1) === b1[0] && dn.eco.moneyOf(p2) === b1[1]);
+  const r = say(p1, '/donner bo 40');
+  check('/donner valide : transfert exact et receveur prévenu', dn.eco.moneyOf(p1) === 60 && dn.eco.moneyOf(p2) === bobBefore + 40 && /40/.test(r) && out.some((o) => o.to === 'p2' && o.ev.k === 'toast' && /40/.test(o.ev.text)), r);
+
+  eco.addMoney(p1, -eco.moneyOf(p1) + 60);
+  bus.emit('debug', { p: p1, what: 'money', arg: '500' });
+  check('/debug money 500 : +500 €', eco.moneyOf(p1) === 560);
+  bus.emit('debug', { p: p1, what: 'money', arg: 'abc' });
+  bus.emit('debug', { p: p1, what: 'stars', arg: '3' });
+  check('/debug invalide ou autre sujet : ignoré', eco.moneyOf(p1) === 560);
+
+  // arrestation
+  at(p1, D.x + 1, D.z);
+  msg(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 2, side: 'buy' });
+  const mm = eco.moneyOf(p1), hadBag = eco.bagOf(p1).size > 0;
+  bus.emit('playerBusted', { p: p1 });
+  check('arrestation : sac perdu et 25 % de l\'argent', hadBag && eco.bagOf(p1).size === 0 && eco.moneyOf(p1) === mm - Math.floor(mm * 0.25));
+
+  // caméras
+  const fakePeds = { id: 'peds', peds: [] as { kind: string; x: number; z: number; gone?: boolean }[] };
+  systems.set('peds', fakePeds as unknown as GameSystem);
+  crimes.length = 0;
+  const camDownEvents: string[] = [];
+  bus.on('cameraDestroyed', (e) => camDownEvents.push(e.id));
+  const m0 = out.length;
+  for (const c of cams) bus.emit('crime', { kind: 'explosion', by: p2, x: c.x + 3, z: c.z });
+  check('toutes les caméras détruites par explosion : cameraDestroyed + diffusion monde', camDownEvents.length === cams.length && eco.camerasDown() === cams.length && out.slice(m0).some((o) => o.to === '*' && o.ev.k === 'monde' && o.ev.camsDown === cams.length));
+  check('chaque destruction produit un crime camera_detruite', crimes.filter((c) => c === 'camera_detruite').length === cams.length);
+  check('marché : 0 caméra intacte partout', DISTRICT_IDS.every((d) => eco.market.camsUp[d] === 0 && eco.market.camsTotal[d] === 3));
+  bus.emit('crime', { kind: 'explosion', by: p2, x: cams[0].x, z: cams[0].z });
+  check('une caméra déjà détruite ne l\'est pas deux fois', camDownEvents.length === cams.length);
+
+  // deal_vu
+  eco.addMoney(p1, 1000);
+  at(p1, D.x + 1, D.z);
+  crimes.length = 0;
+  const buy1 = () => msg(p1, { k: 'trade', dealer: D.id, good: cafe, qty: 1, side: 'buy' });
+  const seenCount = () => crimes.filter((c) => c === 'deal_vu').length;
+  buy1();
+  check('échange sans témoin : pas de deal_vu', seenCount() === 0);
+  fakePeds.peds.push({ kind: 'flic', x: D.x + 30, z: D.z, gone: false });
+  buy1();
+  check('flic à 30 m : deal_vu', seenCount() === 1);
+  fakePeds.peds[0].x = D.x + 40;
+  buy1();
+  check('flic à 40 m : pas de deal_vu', seenCount() === 1);
+  fakePeds.peds[0] = { kind: 'passant', x: D.x + 5, z: D.z, gone: false };
+  buy1();
+  check('un passant ne compte pas', seenCount() === 1);
+
+  {
+    const t = mk();
+    const c2: string[] = [];
+    t.bus.on('crime', (e) => c2.push(e.kind));
+    const DV = dealers.find((d) => d.id === 'dealer_vieux_bourg_1')!;
+    const cam = cams.map((c) => ({ c, d: Math.hypot(c.x - DV.x, c.z - DV.z) })).sort((a, b) => a.d - b.d)[0];
+    t.eco.addMoney(p1, 1000);
+    at(p1, DV.x + 1, DV.z);
+    t.eco.onMessage!(p1, parseGameMsg({ k: 'trade', dealer: DV.id, good: cafe, qty: 1, side: 'buy' })!);
+    check(`caméra intacte à ${cam.d.toFixed(0)} m : deal_vu`, cam.d < 25 && c2.includes('deal_vu'));
+    const camPos = { x: cam.c.x, z: cam.c.z };
+    at(p1, camPos.x - 12, camPos.z);
+    p1.input = { ...p1.input, ad: [1, 0, 0] };
+    t.bus.emit('crime', { kind: 'tir', by: p1, x: camPos.x - 12, z: camPos.z });
+    check('tir dans l\'axe : la caméra est détruite', t.eco.camerasDown() >= 1);
+    const n0 = t.eco.camerasDown();
+    const other = cams.find((c) => c.id !== cam.c.id && Math.hypot(c.x - camPos.x, c.z - camPos.z) > 60)!;
+    at(p1, other.x - 12, other.z + 20);
+    t.bus.emit('crime', { kind: 'tir', by: p1, x: other.x - 12, z: other.z + 20 });
+    check('tir à 20 m de travers : caméra intacte', t.eco.camerasDown() === n0);
+    p1.input = { ...p1.input, ad: [NaN, 0, NaN] };
+    t.bus.emit('crime', { kind: 'tir', by: p1, x: other.x, z: other.z });
+    check('tir avec direction NaN : ignoré', t.eco.camerasDown() === n0);
+  }
+
+  // caméras détruites -> probabilité de tuyau
+  {
+    const d: DistrictId = 'campus';
+    const intact = newMarketState();
+    setCameras(intact, d, 3, 3);
+    const down = eco.market;
+    check('caméras intactes : proba /2 ; détruites : proba pleine', tipSendProbability(intact, d) === TIP_SEND_PROB / 2 && tipSendProbability(down, d) === TIP_SEND_PROB);
+    const sample = (st: ReturnType<typeof newMarketState>, seed: number) => {
+      const rr = makeRng(seed);
+      let ev = 0, sm = 0;
+      for (let i = 0; i < 20_000; i++) {
+        const s2 = newMarketState();
+        for (const x of DISTRICT_IDS) setCameras(s2, x, st.camsUp[x], st.camsTotal[x]);
+        s2.nextRollAt = 0;
+        const t = rollTip(s2, 0, rr);
+        if (s2.events.length) { ev++; if (t) sm++; }
+      }
+      return sm / ev;
+    };
+    const rHi = sample(intact, 77), rLo = sample(down, 78);
+    check('statistique : caméras détruites -> environ 2 fois plus de SMS', rLo / rHi > 1.8 && rLo / rHi < 2.2, `${rHi.toFixed(3)} -> ${rLo.toFixed(3)}`);
+  }
+
+  // SMS
+  {
+    const t = mk();
+    t.eco.setRng(makeRng(5));
+    const start = out.length;
+    for (let i = 0; i < 600 && !out.slice(start).some((o) => o.ev.k === 'sms'); i++) {
+      t.eco.market.events.length = 0;
+      t.eco.market.nextRollAt = 0;
+      for (let k = 0; k < 10; k++) t.eco.postStep!();
+    }
+    const sms = out.slice(start).filter((o) => o.ev.k === 'sms');
+    const dests = new Set(sms.map((o) => o.to));
+    check('tuyau : SMS envoyé à chaque joueur (id, date, tip)', dests.has('p1') && dests.has('p2') && sms.every((o) => o.ev.k === 'sms' && o.ev.sms.id >= 1 && Number.isFinite(o.ev.sms.at) && !!o.ev.sms.tip));
+    const o = blank();
+    t.eco.privateView!(p1, o);
+    const n = o.unread;
+    const first = sms.find((x) => x.to === 'p1')!.ev as Extract<GameServerEvent, { k: 'sms' }>;
+    t.eco.onMessage!(p1, { k: 'sms_lu', id: first.sms.id });
+    t.eco.privateView!(p1, o);
+    check('unread compte les SMS, sms_lu le décrémente', n >= 1 && o.unread === n - 1);
+    const ev0 = t.eco.market.events.length;
+    advanceMarket(t.eco.market, sim.time + 10 * 60_000, makeRng(1));
+    check('les événements créés expirent', ev0 >= 1 && t.eco.market.events.length === 0);
+  }
+  {
+    const t = mk();
+    for (let i = 0; i < 6000; i++) t.eco.postStep!();
+    let ok = true;
+    for (const e of Object.values(t.eco.market.noise)) ok &&= e >= NOISE_MIN && e <= NOISE_MAX;
+    check('6000 ticks de postStep : marché valide', ok);
+  }
+  at(p1, D.x + 1, D.z);
+  const nearOk = eco.onInteract!(p1) === true;
+  at(p1, 40, 40);
+  check('onInteract : traité près d\'un dealer, ignoré au loin', nearOk && eco.onInteract!(p1) === false);
+}
+
+serverSuite().then(() => {
+  console.log(fails === 0 ? '\neconomie : TOUT VERT' : `\neconomie : ${fails} échec(s)`);
+  process.exit(fails === 0 ? 0 : 1);
+}).catch((e) => { console.error(e); process.exit(1); });

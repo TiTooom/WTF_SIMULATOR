@@ -1,4 +1,119 @@
-// PROPRIÉTAIRE : intégrateur (vague 3)
-// À IMPLÉMENTER : suite « charge » (voir docs/ARCHITECTURE-GTA.md §5). Squelette : passe sans rien vérifier.
-// Lancement : npx tsx tests/charge.ts  (ports 3100-3999, SAVE_DIR temporaire si un serveur est démarré)
-console.log('charge : squelette, rien à vérifier pour l\'instant');
+// PROPRIÉTAIRE : intégrateur
+// Suite « charge » : 4 bots (recherchés), piétons, civils, policiers ; 5 minutes simulées avec téléportations.
+// Même boucle que server/server.ts (preStep, step, postStep, outbox, snapshot delta à 30 Hz avec piétons, message `me` à 10 Hz), sans réseau.
+// Budgets : pas serveur moyen < 4 ms, p99 < 10 ms, snapshot delta < 8 Ko, `me` < 1 Ko, world.bodies.len() stable, Rapier jamais empoisonné.
+// Les étoiles viennent de /debug stars 5 (hôte) et d'explosions provoquées par chaque bot (sim.explode -> crime -> police).
+// Lancement : npx tsx tests/charge.ts  [secondes simulées, 300 par défaut]
+import * as THREE from 'three';
+import { getCity } from '../shared/city/layout';
+import { STEP } from '../shared/constants';
+import { Sim } from '../shared/sim';
+import { installGame } from '../server/game';
+import { runCommand } from '../server/commands';
+
+let fails = 0;
+const check = (ok: boolean, msg: string, detail = '') => { if (!ok) fails++; console.log(`${ok ? 'OK   ' : 'ECHEC'} ${msg}${detail ? '  — ' + detail : ''}`); };
+const city = getCity();
+
+async function main() {
+  const seconds = Number(process.argv[2]) || 300;
+  const sim = await Sim.create();
+  const logs: string[] = [];
+  sim.log = (l) => logs.push(l);
+  const game = installGame(sim, { mode: 'multi' });
+  const ids = ['b1', 'b2', 'b3', 'b4'];
+  ids.forEach((id, i) => { sim.addPlayer(id, `Bot${i + 1}`); game.onJoin(sim.players.get(id)!); });
+  const host = sim.players.get('b1')!;
+  const rng = (() => { let s = 12345; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); })();
+  const teleport = (id: string) => {
+    const n = city.nodes[Math.floor(rng() * city.nodes.length)];
+    const p = sim.players.get(id)!;
+    if (p.vehicle || p.hp <= 0) return;
+    sim.teleportPlayer(p, n.x, 1.3, n.z);
+  };
+  ids.forEach(teleport);
+  for (let i = 0; i < 120; i++) { game.preStep(); sim.step(); game.postStep(); game.drainOutbox(); } // mise en place (population)
+
+  const bodies0 = sim.world.bodies.len();
+  const ticks = Math.round(seconds / STEP);
+  const snapEvery = Math.round(1 / STEP / 30);
+  const dts: number[] = [];
+  let snapMax = 0, snapSum = 0, snapN = 0, meMax = 0, pedMax = 0, civMax = 0, copMax = 0, bodiesMax = bodies0, bodiesMin = bodies0;
+  let starsMax = 0;
+  const bodySeries: number[] = [];
+  let late0: number | undefined, lateMax = 0, lateMin = Infinity, bodiesEnd = bodies0;
+  const t0 = performance.now();
+  const CALM = 5400; // 90 s finales sans explosion : les débris doivent disparaître
+  for (let k = 0; k < ticks + CALM; k++) {
+    const t = k * STEP;
+    if (k % 600 === 0 && k < ticks) teleport(ids[(k / 600) % ids.length | 0]); // téléportation toutes les 10 s
+    if (k % 900 === 0 && k < ticks) { // rappel des étoiles : /debug stars 5 (hôte) + une explosion par bot
+      runCommand(sim, host, '/debug stars 5', () => {});
+      for (const id of ids) {
+        const p = sim.players.get(id)!;
+        if (p.hp <= 0) continue;
+        const q = sim.playerPos(p);
+        sim.explode(new THREE.Vector3(q[0] + 6, 0.5, q[2]), 4, 8, 10, p);
+      }
+    }
+    ids.forEach((id, i) => {
+      const ph = t * 0.7 + i * 1.9;
+      sim.setInput(id, { f: Math.sin(ph) > -0.5 ? 1 : 0, s: Math.sin(ph * 0.5) * 0.6, yaw: (ph * 0.8) % (Math.PI * 2), run: i % 2, m1: Math.sin(t * 2.1 + i) > 0.9 ? 1 : 0 });
+    });
+    const a = performance.now();
+    game.preStep();
+    sim.step();
+    if (!sim.broken) game.postStep();
+    game.drainOutbox();
+    if (k % 6 === 0) for (const id of ids) {
+      const me = game.privateFor(sim.players.get(id)!);
+      starsMax = Math.max(starsMax, me.stars);
+      meMax = Math.max(meMax, Buffer.byteLength(JSON.stringify(me)));
+    }
+    if (k % snapEvery === 0) {
+      const d = sim.snapshotDelta();
+      const peds = game.pedsFlat();
+      if (peds.length) d.peds = peds;
+      const len = Buffer.byteLength(JSON.stringify({ type: 'snap', s: d }));
+      snapMax = Math.max(snapMax, len); snapSum += len; snapN++;
+      pedMax = Math.max(pedMax, peds.length / 6);
+    }
+    dts.push(performance.now() - a);
+    if (sim.broken) break;
+    if (k % 60 === 0) {
+      let civ = 0, cop = 0;
+      for (const v of sim.vehicles) {
+        if (v.pooled || v.dead || !v.ai) continue;
+        if (v.def.type === 'police') cop++; else civ++;
+      }
+      civMax = Math.max(civMax, civ); copMax = Math.max(copMax, cop);
+      const b = sim.world.bodies.len();
+      bodiesMax = Math.max(bodiesMax, b); bodiesMin = Math.min(bodiesMin, b);
+      if (k % 3600 === 0) bodySeries.push(b);
+      bodiesEnd = b;
+      if (k >= ticks) { late0 = late0 ?? b; lateMax = Math.max(lateMax, b); lateMin = Math.min(lateMin, b); }
+    }
+  }
+  const wall = (performance.now() - t0) / 1000;
+  dts.sort((x, y) => x - y);
+  const mean = dts.reduce((s, x) => s + x, 0) / dts.length;
+  const p99 = dts[Math.floor(dts.length * 0.99)];
+  console.log(`# ${seconds} s simulées en ${wall.toFixed(1)} s réelles ; piétons max ${pedMax}, civils max ${civMax}, policiers max ${copMax}, étoiles max ${starsMax}`);
+  console.log(`# pas serveur : moyen ${mean.toFixed(2)} ms, p99 ${p99.toFixed(2)} ms, max ${dts[dts.length - 1].toFixed(2)} ms ; snapshot moyen ${(snapSum / Math.max(1, snapN) / 1024).toFixed(2)} Ko, max ${(snapMax / 1024).toFixed(2)} Ko ; me max ${meMax} o`);
+  check(!sim.broken, 'Rapier jamais empoisonné (sim.broken faux)');
+  check(mean < 4, 'pas serveur moyen < 4 ms', mean.toFixed(2));
+  check(p99 < 10, 'pas serveur p99 < 10 ms', p99.toFixed(2));
+  check(snapMax < 8 * 1024, 'snapshot delta < 8 Ko', `${(snapMax / 1024).toFixed(2)} Ko`);
+  check(meMax < 1024, 'message `me` < 1 Ko', `${meMax} o`);
+  console.log(`# corps Rapier : départ ${bodies0}, par minute ${bodySeries.join(' ')}, max ${bodiesMax}`);
+  check(bodiesEnd <= bodies0 + 4 && bodiesMax <= bodies0 + 150, 'world.bodies.len() : débris plafonnés puis retour au niveau de départ (pas de fuite)', `départ ${bodies0}, max ${bodiesMax}, phase calme ${lateMin}..${lateMax}, fin ${bodiesEnd}`);
+  check(pedMax >= 40, 'population de piétons présente', String(pedMax));
+  check(civMax >= 1, 'civils présents', String(civMax));
+  check(starsMax === 5 && copMax >= 1, 'recherche à 5 étoiles et policiers présents', `étoiles ${starsMax}, policiers ${copMax}`);
+  const bad = logs.filter((l) => /\[game\]|TypeError|RangeError|Erreur/.test(l));
+  check(bad.length === 0, 'aucune erreur dans le journal', bad.slice(0, 2).join(' | '));
+  sim.dispose();
+  console.log(fails ? `${fails} échec(s)` : 'charge : TOUT VERT');
+  process.exit(fails ? 1 : 0);
+}
+main().catch((e) => { console.error(e); process.exit(1); });

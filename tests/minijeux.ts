@@ -12,6 +12,7 @@ import {
 } from '../shared/minigames/rules';
 import type { GameServerEvent, MinigameResult } from '../shared/protocol';
 import { createMinigames, type MinigameDone, type MinigamesSystem } from '../server/systems/minigames';
+import { createTheft, profileOf } from '../server/systems/theft';
 
 let fails = 0;
 const check = (name: string, ok: boolean, detail = '') => {
@@ -218,6 +219,131 @@ async function main() {
   bus.emit('debug', { p: p1, what: 'mg', arg: 'digicode' });
   check('/debug mg <kind> démarre le jeu demandé', starts().length === 1 && starts()[0].kind === 'digicode');
   mg.cancel(p1);
+
+  // ---- 7. nouveaux jeux : bornes et anti-triche ----
+  {
+    const ok = (k: MinigameKind, seed: number, d: number, data: number[], ms: number) => RULES[k].validate(seed, d, { sid: 1, ok: true, ms, data });
+    const ds = dosageSpec(21, 0.5);
+    check('dosage : niveaux sur la ligne acceptés', ok('dosage', 21, 0.5, ds.targets, 2600));
+    check('dosage : débordement refusé', !ok('dosage', 21, 0.5, [1.2, ds.targets[1], ds.targets[2]], 3000));
+    check('dosage : loin de la ligne refusé', !ok('dosage', 21, 0.5, [ds.targets[0] + 0.3, ds.targets[1], ds.targets[2]], 3000));
+    check('dosage : remplissage plus rapide que la pompe refusé', !ok('dosage', 21, 0.5, ds.targets, 1000));
+    check('dosage : mauvais nombre de bouteilles refusé', !ok('dosage', 21, 0.5, ds.targets.slice(0, 2), 2600));
+    const fs = fouilleSpec(8);
+    check('fouille : bon tas + 3 balayages acceptés', ok('fouille', 8, 0, [fs.slot, 3], 1500));
+    check('fouille : mauvais tas refusé', !ok('fouille', 8, 0, [(fs.slot + 1) % 5, 3], 1500));
+    check('fouille : balayages insuffisants refusés', !ok('fouille', 8, 0, [fs.slot, 1], 1500));
+    const bs = briseGlaceSpec(8, 1);
+    check('brise_glace : 5 à 6 coups (difficulté max = 6)', briseGlaceSpec(1, 0).hits === 5 && bs.hits === 6);
+    check('brise_glace : assez de coups acceptés', ok('brise_glace', 8, 1, [bs.hits], 1000));
+    check('brise_glace : trop peu de coups refusé', !ok('brise_glace', 8, 1, [bs.hits - 1], 1000));
+    check('brise_glace : cadence impossible refusée', !ok('brise_glace', 8, 1, [bs.hits], 100) && !ok('brise_glace', 8, 1, [200], 700));
+    const ls = liassesSpec(5);
+    check('liasses : cible exacte acceptée', ok('liasses', 5, 0, [ls.target], 1500));
+    check('liasses : une de trop tolérée', ok('liasses', 5, 0, [ls.target + 1], 1500));
+    check('liasses : deux de trop refusées', !ok('liasses', 5, 0, [ls.target + 2], 1500));
+    check('liasses : trop peu ou non entier refusé', !ok('liasses', 5, 0, [ls.target - 1], 1500) && !ok('liasses', 5, 0, [ls.target + 0.5], 1500));
+    check('desamorcage : réponse avant la fin du flash refusée', !RULES.desamorcage.validate(3, 0, { sid: 1, ok: true, ms: 300, data: [desamorcageSpec(3).wire] }));
+    check('NaN dans data refusés partout', MINIGAME_KINDS.every((k) => !RULES[k].validate(5, 0.5, { sid: 1, ok: true, ms: 3000, data: [NaN, NaN, NaN] })));
+  }
+
+  // ---- 8. vol de voiture ----
+  {
+    const theft = createTheft(ctx);
+    systems.set('theft', theft);
+    const unlocked: number[] = [];
+    systems.set('traffic', { id: 'traffic', unlock: (v: { id: number }) => { unlocked.push(v.id); } } as unknown as GameSystem);
+    sim.hooks.onInteract = (p) => !!(mg.onInteract?.(p) || theft.onInteract?.(p));
+    sim.hooks.canEnter = (p, v) => mg.canEnter?.(p, v);
+    sim.hooks.onEnter = (p, v) => bus.emit('enteredVehicle', { p, v });
+    const crimes: { kind: string; by: string }[] = [];
+    bus.on('crime', (c) => crimes.push({ kind: c.kind, by: c.by.id }));
+    const stepAll = (ms: number) => { for (let i = 0; i < Math.ceil(ms / (1000 / 60)); i++) { sim.step(); mg.postStep?.(); theft.postStep?.(); } };
+    if (sim.isDead(p1)) sim.respawnPlayer(p1);
+    p1.hp = 100;
+    p2.hp = 100;
+    sim.teleportPlayer(p1, 200, 1, 200);
+    sim.teleportPlayer(p2, -200, 1, -200);
+    const car = sim.acquireVehicle('citadine', 203, 200, 0, { locked: true });
+    const car2 = sim.acquireVehicle('berline', -197, -200, 0, { locked: true });
+    check('véhicules verrouillés créés pour le test', !!car && !!car2 && car.locked && car2.locked);
+    if (!car || !car2) { console.log('abandon : pool vide'); process.exit(1); }
+    stepAll(500);
+    reset();
+    check('profil : ancienne = tournevis, moderne = court_circuit', profileOf('citadine').kind === 'tournevis' && profileOf('berline').kind === 'court_circuit' && profileOf('inconnu').kind === 'court_circuit');
+
+    sim.teleportPlayer(p1, 230, 1, 200);
+    sim.interact('p1');
+    check('vol hors de portée refusé', starts().length === 0 && car.locked && p1.vehicle === null);
+    sim.teleportPlayer(p1, 200, 1, 200);
+    stepAll(200);
+
+    sim.interact('p1');
+    const s1 = starts();
+    check('E près d\'un véhicule verrouillé : mini-jeu du type (tournevis)', s1.length === 1 && s1[0].kind === 'tournevis' && mg.activeOf(p1)?.tag === `vol:${car.id}`);
+    check('véhicule resté verrouillé pendant le jeu', car.locked && p1.vehicle === null);
+    sim.interact('p1');
+    check('double vol refusé (même joueur)', starts().length === 1);
+    sim.teleportPlayer(p2, 201, 1, 201);
+    sim.interact('p2');
+    check('double vol refusé (autre joueur, même véhicule)', starts('p2').length === 0 && mg.activeOf(p2) === null);
+    sim.teleportPlayer(p2, -200, 1, -200);
+    const h1 = honest('tournevis', s1[0].seed, s1[0].difficulty);
+    stepAll(h1.ms);
+    send('p1', { sid: s1[0].sid, ok: true, ms: h1.ms, data: h1.data });
+    check('vol réussi : déverrouillé, au volant, traffic.unlock appelé', !car.locked && p1.vehicle === car && car.driver === p1 && unlocked.includes(car.id));
+    check('vol réussi : crime vol_vehicule émis', crimes.some((c) => c.kind === 'vol_vehicule' && c.by === 'p1'));
+    check('vol réussi : session propre', mg.activeOf(p1) === null && theft.stealing!(p1) === null && dones.at(-1)?.ok === true);
+
+    reset();
+    sim.interact('p1');
+    check('E au volant descend, aucun mini-jeu', p1.vehicle === null && starts().length === 0);
+    sim.interact('p1');
+    check('véhicule désormais ouvert : E monte sans mini-jeu', starts().length === 0 && p1.vehicle === car);
+    sim.interact('p1');
+
+    reset();
+    const unlockedBefore = unlocked.length;
+    sim.interact('p2');
+    const s2 = starts('p2');
+    check('berline : court_circuit', s2.length === 1 && s2[0].kind === 'court_circuit');
+    stepAll(1500);
+    send('p2', { sid: s2[0].sid, ok: false, ms: 1500 });
+    check('vol échoué : reste verrouillé, à pied, aucun crime', car2.locked && p2.vehicle === null && !crimes.some((c) => c.by === 'p2') && unlocked.length === unlockedBefore);
+    let honks = 0;
+    const origFx = sim.fx.bind(sim);
+    sim.fx = (ev) => { if (ev.s === 'horn_5') honks++; origFx(ev); };
+    stepAll(1500);
+    sim.fx = origFx;
+    check('vol échoué : alarme (klaxon répété via fx)', honks >= 2, `${honks} klaxons`);
+
+    reset();
+    sim.interact('p2');
+    check('nouvel essai possible après un échec', starts('p2').length === 1);
+    sim.teleportPlayer(p2, -200 + RULES.court_circuit.cancelDist + 6, 1, 400);
+    stepAll(100);
+    check('s\'éloigner annule le vol (véhicule verrouillé)', mg.activeOf(p2) === null && car2.locked && p2.vehicle === null);
+    sim.teleportPlayer(p2, -200, 1, -200);
+    stepAll(100);
+    reset();
+    mg.startMinigame(p2, 'digicode', 'autre', 0.2);
+    sim.interact('p2');
+    check('vol impossible pendant un autre mini-jeu', starts('p2').length === 1 && starts('p2')[0].kind === 'digicode');
+    mg.cancel(p2);
+
+    reset();
+    sim.interact('p2');
+    const s3 = starts('p2')[0];
+    sim.releaseVehicle(car2);
+    const h3 = honest(s3.kind, s3.seed, s3.difficulty);
+    stepAll(h3.ms);
+    send('p2', { sid: s3.sid, ok: true, ms: h3.ms, data: h3.data });
+    check('véhicule rangé pendant le vol : pas d\'entrée, pas de plantage', p2.vehicle === null && !sim.broken);
+    reset();
+    sim.interact('p2');
+    check('véhicule rangé : plus de vol possible', starts('p2').length === 0);
+    check('theft : serialize sans état', JSON.stringify(theft.serialize!()) === '{"v":1}');
+  }
 
   check('aucune erreur de simulation', errors.length === 0 && !sim.broken, errors.slice(0, 2).join(' | '));
   console.log(fails ? `\n${fails} ÉCHEC(S)` : '\nTOUT VERT');

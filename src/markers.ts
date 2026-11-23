@@ -6,6 +6,8 @@
 //   const markers = new MarkersView(scene, camera);          // une fois
 //   markers.update(me.marks, dt, playerPos);                  // à chaque image ; playerPos = [x, y, z] du joueur ou du véhicule (distance affichée)
 //   markers.setVisible(false) pendant la pause ; markers.dispose() au départ.
+// Lisibilité de loin : l'icône et le glyphe (€ dealer, P planque, ★ flic, ! contact) grandissent avec la distance ; faisceau et anneau ne subissent pas le brouillard.
+// Flics : `k: 'danger'` + `label: 'flic'` (convention du système police) ou `k: 'flic'` : le repère alterne rouge/bleu (4 Hz) et sa flèche de bord aussi.
 // Types acceptés : ceux de `Mark['k']` + 'cp' (point de passage), 'flic', 'activite' (si le serveur les ajoute).
 import * as THREE from 'three';
 import type { Mark } from '../shared/protocol';
@@ -17,10 +19,33 @@ export const MARK_COLORS: Record<MarkKind, number> = {
   camera: 0xff8fc8, donneur: 0xff9f1c, hopital: 0xffffff, commissariat: 0x2f80ed, flic: 0x2f80ed, activite: 0x00d0ff, autre: 0xc8c8d8,
 };
 const ARROW_KINDS = new Set<string>(['mission', 'cp', 'cible', 'activite', 'danger', 'flic']);
+/** Repères secondaires : flèche de bord seulement s'ils sont proches (m). */
+const ARROW_NEAR: Partial<Record<string, number>> = { dealer: 90, planque: 90 };
+const GLYPHS: Partial<Record<string, string>> = { dealer: '€', planque: 'P', flic: '★', donneur: '!', mission: '!', cible: '✕', danger: '!' };
+const COP_RED = 0xff2a2a, COP_BLUE = 0x2a6bff;
+const glyphTex = new Map<string, THREE.CanvasTexture>();
+function glyphTexture(ch: string, color: number): THREE.CanvasTexture {
+  const key = ch + color;
+  let t = glyphTex.get(key);
+  if (t) return t;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  g.beginPath(); g.arc(64, 64, 54, 0, Math.PI * 2);
+  g.fillStyle = '#' + color.toString(16).padStart(6, '0'); g.fill();
+  g.lineWidth = 10; g.strokeStyle = '#14141f'; g.stroke();
+  g.font = '900 78px "Segoe UI", Arial, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.lineWidth = 9; g.strokeStyle = '#14141f'; g.strokeText(ch, 64, 70);
+  g.fillStyle = '#fff'; g.fillText(ch, 64, 70);
+  t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  glyphTex.set(key, t);
+  return t;
+}
 const MAX_MARKS = 16;
 const SHOW_DIST = 240;
 
-interface Slot { group: THREE.Group; ring: THREE.Mesh; beam: THREE.Mesh; icon: THREE.Mesh; arrow: HTMLDivElement; tri: HTMLDivElement; txt: HTMLDivElement; kind: string }
+interface Slot { glyph: THREE.Sprite; group: THREE.Group; ring: THREE.Mesh; beam: THREE.Mesh; icon: THREE.Mesh; arrow: HTMLDivElement; tri: HTMLDivElement; txt: HTMLDivElement; kind: string }
 
 const ringGeo = new THREE.RingGeometry(0.82, 1, 40).rotateX(-Math.PI / 2);
 const beamGeo = new THREE.CylinderGeometry(1, 1, 36, 14, 1, true).translate(0, 18, 0);
@@ -51,8 +76,8 @@ export class MarkersView {
     let m = this.mats.get(color);
     if (!m) {
       m = {
-        ring: new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, depthWrite: false }),
-        beam: new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide }),
+        ring: new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, depthWrite: false, fog: false }),
+        beam: new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.26, depthWrite: false, side: THREE.DoubleSide, fog: false }),
       };
       this.mats.set(color, m);
     }
@@ -68,7 +93,10 @@ export class MarkersView {
     beam.renderOrder = 1;
     const icon = new THREE.Mesh(iconGeo, toon(0xffffff));
     icon.add(new THREE.Mesh(hullGeometry(iconGeo, 0.06), outlineMat));
-    group.add(ring, beam, icon);
+    const glyph = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false, fog: false }));
+    glyph.renderOrder = 15;
+    glyph.visible = false;
+    group.add(ring, beam, icon, glyph);
     group.visible = false;
     this.scene.add(group);
     const arrow = document.createElement('div');
@@ -78,7 +106,7 @@ export class MarkersView {
     const txt = document.createElement('div');
     arrow.append(tri, txt);
     this.overlay.appendChild(arrow);
-    return { group, ring, beam, icon, arrow, tri, txt, kind: '' };
+    return { glyph, group, ring, beam, icon, arrow, tri, txt, kind: '' };
   }
 
   update(marks: readonly Mark[], dt: number, focus?: readonly number[]): void {
@@ -91,10 +119,17 @@ export class MarkersView {
       const s = this.slots[i];
       const m = i < n ? marks[i] : null;
       if (!m || !Number.isFinite(m.x) || !Number.isFinite(m.z)) { s.group.visible = false; s.arrow.style.display = 'none'; continue; }
-      const kind = (m.k in MARK_COLORS ? m.k : 'autre') as MarkKind;
-      const color = MARK_COLORS[kind];
-      if (s.kind !== kind) {
-        s.kind = kind;
+      let kind = (m.k in MARK_COLORS ? m.k : 'autre') as MarkKind;
+      if (kind === 'danger' && m.label === 'flic') kind = 'flic';
+      const phase = Math.floor(this.t * 4) & 1;
+      const color = kind === 'flic' ? (phase ? COP_RED : COP_BLUE) : MARK_COLORS[kind];
+      const key = kind === 'flic' ? 'flic' + phase : kind;
+      if (s.kind !== key) {
+        s.kind = key;
+        const gl = GLYPHS[kind];
+        s.glyph.visible = !!gl;
+        if (gl) s.glyph.material.map = glyphTexture(gl, color);
+        s.glyph.material.needsUpdate = true;
         const mm = this.matsFor(color);
         s.ring.material = mm.ring;
         s.beam.material = mm.beam;
@@ -106,15 +141,19 @@ export class MarkersView {
       s.group.visible = near;
       s.group.position.set(m.x, 0, m.z);
       const pulse = 1 + 0.12 * Math.sin(this.t * 4 + i);
-      const big = kind === 'mission' || kind === 'cp' || kind === 'cible' ? 3.6 : 2.4;
+      const big = kind === 'mission' || kind === 'cp' || kind === 'cible' ? 3.6 : kind === 'flic' ? 2.6 : 2.4;
+      const far = Math.max(1, Math.min(4, dist / 55)); // de loin, l'icône reste lisible
       s.ring.scale.set(big * pulse, 1, big * pulse);
       s.beam.scale.set(big * 0.55, 1, big * 0.55);
-      s.icon.position.y = 4.2 + Math.sin(this.t * 2.4 + i) * 0.35;
+      s.icon.scale.setScalar(far);
+      s.icon.position.y = 3.4 * far + Math.sin(this.t * 2.4 + i) * 0.35;
+      s.glyph.position.y = 3.4 * far + 2.4 * far;
+      s.glyph.scale.setScalar(1.7 * far);
       s.icon.rotation.y = this.t * 1.6;
 
       // Flèche au bord de l'écran (repères importants hors champ)
       let showArrow = false;
-      if (cam && ARROW_KINDS.has(kind)) {
+      if (cam && (ARROW_KINDS.has(kind) || dist < (ARROW_NEAR[kind] ?? 0))) {
         this.v.set(m.x, 1.5, m.z).project(cam);
         const behind = this.v.z > 1;
         let dx = this.v.x, dy = this.v.y;
@@ -135,7 +174,7 @@ export class MarkersView {
   }
 
   dispose(): void {
-    for (const s of this.slots) this.scene.remove(s.group);
+    for (const s of this.slots) { this.scene.remove(s.group); s.glyph.material.dispose(); }
     this.slots = [];
     this.overlay.remove();
     for (const m of this.mats.values()) { m.ring.dispose(); m.beam.dispose(); }

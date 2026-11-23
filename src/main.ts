@@ -7,8 +7,8 @@ import { GameAudio, SOUNDS, registerSound } from './audio';
 import { CameraRig } from './camera';
 import { createChat } from './chat';
 import { Fx } from './fx';
-import { createHud } from './hud';
-import { buildAvatar, disposeAvatar } from './models';
+import { copsInSight, createHud } from './hud';
+import { buildAvatar, disposeAvatar, setAvatarState } from './models';
 import { MarkersView } from './markers';
 import { createMinigames } from './minigames';
 import { Net } from './net';
@@ -18,6 +18,8 @@ import { PropsView } from './props';
 import { buildEnvironment } from './scene';
 import { launcher, loadSettings, saveSettings } from './settings';
 import { Pda } from './ui/pda';
+import { installMarcheTab, notePrices, resetMarket } from './ui/pda/marche';
+import { ShopUi } from './ui/shop';
 import { showVignettes } from './ui/comic';
 import { getLayout, keyLabel, openSettings } from './ui/settingsPanel';
 import { viewFor } from './vehicles';
@@ -79,7 +81,7 @@ document.addEventListener('click', (e) => {
 
 // ---------- Entrées ----------
 const keys = new Set<string>();
-const blockedAim = () => chat.isOpen() || settingsOpen || pda.isOpen() || mg.active();
+const blockedAim = () => chat.isOpen() || settingsOpen || pda.isOpen() || shop.isOpen() || mg.active();
 /** Les touches sont lues par code physique (event.code) : le même réglage marche en AZERTY et en QWERTY. */
 const isDown = (a: ActionId) => !!settings.keys[a] && keys.has(settings.keys[a]);
 const axis = (pos: ActionId, neg: ActionId) => (isDown(pos) ? 1 : 0) - (isDown(neg) ? 1 : 0);
@@ -132,10 +134,10 @@ document.addEventListener('pointerlockchange', () => { if (!locked()) m1 = m2 = 
 
 let settingsOpen = false;
 addEventListener('keydown', (e) => {
-  if ((e.target as HTMLElement).tagName === 'INPUT' || settingsOpen || !playing || pda.isOpen() || mg.active()) return;
+  if ((e.target as HTMLElement).tagName === 'INPUT' || settingsOpen || !playing || pda.isOpen() || shop.isOpen() || mg.active()) return;
   keys.add(e.code);
   if (!e.repeat) {
-    if (e.code === settings.keys.interact) net.send({ type: 'interact' });
+    if (e.code === settings.keys.interact && !shop.interact()) net.send({ type: 'interact' });
     if (e.code === settings.keys.chat) {
       e.preventDefault();
       chat.open();
@@ -149,7 +151,7 @@ addEventListener('keyup', (e) => keys.delete(e.code));
 addEventListener('blur', () => { keys.clear(); m1 = m2 = 0; });
 
 const readInput = (): Input => {
-  const blocked = chat.isOpen() || settingsOpen || pda.isOpen() || mg.active();
+  const blocked = chat.isOpen() || settingsOpen || pda.isOpen() || shop.isOpen() || mg.active();
   // En véhicule : commandes relatives au véhicule. À pied : relatives à l'écran (haut = avant), converties pour le serveur
   // (qui attend avant/côté par rapport à la direction `yaw` du personnage) en tenant compte du pivot de la caméra.
   const mv = { f: axis('forward', 'back'), s: axis('right', 'left') };
@@ -178,19 +180,19 @@ let curMe: PlayerSnap | null = null; // moi dans le dernier snapshot échantillo
 let mates: { name: string; x: number; z: number }[] = [];
 let me_: PrivateState | null = null; // dernier état privé (argent, étoiles, repères…)
 let simT = 0; // temps de simulation du dernier snapshot échantillonné (ms) : compte à rebours du PDA
-net.onMe = (s) => { me_ = s; pda.setState(s); };
+net.onMe = (s) => { me_ = s; pda.setState(s); shop.setState(s); notePrices(s, net.simTime); };
 const mg = createMinigames({ send: (r) => net.send({ type: 'game', m: { k: 'mg', r } }) });
 // Échap pendant un mini-jeu ou le PDA : le navigateur libère la souris ; on ne veut pas l'écran de pause pour autant
 let quietUntil = 0;
-addEventListener('keydown', (e) => { if (e.code === 'Escape' && (mg.active() || pda.isOpen())) quietUntil = performance.now() + 600; }, true);
+addEventListener('keydown', (e) => { if (e.code === 'Escape' && (mg.active() || pda.isOpen() || shop.isOpen())) quietUntil = performance.now() + 600; }, true);
 net.onGame = (e) => {
   if (e.k === 'toast') { hud.toast(e.text); chat.add({ from: '', text: e.text, sys: true }); }
   else if (e.k === 'sms') { hud.toast(`SMS · ${e.sms.from} : ${e.sms.text}`, 5000); audio.play('chat'); }
   else if (e.k === 'vignettes') { keys.clear(); m1 = m2 = 0; void showVignettes(e.id); }
   else if (e.k === 'mg_start') { keys.clear(); m1 = m2 = 0; mg.start(e.s); }
   else if (e.k === 'mg_end') mg.end(e.sid);
-  else if (e.k === 'mort') hud.toast('Tu es K.O. !');
-  else if (e.k === 'arrete') hud.toast('Arrêté par la police !');
+  else if (e.k === 'mort') hud.alert('ko');
+  else if (e.k === 'arrete') hud.alert('arrete');
   else if (e.k === 'mission') { if (e.text) hud.toast(e.text); }
 };
 const $ = (id: string) => document.getElementById(id)!;
@@ -214,11 +216,12 @@ const chat = createChat({
     updatePause();
   },
 });
+installMarcheTab();
 const pda = new Pda(document.body, {
   send: (m) => net.send({ type: 'game', m }),
   now: () => simT,
   key: () => settings.keys.pda,
-  canOpen: () => playing && !chat.isOpen() && !settingsOpen && !mg.active(),
+  canOpen: () => playing && !chat.isOpen() && !settingsOpen && !shop.isOpen() && !mg.active(),
   onToggle: (open) => {
     keys.clear();
     m1 = m2 = 0;
@@ -228,6 +231,17 @@ const pda = new Pda(document.body, {
   },
   player: () => (curMe ? { x: curMe.p[0], z: curMe.p[2], yaw: curMe.yaw } : null),
   mates: () => mates,
+});
+const shop = new ShopUi(document.body, {
+  send: (m) => net.send({ type: 'game', m }),
+  onToggle: (open) => {
+    keys.clear();
+    m1 = m2 = 0;
+    if (open) document.exitPointerLock();
+    else { quietUntil = Math.max(quietUntil, performance.now() + 300); grab(); }
+    updatePause();
+  },
+  toast: (t) => { if (t) hud.toast(t); },
 });
 net.onChat = (m) => {
   chat.add(m);
@@ -243,8 +257,8 @@ const updatePause = () => {
   // ?nopause : cache l'écran de pause (captures et tests automatisés en navigateur sans capture de souris)
   const noPause = new URLSearchParams(location.search).has('nopause');
   const quiet = performance.now() < quietUntil;
-  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !pda.isOpen() && !mg.active() && !quiet ? 'flex' : 'none';
-  if (quiet && playing && !locked() && !pda.isOpen() && !mg.active()) { grab(); setTimeout(updatePause, quietUntil - performance.now() + 20); }
+  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !pda.isOpen() && !shop.isOpen() && !mg.active() && !quiet ? 'flex' : 'none';
+  if (quiet && playing && !locked() && !pda.isOpen() && !shop.isOpen() && !mg.active()) { grab(); setTimeout(updatePause, quietUntil - performance.now() + 20); }
 };
 document.addEventListener('pointerlockchange', updatePause);
 pauseEl.addEventListener('click', () => {
@@ -301,6 +315,7 @@ function join() {
   try { localStorage.setItem('name', nameInput.value); } catch { /* ignoré */ }
   status.textContent = 'Connexion…';
   net.onWelcome = () => {
+    resetMarket();
     menu.style.display = 'none';
     playing = true;
     hud.setVisible(true);
@@ -392,9 +407,6 @@ let prevPos: [number, number] | null = null;
 let walkSpeed = 0;
 let prevHp = 100;
 const tmpV = new THREE.Vector3();
-const tmpQ = new THREE.Quaternion();
-const smokeT: number[] = [];
-const driftT: number[] = [];
 const prevDead: boolean[] = [];
 const FALLBACK_ME: PlayerSnap = { id: '', name: '', p: [0, 2, 5], yaw: 0, veh: -1, seat: 0, hp: 100 };
 
@@ -434,24 +446,7 @@ function frame(now: number) {
     g.position.set(...v.p);
     g.quaternion.set(...v.q);
     e.view.update(v, dt);
-    // Fumée de pneus en dérapage (a[1] = 1, envoyé par le serveur)
-    if (v.a[1] > 0.5 && Math.abs(v.sp) > 4) {
-      driftT[i] = (driftT[i] ?? 0) - dt;
-      if (driftT[i] <= 0) {
-        driftT[i] = 0.07;
-        const f = new THREE.Vector3(0, 0, 1).applyQuaternion(tmpQ.set(...v.q)); // arrière du véhicule
-        fx.puff([v.p[0] + f.x * 1.4 + (Math.random() - 0.5) * 0.8, v.p[1] + 0.2, v.p[2] + f.z * 1.4 + (Math.random() - 0.5) * 0.8], 0.8, false);
-      }
-    }
-    // Fumée sous 30 % de vie, flammes sous 15 %
-    if (v.hp < 0.3) {
-      smokeT[i] = (smokeT[i] ?? 0) - dt;
-      if (smokeT[i] <= 0) {
-        smokeT[i] = 0.06 + v.hp * 0.3;
-        fx.puff([v.p[0] + (Math.random() - 0.5), v.p[1] + 1.1, v.p[2] + (Math.random() - 0.5)], 0.9, true);
-        if (v.hp < 0.15) fx.spawn([v.p[0], v.p[1] + 1, v.p[2]], [(Math.random() - 0.5) * 1.5, 2.5, (Math.random() - 0.5) * 1.5], 0.5, 0.35, 0.05, 0xffe27a, 0xff5a1a);
-      }
-    }
+    fx.vehicleFx(v, i, dt);
   });
   while (vehicleViews.length > s.vehicles.length) {
     const e = vehicleViews.pop();
@@ -469,7 +464,8 @@ function frame(now: number) {
       avatars.set(p.id, av);
       scene.add(av);
     }
-    av.visible = p.veh < 0 && p.hp > 0;
+    av.visible = p.veh < 0;
+    setAvatarState(av, p.an, p.id !== net.id);
     av.position.set(...p.p);
     av.rotation.y = p.yaw;
     av.rotation.x = p.an === 2 ? -((now / 90) % (Math.PI * 2)) : 0; // roulade : le personnage fait des tonneaux
@@ -523,7 +519,8 @@ function frame(now: number) {
 ${L('interact')} : monter dans ${d.name ?? v.type}`;
     });
     hudText.textContent = `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : roulade · ${L('sprint')} : courir · ${L('pda')} : PDA`
-      + (multi ? ` · ${L('chat')} : chat` : '') + hint;
+      + (multi ? ` · ${L('chat')} : chat` : '') + hint + (shop.canInteract() ? `
+${L('interact')} : parler au dealer` : '');
   }
   const frozen = mg.active(); // mini-jeu ouvert : caméra et visée figées, entrées nulles
   if (!frozen) rig.update(dt, { pos: focus, veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance } : undefined });
@@ -597,7 +594,7 @@ ${L('interact')} : monter dans ${d.name ?? v.type}`;
   hud.update({
     hp: me.hp, vehHp: veh ? veh.hp : null, vehName: vdef?.name ?? '', inVehicle: !!veh,
     x: focus[0], z: focus[2], yaw: veh ? Math.atan2(2 * (veh.q[3] * veh.q[1] + veh.q[0] * veh.q[2]), 1 - 2 * (veh.q[1] * veh.q[1] + veh.q[2] * veh.q[2])) : me.yaw,
-    mates,
+    mates, cops: copsInSight(focus[0], focus[2], s.peds, s.vehicles),
   }, me_);
 
   playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');

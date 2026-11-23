@@ -33,7 +33,7 @@ export const toonRaw = (params: THREE.MeshToonMaterialParameters) =>
 export const OUTLINE_COLOR = 0x14141f;
 /** Épaisseur du contour : constante (en mètres) jusqu'à OUTLINE_NEAR de la caméra, puis proportionnelle à la distance (écran constant), plafonnée. */
 export const OUTLINE_NEAR = 16;
-export const OUTLINE_MAX_GROWTH = 4;
+export const OUTLINE_MAX_GROWTH = 3.2;
 
 /** Matériau unique partagé : extrude chaque sommet le long de sa normale (longueur de la normale = épaisseur en m). */
 export const outlineMat = new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide });

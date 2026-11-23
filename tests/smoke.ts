@@ -487,10 +487,11 @@ async function main() {
     const g = installGame(sim, { mode: 'solo' });
     const pl = sim.players.get('p1')!;
     const me = g.privateFor(pl);
-    check('PrivateState de base : district, 0 étoile, repères vides', me.stars === 0 && me.marks.length === 0 && DISTRICT_IDS.includes(me.district) && me.money === 0 && me.unread === 0);
+    check('PrivateState de base : district, 0 étoile, repères bornés, argent de départ', me.stars === 0 && Array.isArray(me.marks) && me.marks.length <= 16 && DISTRICT_IDS.includes(me.district) && Number.isFinite(me.money) && me.money >= 0 && me.unread === 0);
+    g.drainOutbox(); // accueil des systèmes (économie : `monde`)
     let threw = false;
     try { for (const m of bad) g.onMessage(pl, m); g.onMessage(pl, ok); } catch { threw = true; }
-    check('game.onMessage : messages invalides sans effet ni exception', !threw && g.drainOutbox().length === 0);
+    check('game.onMessage : messages invalides sans effet ni exception', !threw && g.drainOutbox().every((o) => o.to === pl.id && (o.ev.k === 'toast' || o.ev.k === 'monde')));
     check('game.pedsFlat : multiple de PED_STRIDE (6)', g.pedsFlat().length % PED_STRIDE === 0 && PED_STRIDE === 6);
     // bus : un écouteur qui lève n'empêche pas les autres
     const bus = new GameBus();

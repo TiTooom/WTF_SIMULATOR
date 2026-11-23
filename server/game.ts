@@ -15,10 +15,11 @@ import { createMinigames } from './systems/minigames';
 import { createMissions } from './systems/missions';
 import { createPeds } from './systems/peds';
 import { createPolice } from './systems/police';
+import { createTheft } from './systems/theft';
 import { createTraffic } from './systems/traffic';
 
 /** Systèmes installés, dans l'ordre d'appel (preStep/postStep). Chaque spécialiste remplit sa fabrique dans son fichier. */
-export const SYSTEMS: SystemFactory[] = [createTraffic, createPeds, createPolice, createEconomy, createMinigames, createMissions, createActivities];
+export const SYSTEMS: SystemFactory[] = [createTraffic, createPeds, createPolice, createEconomy, createMinigames, createTheft, createMissions, createActivities];
 
 export interface GameOptions {
   mode: 'solo' | 'multi';
@@ -64,8 +65,8 @@ registerCommand('debug', ({ sim, player, args, reply }) => {
   const bus = busOf.get(sim);
   if (!bus) return reply('Le jeu n\'est pas prêt.');
   bus.emit('debug', { p: player, what, arg: String(args[1] ?? '').slice(0, 32) });
-  const listening = what === 'mg' ? !!ctxOf.get(sim)?.get('minigames') : false; // vague 2 : seul le système des mini-jeux écoute (stars/money : vague 3)
-  reply(listening ? `debug ${what} transmis : le système des mini-jeux écoute (/debug mg <kind>).` : `debug ${what} transmis (aucun système ne l'écoute encore : prévu en vague 3).`);
+  const sys = ctxOf.get(sim)?.get(what === 'stars' ? 'police' : what === 'money' ? 'economy' : 'minigames');
+  reply(sys ? `debug ${what} transmis au système ${sys.id}.` : `debug ${what} transmis (système absent).`);
 }, '/debug stars|money|mg <valeur> : outils de mise au point (chef de la bande)');
 
 export function installGame(sim: Sim, opts: GameOptions): Game {
@@ -104,6 +105,11 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
     }
   };
 
+  // Animations d'avatar publiées dans le snapshot (an : 1 = arrêté, 3 = KO ; la mort est effacée au respawn par le cœur).
+  const anUntil = new Map<string, number>();
+  bus.on('playerBusted', ({ p }) => { sim.setPlayerSnap(p.id, { an: 1 }); anUntil.set(p.id, sim.time + 2500); });
+  bus.on('playerDied', ({ p }) => { sim.setPlayerSnap(p.id, { an: 3 }); anUntil.delete(p.id); });
+
   ctxOf.set(sim, ctx);
   for (const make of SYSTEMS) {
     try {
@@ -123,7 +129,10 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
     return out;
   };
   sim.hooks = {
-    onInteract: (p) => run((s) => s.onInteract?.(p), 'onInteract').some(Boolean),
+    onInteract: (p) => {
+      for (const s of systems) if (guard(s, 'onInteract', () => s.onInteract?.(p))) return true; // premier système qui traite l'action
+      return false;
+    },
     canEnter: (p, v) => {
       const r = run((s) => s.canEnter?.(p, v), 'canEnter');
       return r.includes(false) ? false : r.includes(true) ? true : undefined;
@@ -131,12 +140,16 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
     onEnter: (p, v) => bus.emit('enteredVehicle', { p, v }),
     onVehicleDestroyed: (v, by) => bus.emit('vehicleDestroyed', { v, by }),
     onPlayerKilled: (p, by, cause) => bus.emit('playerDied', { p, by, cause }),
+    onExplosion: (pos, by) => { if (by) bus.emit('crime', { kind: 'explosion', by, x: pos[0], z: pos[2] }); },
     onShot: (p, origin) => bus.emit('crime', { kind: 'tir', by: p, x: origin[0], z: origin[2] }),
   };
 
   const game: Game = {
     preStep() { for (const s of systems) if (s.preStep) guard(s, 'preStep', () => s.preStep!()); },
-    postStep() { for (const s of systems) if (s.postStep) guard(s, 'postStep', () => s.postStep!()); },
+    postStep() {
+      for (const s of systems) if (s.postStep) guard(s, 'postStep', () => s.postStep!());
+      for (const [id, t] of anUntil) if (sim.time >= t) { anUntil.delete(id); sim.setPlayerSnap(id, { an: 0 }); }
+    },
     serialize() {
       const out: Record<string, unknown> = {};
       for (const s of systems) {
@@ -154,7 +167,7 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
       }
     },
     onJoin(p) { for (const s of systems) if (s.onJoin) guard(s, 'onJoin', () => s.onJoin!(p)); },
-    onLeave(p) { for (const s of systems) if (s.onLeave) guard(s, 'onLeave', () => s.onLeave!(p)); },
+    onLeave(p) { anUntil.delete(p.id); for (const s of systems) if (s.onLeave) guard(s, 'onLeave', () => s.onLeave!(p)); },
     onMessage(p, raw) {
       const m = parseGameMsg(raw);
       if (!m) return;

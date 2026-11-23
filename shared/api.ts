@@ -81,6 +81,8 @@ export interface SimHooks {
   onVehicleDestroyed?(v: SimVehicle, by: SimPlayer | null): void;
   onPlayerKilled?(p: SimPlayer, by: SimPlayer | null, cause: string): void;
   /** Un joueur à pied appuie sur le bouton de tir (front montant de m1). */
+  /** Une explosion vient d'avoir lieu en `pos` (`by` = responsable, s'il est connu). */
+  onExplosion?(pos: Vec3, by: SimPlayer | null): void;
   onShot?(p: SimPlayer, origin: Vec3, dir: Vec3): void;
 }
 

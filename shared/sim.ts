@@ -402,6 +402,7 @@ export class Sim implements SimApi {
     power = fin(power, 10);
     damage = fin(damage, 0);
     this.fx({ k: 'boom', p: [pos.x, pos.y, pos.z], a: radius });
+    this.callHook('onExplosion', [pos.x, pos.y, pos.z], by);
     this.fx({ k: 'shake', p: [pos.x, pos.y, pos.z], a: clamp(radius / 8, 0.2, 1.5) });
     const dirTo = (x: number, y: number, z: number) => {
       const d = new THREE.Vector3(x - pos.x, y - pos.y + 0.4, z - pos.z);
@@ -507,6 +508,7 @@ export class Sim implements SimApi {
     p.hp = PLAYER_HP;
     p.scratch = {};
     px.deadAt = 0;
+    if (px.an === 1 || px.an === 3) px.an = 0;
     p.body.setEnabled(true);
     p.body.setTranslation({ x: px.start[0], y: px.start[1], z: px.start[2] }, true);
     p.body.setLinvel({ x: 0, y: 0, z: 0 }, true);

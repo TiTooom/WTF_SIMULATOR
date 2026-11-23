@@ -66,6 +66,7 @@ export function digicodePos(col: { speed: number; phase: number }, tMs: number):
 // ---------- dosage : 3 bouteilles à remplir jusqu'à la ligne ----------
 export const DOSAGE_BOTTLES = 3;
 export const DOSAGE_FILL_RATE = 1.1; // niveau (0..1) par seconde : le client ne peut pas remplir plus vite
+export const DOSAGE_CLIENT_RATE = 1.0; // cadence réelle du client (légèrement sous la limite serveur)
 export function dosageSpec(seed: number, d: number) {
   const r = rng(seed);
   return { targets: Array.from({ length: DOSAGE_BOTTLES }, () => 0.55 + r() * 0.35), tol: 0.1 - 0.04 * clamp01(d) };
@@ -77,8 +78,8 @@ export function fouilleSpec(seed: number) {
   return { slot: Math.floor(rng(seed)() * FOUILLE_SLOTS), swipes: 3 };
 }
 
-// ---------- brise_glace : marteler la vitre ----------
-export const briseGlaceSpec = (_seed: number, d: number) => ({ hits: 5 + Math.floor(clamp01(d) * 3), maxCps: 16 });
+// ---------- brise_glace : marteler la vitre (5 ou 6 coups) ----------
+export const briseGlaceSpec = (_seed: number, d: number) => ({ hits: 5 + Math.floor(clamp01(d) * 1.99), maxCps: 16 });
 
 // ---------- desamorcage : mémoriser le fil flashé, le trancher ----------
 export const WIRE_COLORS = 4;
@@ -110,7 +111,7 @@ export const RULES: Record<MinigameKind, MinigameRule> = {
     }
     return t[DIGI_COLS - 1] <= r.ms + 50;
   }),
-  dosage: mk(2400, 4500, (seed, d, r) => {
+  dosage: mk(1700, 4000, (seed, d, r) => {
     const s = dosageSpec(seed, d);
     const lv = data(r);
     if (!r.ok || lv.length !== DOSAGE_BOTTLES || !lv.every(finite)) return false;

@@ -40,6 +40,21 @@ const beaconMat = {
   blue: new THREE.MeshBasicMaterial({ color: 0x2a6bff }),
 };
 const beaconGeo = new THREE.BoxGeometry(0.5, 0.2, 0.34);
+// Halo additif des gyrophares (sirène visible de loin) : texture et matériaux partagés par toutes les voitures de police
+let haloTex: THREE.CanvasTexture | null = null;
+const haloMats: Record<'red' | 'blue', THREE.SpriteMaterial | null> = { red: null, blue: null };
+function haloMat(k: 'red' | 'blue'): THREE.SpriteMaterial {
+  if (!haloTex) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d')!;
+    const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,255,255,.5)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    haloTex = new THREE.CanvasTexture(c);
+  }
+  return (haloMats[k] ??= new THREE.SpriteMaterial({ map: haloTex, color: k === 'red' ? 0xff2a2a : 0x2a6bff, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, fog: false }));
+}
 
 interface Shared { geo: THREE.BufferGeometry; hull: THREE.BufferGeometry }
 const sharedCache = new Map<string, Shared>();
@@ -115,6 +130,12 @@ export function makeCarView(spec: CarSpec): VehicleViewDef {
         beaconR.position.set(-0.3, y, spec.cab.z);
         beaconB.position.set(0.3, y, spec.cab.z);
         group.add(beaconR, beaconB);
+        for (const [b, k] of [[beaconR, 'red'], [beaconB, 'blue']] as const) {
+          const halo = new THREE.Sprite(haloMat(k));
+          halo.scale.setScalar(3.4);
+          halo.position.y = 0.35;
+          b.add(halo);
+        }
       }
 
       // Peinture : id (seed) + livrée (lv) ; assombrie progressivement sous 30 % de vie

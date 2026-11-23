@@ -3,7 +3,10 @@
 import * as THREE from 'three';
 import { getCity } from '../shared/city/layout';
 import type { Mark, PrivateState, VehicleSnap } from '../shared/protocol';
+import { Fx } from '../src/fx';
 import { createHud } from '../src/hud';
+import { buildAvatar, setAvatarState } from '../src/models';
+import { ProjectilesView } from '../src/projectiles';
 import { MarkersView } from '../src/markers';
 import { PedsView } from '../src/peds';
 import { buildEnvironment } from '../src/scene';
@@ -61,6 +64,13 @@ function pedsFrame(n: number, cx: number, cz: number, t: number): Float32Array {
 }
 
 const hud = createHud();
+const fx = new Fx(scene, { fx() {}, play() {} } as never);
+const projView = new ProjectilesView(scene, fx);
+const avatars: THREE.Group[] = [];
+const FLICS: Mark[] = [
+  { x: -7, z: -2, k: 'danger', label: 'flic' }, { x: 8, z: -4, k: 'danger', label: 'flic' }, { x: -2, z: -6, k: 'dealer', label: 'Dealer' },
+  { x: 11, z: -8, k: 'planque' }, { x: -12, z: -7, k: 'donneur', label: 'Contact' },
+];
 const mk = new MarkersView(scene, camera);
 let pda: Pda | null = null;
 const info = { ready: false, calls: 0, tris: 0, cityDraw: 0, chunks: 0, ms: 0, shot };
@@ -76,13 +86,32 @@ if (shot === 'city_high') {
   addVehicle('police', 3, 7, 3, { a: [0] }, 0);
 } else if (shot === 'peds') {
   camera.position.set(0, 9, 14); camera.lookAt(0, 0.5, 0);
+} else if (shot === 'avatars') {
+  camera.position.set(0, 7, 9); camera.lookAt(0, 0, 0);
+  const names = ['Léa', 'Tom', 'Camille', 'Sam', 'Inès', 'Max'];
+  names.forEach((n, i) => {
+    const a = buildAvatar(n);
+    a.position.set(-5.5 + i * 2.2, 0.85, 0);
+    a.rotation.y = Math.PI;
+    avatars.push(a);
+    scene.add(a);
+  });
+  setAvatarState(avatars[3], 1); setAvatarState(avatars[4], 3, true);
+  avatars[5].rotation.x = 1.1;
+} else if (shot === 'fx') {
+  gameCam(0, -2, 22, 12);
+  addVehicle('citadine', 4, 2, 0.4, { hp: 0.12, a: [0, 1], sp: 8 }, 1);
+  addVehicle('police', -5, 3, -0.3, { a: [1] }, 0);
+} else if (shot === 'hud_edge' || shot === 'markers') {
+  gameCam(0, 0);
+  types.forEach((t, i) => addVehicle(t, -9 + i * 6, 3.5 + (i % 2) * -1, Math.PI / 2, { sp: 0 }, i + 2));
 } else {
   // city / hud / pda_* / comic_*
   gameCam(0, 0);
   types.forEach((t, i) => addVehicle(t, -9 + i * 6, 3.5 + (i % 2) * -1, Math.PI / 2, { sp: 0 }, i + 2));
   addVehicle('police', 12, -2.5, -Math.PI / 2, {}, 0);
 }
-mk.update(shot === 'hud' ? ME.marks : [], 0.016, [0, 0, 0]);
+mk.update(shot === 'hud' ? ME.marks : shot === 'markers' ? FLICS : [], 0.016, [0, 0, 0]);
 if (shot.startsWith('pda')) {
   pda = new Pda(document.body, { send: () => {}, now: () => 100000, player: () => ({ x: -30, z: 50, yaw: 0.8 }), mates: () => [{ name: 'Sam', x: 90, z: -40 }] });
   pushSms({ id: 1, from: 'Contact anonyme', text: 'Descente de police aux Docks demain matin. Les sardines vont devenir rares...', at: 40000, tip: { good: 'sardines_de_quai', district: 'docks', mult: 2.8, until: 190000 } });
@@ -95,16 +124,32 @@ if (shot.startsWith('comic_')) {
   void playComic([{ img, who: img === 'explosion' ? undefined : 'Léa', text: "C'est la dernière fois que je prête ma voiture à quelqu'un du campus, promis !" }]);
 }
 
+if (shot === 'fx') {
+  const ev = (k: string, p: [number, number, number], o: object = {}) => fx.handle({ k, p, ...o });
+  ev('boom', [0, 1, -3], { a: 7 });
+  ev('boom', [-9, 1, -2], { a: 3 });
+  ev('spark', [3, 0.5, 1], { b: 18 });
+  ev('impact', [8, 1, -3], { s: 'POW !' });
+  ev('debris', [5, 1, -6], { b: 10, c: 0x2f80ed });
+  ev('siren', [-5, 2.2, 3], { a: 2 });
+  projView.update(new Float32Array([1, 2, -6, 2, 2, 8, 0, -9, 2, 1, -12, 1, 2, 7, 0, 0, 3, 0, -3, 1, 4, 0, 6, 0, 4, 0, 5, 0.6, 1, 6, 0, 0]), 1 / 30);
+}
 let frames = 0;
 const t0 = performance.now();
 function loop() {
   frames++;
   const t = frames / 60;
+  if (shot === 'avatars' && frames % 1 === 0) { /* marche : déplacement au fil des images */ avatars.forEach((a, i) => { if (i < 3) { a.position.z = ((frames * (i + 1) * 0.04) % 6) - 3; } else a.position.z = 0; }); }
   if (shot === 'peds') peds.update(pedsFrame(30, 0, 0, t), 1 / 30);
   else if (shot !== 'vehicles' && !shot.startsWith('comic')) peds.update(pedsFrame(40, 0, 0, t), 1 / 30);
   if (shot === 'city_high') city.update(0, 0);
-  hud.update({ hp: 80, vehHp: null, vehName: '', inVehicle: false, x: -30 + t, z: 50, yaw: 0.8 }, shot === 'hud' || shot === 'city' ? ME : null);
-  hud.setVisible(shot === 'hud');
+  const edge = shot === 'hud_edge';
+  hud.update({ hp: 80, vehHp: null, vehName: '', inVehicle: false, x: edge ? 326 : -30 + t, z: edge ? -326 : 50, yaw: 0.8, cops: edge ? 2 : undefined },
+    shot === 'hud' || shot === 'city' || edge ? ME : null);
+  hud.setVisible(shot.startsWith('hud'));
+  if (edge && frames === 2) { hud.alert('arrete', 60000); hud.toast('Livraison validée'); hud.toast('Livraison validée'); hud.toast('Arrêté par la police !'); hud.setHint('ZQSD : marcher · Espace : roulade'); }
+  if (shot === 'markers') mk.update(FLICS, 1 / 30, [0, 0, 0]);
+  if (shot === 'fx' && frames < 7) { fx.update(1 / 30, camera); }
   renderer.render(scene, camera);
   if (frames === 12) {
     info.calls = renderer.info.render.calls;

@@ -5,9 +5,16 @@
 //   const hud = createHud();                       // une fois (inchangé)
 //   hud.update({ hp, vehHp, vehName, inVehicle, x, z, yaw, mates? }, me);   // chaque image ; `me` = dernier PrivateState (null avant le premier message `me`)
 //        x, z, yaw : position et cap du joueur (ou du véhicule) pour la mini-carte ; mates : coéquipiers [{ x, z, name }]
-//   hud.toast('texte', 3500);                      // bandeau temporaire (SMS reçu, médaille...) ; hud.flash(force) ; hud.tick(dt) ; hud.setVisible(bool)
+//   hud.toast('texte', 3500);                      // SEUL chemin des bandeaux (SMS, médaille...) : un texte identique déjà affiché est prolongé, jamais dupliqué
+//   hud.alert('arrete' | 'ko', 3200);              // vignette d'alerte (remplace le toast « Arrêté ! » / « K.O. ! » : toast équivalent ignoré pendant l'alerte)
+//   hud.setHint('texte');                          // aide contextuelle (une seule zone, haut gauche). Le texte du <div id="hud"> d'index.html y est recopié
+//                                                  // automatiquement et l'original est masqué : plus de double affichage.
+//   hud.flash(force) ; hud.tick(dt) ; hud.setVisible(bool)
+//   HudState.cops : nombre de flics à vue (copsInSight(...) ci-dessous) ; défini => les étoiles alternent rouge/bleu seulement si cops > 0.
 import { DISTRICTS } from '../shared/city/districts';
-import type { Mark, PrivateState } from '../shared/protocol';
+import { PED_KINDS } from '../shared/ids';
+import { PED_STRIDE, type Mark, type PrivateState } from '../shared/protocol';
+import { playerColor } from './models';
 import { MAP_EXTENT, MARK_STYLE, cityMapCanvas, worldToMap } from './ui/pda/carte';
 
 export interface HudState {
@@ -20,6 +27,26 @@ export interface HudState {
   z?: number;
   yaw?: number;
   mates?: { x: number; z: number; name?: string }[];
+  /** Flics à vue (voir copsInSight). Absent : les étoiles clignotent dès que la recherche est active. */
+  cops?: number;
+}
+
+/** Nombre de flics (piétons 'flic' + véhicules de police) à moins de `radius` m de (x, z) : à passer dans HudState.cops. */
+export function copsInSight(x: number, z: number, peds: ArrayLike<number> | undefined, vehicles: readonly { type: string; p: readonly number[]; dead: number }[], radius = 70): number {
+  const r2 = radius * radius;
+  let n = 0;
+  const copIx = PED_KINDS.indexOf('flic');
+  if (peds) for (let o = 0; o + PED_STRIDE <= peds.length; o += PED_STRIDE) {
+    if (peds[o + 1] !== copIx) continue;
+    const dx = peds[o + 2] - x, dz = peds[o + 3] - z;
+    if (dx * dx + dz * dz < r2) n++;
+  }
+  for (const v of vehicles) {
+    if (v.type !== 'police' || v.dead) continue;
+    const dx = v.p[0] - x, dz = v.p[2] - z;
+    if (dx * dx + dz * dz < r2) n++;
+  }
+  return n;
 }
 
 const MAP_PX = 176; // taille d'affichage de la mini-carte
@@ -51,6 +78,14 @@ const CSS = `
 @keyframes ghpop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
 #gta-hud .gh-banner{position:absolute;left:50%;top:22%;transform:translateX(-50%);padding:6px 26px;border:5px solid #000;border-radius:12px;font-size:30px;color:#fff;text-shadow:3px 3px 0 #000;box-shadow:6px 6px 0 #000;opacity:0;transition:opacity .5s;text-align:center;white-space:nowrap}
 #gta-hud .gh-banner small{display:block;font-size:14px}
+#gta-hud .gh-star.cop{animation:ghcop .45s steps(2,jump-none) infinite}
+@keyframes ghcop{0%{color:#ff3b30}50%{color:#3b82ff}}
+#gta-hud .gh-hint{position:absolute;left:14px;top:12px;max-width:min(520px,45vw);padding:6px 12px;border:3px solid #000;border-radius:10px;background:rgba(255,246,220,.92);color:#1b1b2b;font-size:13px;font-weight:800;white-space:pre-wrap;box-shadow:3px 3px 0 #000;display:none}
+#gta-hud .gh-alert{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;opacity:0;transition:opacity .25s}
+#gta-hud .gh-alert.ko{background:radial-gradient(ellipse at center,rgba(0,0,0,0) 35%,rgba(200,20,30,.75) 100%)}
+#gta-hud .gh-alert.arrete{background:radial-gradient(ellipse at center,rgba(0,0,0,0) 35%,rgba(30,70,220,.75) 100%)}
+#gta-hud .gh-alert b{font-size:68px;color:#fff;-webkit-text-stroke:3px #000;paint-order:stroke fill;text-shadow:6px 6px 0 #000;transform:rotate(-4deg);letter-spacing:.04em}
+#gta-hud .gh-alert small{margin-top:8px;padding:4px 18px;border:4px solid #000;border-radius:8px;background:#ffd23f;color:#1b1b2b;font-size:18px;box-shadow:4px 4px 0 #000}
 @media (max-height:600px){#gta-hud .gh-map{width:130px;height:130px}}
 `;
 
@@ -109,7 +144,11 @@ export function createHud() {
   missionBox.append(missionMain, missionSub);
   top.appendChild(missionBox);
   const banner = document.createElement('div'); banner.className = 'gh-banner';
-  root.append(right, top, banner);
+  const hint = document.createElement('div'); hint.className = 'gh-hint';
+  const alertEl = document.createElement('div'); alertEl.className = 'gh-alert';
+  const alertMain = document.createElement('b'), alertSub = document.createElement('small');
+  alertEl.append(alertMain, alertSub);
+  root.append(right, top, banner, hint, alertEl);
   document.body.appendChild(root);
 
   const g = map.getContext('2d')!;
@@ -119,6 +158,20 @@ export function createHud() {
   let bannerT = 0;
   let visible = true;
   let lastStars = -1;
+  let copsSeen: number | undefined;
+  let alertT = 0;
+  let alertText = '';
+  const setHint = (t: string) => {
+    if (hint.textContent === t) return;
+    hint.textContent = t;
+    hint.style.display = t && visible ? 'block' : 'none';
+  };
+  // Une seule zone d'aide : on recopie le texte du <div id="hud"> (écrit par main.ts) et on masque l'original.
+  const oldHud = $('hud');
+  if (oldHud) {
+    oldHud.style.display = 'none';
+    new MutationObserver(() => setHint(oldHud.textContent ?? '')).observe(oldHud, { childList: true, characterData: true, subtree: true });
+  }
 
   function drawMap(s: HudState, me: PrivateState | null) {
     const now = performance.now();
@@ -155,7 +208,7 @@ export function createHud() {
       const st = MARK_STYLE[m.k] ?? MARK_STYLE.autre;
       dot(m.x, m.z, st.color, 9, m.k === 'mission' || m.k === 'cible');
     }
-    for (const mate of s.mates ?? []) dot(mate.x, mate.z, '#4dabf7', 8, false);
+    for (const mate of s.mates ?? []) dot(mate.x, mate.z, mate.name ? `#${playerColor(mate.name).toString(16).padStart(6, '0')}` : '#4dabf7', 8, false);
     g.save();
     g.translate(W / 2, W / 2);
     g.rotate(-(s.yaw ?? 0));
@@ -182,8 +235,13 @@ export function createHud() {
     const stars = Math.max(0, Math.min(5, Math.round(me.stars)));
     if (stars !== lastStars) {
       lastStars = stars;
-      starNodes.forEach((s, i) => { s.classList.toggle('on', i < stars); s.classList.toggle('blink', stars > 0 && i === stars - 1); });
     }
+    const seen = copsSeen === undefined ? stars > 0 : copsSeen > 0;
+    starNodes.forEach((s, i) => {
+      s.classList.toggle('on', i < stars);
+      s.classList.toggle('cop', seen && i < stars); // crans allumés alternés rouge/bleu tant qu'un flic voit le joueur
+      s.classList.toggle('blink', !seen && stars > 0 && i === stars - 1); // flics hors de vue : dernier cran qui clignote (recherche)
+    });
     progFill.style.width = `${Math.max(0, Math.min(1, me.starProgress)) * 100}%`;
     prog.style.display = stars > 0 || me.starProgress > 0.02 ? '' : 'none';
     const d = DISTRICTS[me.district];
@@ -236,6 +294,7 @@ export function createHud() {
         vehLabel.textContent = s.vehName;
       }
       if (!visible) return;
+      copsSeen = s.cops;
       if (me) applyMe(me);
       const hasPos = Number.isFinite(s.x) && Number.isFinite(s.z);
       mapBox.style.display = hasPos ? '' : 'none';
@@ -243,12 +302,32 @@ export function createHud() {
     },
     /** Bandeau temporaire en haut de l'écran (texte brut). */
     toast(text: string, ms = 3500) {
+      const txt = String(text).slice(0, 160);
+      if (alertT > 0 && alertText && txt.toLowerCase().replace(/[ !.]/g, '').includes(alertText)) return; // déjà dit par la vignette d'alerte
+      for (const c of Array.from(top.children) as HTMLElement[]) {
+        if (c !== missionBox && c.textContent === txt) { // même toast : on prolonge au lieu de dupliquer
+          clearTimeout(Number(c.dataset.t));
+          c.dataset.t = String(setTimeout(() => c.remove(), ms));
+          return;
+        }
+      }
       const t = document.createElement('div');
       t.className = 'gh-box gh-toast';
-      t.textContent = String(text).slice(0, 160);
+      t.textContent = txt;
       top.appendChild(t);
       while (top.children.length > 4) top.children[1]?.remove();
-      setTimeout(() => t.remove(), ms);
+      t.dataset.t = String(setTimeout(() => t.remove(), ms));
+    },
+    setHint,
+    /** Vignette d'alerte plein écran (bleue : arrêté ; rouge : K.O.). */
+    alert(kind: 'arrete' | 'ko', ms = 3200) {
+      alertEl.className = 'gh-alert ' + kind;
+      alertMain.textContent = kind === 'ko' ? 'K.O. !' : 'ARRÊTÉ !';
+      alertSub.textContent = kind === 'ko' ? "Direction l'hôpital..." : 'Les flics te passent les menottes';
+      alertText = kind === 'ko' ? 'ko' : 'arrêté';
+      alertEl.style.display = 'flex';
+      requestAnimationFrame(() => { alertEl.style.opacity = '1'; });
+      alertT = ms / 1000;
     },
     /** Flash rouge de dégâts (1 = mort). */
     flash(strength: number) {
@@ -259,6 +338,10 @@ export function createHud() {
       if (flashT > 0) {
         flashT = Math.max(0, flashT - dt * 1.4);
         if (damage) damage.style.opacity = String(Math.min(0.75, flashT * 0.6));
+      }
+      if (alertT > 0) {
+        alertT -= dt;
+        if (alertT <= 0) { alertEl.style.opacity = '0'; setTimeout(() => { if (alertT <= 0) alertEl.style.display = 'none'; }, 300); }
       }
       if (bannerT > 0) {
         bannerT -= dt;

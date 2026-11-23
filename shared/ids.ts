@@ -38,7 +38,7 @@ export type CrimeKind = (typeof CRIME_KINDS)[number];
 export const MEDAL_TIERS = ['bronze', 'argent', 'or'] as const;
 export type MedalTier = (typeof MEDAL_TIERS)[number];
 
-export const SYSTEM_IDS = ['traffic', 'peds', 'police', 'economy', 'missions', 'minigames', 'activities'] as const;
+export const SYSTEM_IDS = ['traffic', 'peds', 'police', 'economy', 'missions', 'minigames', 'theft', 'activities'] as const;
 export type SystemId = (typeof SYSTEM_IDS)[number];
 
 /** L'index dans cette liste est ce qui circule dans `Snapshot.peds` (champ `kind`). */

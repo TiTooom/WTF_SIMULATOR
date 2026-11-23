@@ -1,7 +1,7 @@
 // Suite « captures » (PROPRIÉTAIRE : art-toon) : rend des scènes du client dans Chrome headless (WebGL logiciel) via CDP, SANS serveur de jeu,
 // enregistre des PNG et vérifie les budgets (appels de dessin de la ville).
 // Lancement : npx tsx tests/captures.ts [dossier de sortie] [shot ...]   (Chrome : variable CHROME ou chemin Windows par défaut)
-// Shots : city city_high vehicles peds hud pda_carte pda_sms comic_<image>. Saute proprement (code 0) si Chrome est introuvable.
+// Shots : city city_high vehicles peds avatars fx hud_edge markers hud pda_carte pda_sms comic_<image>. Saute proprement (code 0) si Chrome est introuvable.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ const PORT = 3600 + Math.floor(Math.random() * 100);
 const DEBUG = PORT + 100;
 const out = process.argv[2] && !process.argv[2].startsWith('shot=') ? process.argv[2] : join(tmpdir(), 'gta-captures');
 const only = process.argv.slice(3);
-const SHOTS = only.length ? only : ['city', 'city_high', 'vehicles', 'peds', 'hud', 'pda_carte', 'pda_sms', 'comic_ruelle', 'comic_explosion'];
+const SHOTS = only.length ? only : ['city', 'city_high', 'vehicles', 'peds', 'hud', 'pda_carte', 'pda_sms', 'comic_ruelle', 'comic_explosion', 'avatars', 'fx', 'hud_edge', 'markers'];
 const CHROME = process.env.CHROME
   ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].find(existsSync);
 
@@ -76,7 +76,7 @@ async function main() {
       writeFileSync(file, Buffer.from(png.data, 'base64'));
       console.log(`     ${shot} -> ${file} (rendu ${info.calls} appels, ${info.tris} triangles, ville ${info.cityDraw} maillages, ${info.chunks} chunks)`);
       check(logs.length === 0, `${shot} : aucune erreur console ${logs.slice(0, 3).join(' | ')}`);
-      if (shot.startsWith('city') || shot === 'hud') {
+      if (shot.startsWith('city') || shot.startsWith('hud')) {
         check(info.cityDraw <= 150, `${shot} : ville ≤ 150 maillages (${info.cityDraw})`);
         check(info.chunks <= 9, `${shot} : ≤ 9 chunks visibles (${info.chunks})`);
       }
