@@ -45,6 +45,10 @@ export interface Game {
   privateFor(player: SimPlayer): PrivateState;
   /** Événements à envoyer depuis le dernier appel (le serveur les route vers les sockets). */
   drainOutbox(): Outgoing[];
+  /** Un système installé (tests et diagnostic seulement : les systèmes ne se parlent que par `ctx.get`). */
+  system<T extends GameSystem = GameSystem>(id: SystemId): T | undefined;
+  /** Événements qui clôturent proprement ce qui était en cours (missions, mini-jeux) quand le monde est reconstruit. Ne lit pas Rapier. */
+  interrupted(): Outgoing[];
   /** Piétons à plat (PED_STRIDE nombres chacun) pour le snapshot ; liste vide si aucun système de piétons. */
   pedsFlat(): number[];
 }
@@ -181,6 +185,21 @@ export function installGame(sim: Sim, opts: GameOptions): Game {
       };
       for (const s of systems) if (s.privateView) guard(s, 'privateView', () => s.privateView!(p, out));
       if (out.marks.length > MAX_MARKS) out.marks.length = MAX_MARKS;
+      return out;
+    },
+    system: <T extends GameSystem = GameSystem>(id: SystemId) => byId.get(id) as T | undefined,
+    interrupted() {
+      const out: Outgoing[] = [];
+      const missions = byId.get('missions') as { inspect?: (p: SimPlayer) => { id: string } | null } | undefined;
+      const mgs = byId.get('minigames') as { activeOf?: (p: SimPlayer) => { sid: number } | null } | undefined;
+      for (const p of sim.players.values()) {
+        try {
+          const mg = mgs?.activeOf?.(p);
+          if (mg) out.push({ to: p.id, ev: { k: 'mg_end', sid: mg.sid, ok: false } });
+          const run = missions?.inspect?.(p);
+          if (run) out.push({ to: p.id, ev: { k: 'mission', ev: 'fail', id: run.id, text: 'Le monde a hoqueté : mission interrompue' } });
+        } catch { /* un système illisible n'empêche pas les autres */ }
+      }
       return out;
     },
     drainOutbox() {

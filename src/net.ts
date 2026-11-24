@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { unpackMe } from '../shared/me';
 import {
   PED_STRIDE, PROJ_STRIDE, PROP_STRIDE,
   type ChatMsg, type ClientMsg, type FxEvent, type GameServerEvent, type Input, type PlayerSnap, type PrivateState, type ServerMsg,
@@ -46,6 +47,22 @@ function indexOf(flat: number[], stride: number): Map<number, number> {
   return m;
 }
 
+/** Secret aléatoire de ce navigateur / cette installation (localStorage) : prouve que « Alice » est bien la même personne d'une partie à l'autre. */
+function clientSecret(): string | undefined {
+  try {
+    const old = localStorage.getItem('wtf-secret');
+    if (old && old.length >= 8) return old;
+  } catch { /* stockage indisponible */ }
+  let s = '';
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') s = crypto.randomUUID();
+    else if (typeof crypto !== 'undefined' && crypto.getRandomValues) s = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+  } catch { /* pas de crypto */ }
+  if (!s) return undefined; // repli sûr : pas de secret plutôt qu'un secret prévisible (le pseudo reste utilisable, sans protection)
+  try { localStorage.setItem('wtf-secret', s); } catch { /* secret valable pour cette session seulement */ }
+  return s;
+}
+
 export class Net {
   id = '';
   mode: 'solo' | 'multi' = 'multi';
@@ -56,6 +73,7 @@ export class Net {
   private propState = new Map<number, number[]>();
   private vehState: VehicleSnap[] = [];
   private names = new Map<string, string>();
+  private haveFull = false; // un snapshot complet a-t-il été reçu (base des deltas) ?
   /** Compteurs pour les tests. */
   snapCount = 0;
   onWelcome: () => void = () => {};
@@ -73,24 +91,28 @@ export class Net {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws = ws;
-    ws.onopen = () => this.send({ type: 'join', name });
+    this.haveFull = false; // nouvelle connexion : les deltas attendent un snapshot complet
+    this.snaps = [];
+    ws.onopen = () => this.send({ type: 'join', name, secret: clientSecret() });
     ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data) as ServerMsg;
+      let msg: ServerMsg;
+      try { msg = JSON.parse(e.data) as ServerMsg; } catch { return; } // message illisible : ignoré
+      if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'welcome') {
         this.id = msg.id;
         this.mode = msg.mode;
         this.onWelcome();
       } else if (msg.type === 'snap') {
+        if (!this.expand(msg.s)) return; // snapshot inexploitable (delta sans état de départ, indices incohérents) : ignoré, le prochain complet (≤ 10 s) rétablit
         this.snapCount++;
-        this.expand(msg.s);
         // Chaque snapshot reçu apporte ses événements une seule fois
         if (msg.s.fx?.length) for (const f of msg.s.fx) this.fxQueue.push(f);
         if (this.fxQueue.length > 200) this.fxQueue.splice(0, this.fxQueue.length - 200);
         this.snaps.push({ s: msg.s, at: performance.now() });
         if (this.snaps.length > 30) this.snaps.shift();
       } else if (msg.type === 'me') {
-        this.me = msg.s;
-        this.onMe(msg.s);
+        const me = unpackMe(msg.s); // revalidé : un `me` bricolé est ignoré
+        if (me) { this.me = me; this.onMe(me); }
       } else if (msg.type === 'game') {
         this.onGame(msg.e);
       } else if (msg.type === 'chat') {
@@ -104,7 +126,12 @@ export class Net {
   }
 
   /** Transforme un snapshot différentiel en snapshot complet (props, véhicules, noms) ; un snapshot complet remet l'état à zéro. */
-  private expand(s: Snapshot) {
+  private expand(s: Snapshot): boolean {
+    if (!s || typeof s !== 'object' || !Array.isArray(s.players) || !Array.isArray(s.vehicles) || !Array.isArray(s.props) || typeof s.t !== 'number' || !s.players.every((p) => p && typeof p === 'object' && typeof p.id === 'string' && Array.isArray(p.p)) || !s.vehicles.every((v) => !v || typeof v === 'object')) return false;
+    if (!Array.isArray(s.proj)) s.proj = [];
+    if (s.d && !this.haveFull) return false; // delta reçu avant tout snapshot complet (arrivée en cours de route, ordre inattendu)
+    if (!Array.isArray(s.fx)) s.fx = [];
+    if (!Array.isArray(s.peds)) s.peds = []; // toujours la liste complète (jamais en delta)
     s.fx ??= [];
     s.peds ??= []; // toujours la liste complète (jamais en delta)
     for (const p of s.players) {
@@ -113,21 +140,24 @@ export class Net {
     }
     if (this.names.size > 64) for (const id of this.names.keys()) if (!s.players.some((p) => p.id === id)) this.names.delete(id);
     const full = !s.d;
-    if (full) { this.propState.clear(); this.vehState = []; }
+    if (full) { this.propState.clear(); this.vehState = []; this.haveFull = true; }
     for (const id of s.rm ?? []) this.propState.delete(id);
     const pr = s.props;
     for (let o = 0; o + PROP_STRIDE <= pr.length; o += PROP_STRIDE) this.propState.set(pr[o], pr.slice(o, o + PROP_STRIDE));
     if (s.d) {
       // Valeurs par défaut omises par le serveur (budget réseau) : on les rétablit
       for (const v of s.vehicles) { v.drv ??= ''; v.a ??= []; v.hp ??= 1; v.dead ??= 0; v.st ??= 0; if ((v.q as number[]).length === 2) (v as { q: number[] }).q = [0, v.q[0], 0, v.q[1]]; }
-      const idx = s.vi ?? [];
-      idx.forEach((vi, j) => { this.vehState[vi] = s.vehicles[j]; });
-      this.vehState.length = s.vn ?? this.vehState.length;
+      const idx = Array.isArray(s.vi) ? s.vi : [];
+      const vn = typeof s.vn === 'number' && s.vn >= 0 && s.vn <= 512 ? Math.floor(s.vn) : this.vehState.length;
+      idx.forEach((vi, j) => { if (Number.isInteger(vi) && vi >= 0 && vi < vn && s.vehicles[j]) this.vehState[vi] = s.vehicles[j]; });
+      this.vehState.length = vn;
+      for (let i = 0; i < vn; i++) if (!this.vehState[i]) return false; // trou : on attend le prochain snapshot complet
       s.vehicles = this.vehState.slice();
       const flat: number[] = [];
       for (const a of this.propState.values()) for (let j = 0; j < PROP_STRIDE; j++) flat.push(a[j]);
       s.props = flat;
     } else this.vehState = s.vehicles.slice();
+    return true;
   }
 
   send(msg: ClientMsg) {

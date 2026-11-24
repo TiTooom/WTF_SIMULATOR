@@ -1,6 +1,6 @@
 # Grand Theft Auto : Edition UniLaSalle
 
-Monde ouvert 3D en vue à la première personne, style cartoon léger. Tu conduis des véhicules (voiture, pelleteuse avec godet, d'autres à venir) et tu joues **entre amis, sur le même Wi-Fi**, avec 12 véhicules (qui explosent), 33 objets WTF, un pistolet à gravité façon Garry's Mod, un chat, du son et des touches que tu règles comme tu veux.
+Jeu de ville en **vue de dessus inclinée**, style bande dessinée, inspiré de *GTA: Chinatown Wars*. Tu conduis, tu fais du commerce de marchandises complètement absurdes entre cinq quartiers, tu évites la police, tu enchaînes des missions de 3 à 7 minutes et tu joues **entre amis, sur le même Wi-Fi**. Pas de mobile : ordinateur uniquement (application ou navigateur).
 
 C'est une vraie application : tu la lances, un menu s'ouvre, tu choisis.
 
@@ -36,10 +36,10 @@ Menu principal → **Options**, ou **Échap → Options** en jeu. Les réglages 
 - **Sensibilité de la souris**.
 - **Volumes** : général et effets.
 
-La **molette** règle le zoom de la caméra en véhicule.
+La **molette** règle le zoom de la caméra.
 
 ### Son
-Moteurs dont la hauteur suit la vitesse (et qu'on entend de loin chez les autres joueurs), vérins de la pelleteuse, pas, vent, sons d'interface et de chat. Tout est généré en direct : aucun fichier audio, donc un jeu léger.
+Moteurs dont la hauteur suit la vitesse (et qu'on entend de loin chez les autres joueurs), sirènes, pas, explosions, sons d'interface, de chat et de mini-jeux. Tout est généré en direct : aucun fichier audio, donc un jeu léger.
 
 ### Mises à jour (Windows)
 Tu n'as à télécharger le `.exe` **qu'une seule fois**. À chaque lancement (puis toutes les 30 min), le jeu cherche une nouvelle version sur GitHub. S'il en trouve une, un bandeau vert apparaît dans le menu, le téléchargement se fait seul en arrière-plan, puis un bouton **« Redémarrer et mettre à jour »** installe la nouvelle version et relance le jeu. Si tu ne cliques pas, elle s'installe toute seule à la fermeture du jeu. Tes sauvegardes et réglages sont conservés.
@@ -54,74 +54,41 @@ La partie est stockée **chez l'hôte**, dans `%APPDATA%\GTA Edition UniLaSalle\
 > L'hôte doit garder le jeu ouvert : c'est lui le serveur. S'il quitte, les autres reviennent au menu.
 
 ### Sans installer : depuis un navigateur
-Un ami peut aussi rejoindre sans l'application, en ouvrant dans son navigateur l'adresse de l'hôte (par exemple `http://192.168.0.101:3000`, affichée dans l'écran de pause de l'hôte). Ses réglages sont alors enregistrés dans ce navigateur.
+Un ami peut aussi rejoindre sans l'application, **sur ordinateur**, en ouvrant dans son navigateur l'adresse de l'hôte (saisis l'adresse IP, pas un nom) (par exemple `http://192.168.0.101:3000`, affichée dans l'écran de pause de l'hôte). Ses réglages sont alors enregistrés dans ce navigateur.
 
-## Les véhicules (12)
+## La ville
+Une ville de 640 m avec **5 quartiers**, chacun contrôlé par un gang (clins d'œil à la vie étudiante, personne de réel) : **Le Campus** (Les Agros), **Les Docks** (La Bande des Mouettes), **Le Vieux-Bourg** (La Confrérie du Fromage), **La Zone Industrielle** (Les Clés de 12), **Les Hauts** (Le Club des Golfeurs). Piétons, circulation, voitures garées à voler, police.
 
-| | Véhicule | Particularité |
-|---|---|---|
-| 🚗 | Voiture (×2) | Pour apprendre. Fragile aux explosions. |
-| 🚜 | Pelleteuse | Bras articulé, godet qui soulève et déplace les caisses. |
-| 🛡️ | **Tank** | Quasi insensible aux roquettes. La tourelle suit la caméra. Clic gauche : obus (qui fait « pschitt »). Clic droit maintenu : mitrailleuse. |
-| 🚚 | **Camion articulé** | Remorque articulée (tête-à-queue possible !). Clic gauche : larguer/rattacher la remorque. Clic droit : benne qui déverse des caisses. |
-| 🛒 | **Caddie turbo** | Léger et nerveux, dérapage, turbo, « bip » à chaque choc. 2 places. |
-| 🍦 | **Camion de glaces** | Musique, lance-cornets qui ralentissent, mode disco qui fait sauter les petits véhicules. |
-| 🚽 | **Toilettes à roulettes** | Ventouse qui attire les objets, chasse d'eau qui propulse… en arrière. |
-| ✈️ | **Avion de chasse** | Piste d'atterrissage, train rentrant, mitrailleuse, missiles. **Explose si tu t'écrases trop vite.** |
-| 🚁 | **Hélicoptère** | Vol stationnaire assisté, treuil qui accroche caisses et véhicules, souffle du rotor. 3 places. |
-| 🛸 | **OVNI** | Rebondit comme une balle, rayon tracteur, éjection radiale. |
-| 🛋️ | **Canapé-fusée** | Propulsé, saut à ressort, lance des coussins, turbo. 2 places. |
-| 🎈 | **Dirigeable à pédales** | Il va aussi vite que tu martèles la touche. Touché, il se dégonfle et plane. |
-
-Les véhicules **peuvent exploser** (chocs trop violents, roquettes, crash) puis réapparaissent après ~12 s. Chaque type a ses points de vie et son blindage.
-
-## Inventaire et objets (33)
-
-**Tab** ouvre l'inventaire : clique un objet pour le mettre dans l'emplacement actif de la barre (chiffres **1 à 9** ou molette pour choisir). **Clic gauche** utilise l'objet, **clic droit** pour son action secondaire.
-
-- **Outils** : 🧲 *Pistolet à gravité* (saisis et déplace presque tout, même un copain ; molette = distance ; clic droit = geler), 🧽 *Gomme*, 🔥 *Soudure* (relie deux objets).
-- **Construction** : planche, bloc, rampe, mur, pilier, ballon flottant (soulève une caisse ou une voiture), trampoline, barrique explosive, roue géante, propulseur.
-- **Armes** : lance-roquettes, grenade, mitraillette, mine collante, fusil à ventouses, lance-tomates.
-- **WTF** : canon à confettis, bombe à poulets, canne à pêche à vaches, chaussures à ressorts, super-aimant, trompette-tornade, champignon rétrécisseur, pastèque-bombe, ventilateur portatif.
-- **Mobilité** : jetpack, grappin, parachute, bottes de gravité réduite, téléporteur.
-
-Les props que tu poses restent dans le monde (sauvegardés), avec une limite par joueur.
-
-## Un monde à explorer
-Piste d'atterrissage et héliport, piste de cascade avec rampes et cerceaux, ville miniature à démolir, arène, parking de supermarché, château de caisses, pont… et quelques **easter eggs** cachés (vache sur le toit, bouton « NE PAS APPUYER », piano-caisse, pilier de 300 m…). Des panneaux près du départ indiquent les directions ; `/lieu <nom>` te téléporte.
-
-## Chat, commandes, événements et modes
-**Entrée** ouvre le chat. Les commandes commencent par `/` : `/help` liste tout.
-
-| Commande | Effet |
-|---|---|
-| `/spawn <véhicule>`, `/drive <véhicule>` | crée un véhicule devant toi / monte dedans (3 par joueur) |
-| `/tp <véhicule ou pseudo>`, `/lieu <nom>` | te téléporte |
-| `/clear` | supprime tes objets posés |
-| `/party`, `/klaxon`, `/miaou` | ambiance |
-| `/gravite <n>`, `/taille <n>`, `/meteo <événement>`, `/mode <mode>`, `/annonce <texte>`, `/reset oui` | **réservé à l'hôte** (le premier joueur de la partie) |
-
-- **Événements chaos** (`/meteo`, ou au hasard toutes les 4 à 8 min à plusieurs) : pluie de caisses, gravité lunaire, klaxons hurlants, sol glissant, gnome géant, tremblement de terre, aimant géant, party générale, touches inversées, vent violent.
-- **Modes** : *roi de la colline* et *démolition derby* (`/mode`), classement dans le chat.
+## Ce qu'on y fait
+- **Conduire** : 4 véhicules (citadine, berline, camionnette, voiture de police) avec une conduite arcade : forte adhérence, frein à main pour déraper. La caméra anticipe, pivote dans les virages et suit tes commandes.
+- **Voler une voiture garée** : un mini-jeu de moins de 4 secondes (tournevis dans le contact, court-circuit…).
+- **Le commerce de rue** : achète des marchandises **fictives** (café de la machine, annales secrètes, croissants pirates, sardines de quai…) chez les dealers et revends-les là où elles sont demandées. Les prix varient selon le quartier, le gang et les **tuyaux reçus par SMS** sur ton **PDA**. Gare aux caméras et à la police : un échange vu fait monter la recherche.
+- **La police** : des étoiles de recherche (0 à 5). Pour les faire baisser, **détruis les voitures de police**, fuir ne suffit pas. Arrêté, tu perds ton sac et une partie de ton argent. Taper dans le vide ne dérange personne.
+- **5 missions** (une par quartier) avec checkpoints, retour immédiat au dernier checkpoint en cas d'échec et **médailles bronze, argent, or**. En multi, la mission est partagée avec les joueurs à moins de 30 m.
+- **Activités annexes** : taxi (dans une berline jaune garée) et justicier (dans une voiture de police), avec la touche d'activité.
+- **8 mini-jeux** : tournevis, court-circuit, digicode, dosage, fouille, brise-glace, désamorçage, liasses. Souris et clavier.
+- **Argent individuel** : chacun son argent et son sac, et `/donner <pseudo> <montant>` pour s'entraider.
 
 ## Commandes par défaut (modifiables dans Options)
 
 | Action | Touches |
 |---|---|
-| Marcher / sauter | Z Q S D / Espace |
-| Regarder | Souris |
-| Utiliser l'objet / action secondaire | Clic gauche / clic droit |
-| Choisir un objet, inventaire | 1-9 ou molette, Tab |
-| Monter / descendre d'un véhicule | E (à proximité) |
+| Se déplacer | Z Q S D (selon ton clavier) : haut, gauche, bas, droite de l'écran |
+| Viser | Souris (le curseur est un viseur ; Échap pour le libérer) |
+| Courir / roulade (à pied) | Maj gauche / Espace |
+| Monter / descendre, parler au dealer | E |
+| Conduire | Z/S accélérer et freiner, Q/D tourner, Espace frein à main, H klaxon ou sirène |
+| Activité (taxi, justicier) | Q (position physique, voir Options) |
+| PDA (carte, SMS, marché, missions, stats) | Tab |
 | Chat | Entrée |
-| **Zoom caméra en véhicule** | **Molette** |
-| Véhicules au sol | Z/S accélérer, Q/D tourner, Espace frein à main, H klaxon, clics = armes |
-| Aéronefs | Z/S piquer-cabrer, Q/D roulis, Maj/Ctrl gaz ou altitude, lacet sur les touches Z/C physiques, H action spéciale (train…) |
-| Pelleteuse | Z/S avancer, Q/D tourner · ←/→ pivoter la cabine · ↑/↓ flèche · R/F bras · T/G godet |
+| Zoom de la caméra | Molette |
 | Pause / options / menu principal | Échap |
 | Plein écran | F11 (Windows) · Ctrl+Cmd+F (macOS) |
 
 Les touches sont lues par position physique : les réglages marchent en AZERTY comme en QWERTY.
+
+## Chat et commandes
+**Entrée** ouvre le chat. Les commandes commencent par `/` : `/help` liste tout. `/drive <véhicule>` monte dans la voiture libre la plus proche, `/tp <pseudo>` te téléporte, `/donner <pseudo> <montant>` envoie de l'argent, `/nom` change de pseudo. `/debug` est réservé à l'hôte (outils de test).
 
 ## Développement
 

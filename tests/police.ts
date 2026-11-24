@@ -122,18 +122,45 @@ async function main() {
     }
   }
 
-  // ---- Un tir sans témoin ne compte pas, avec témoin oui ----
+  // ---- Un tir ne compte que s'il touche quelque chose ----
   {
     bus.emit('debug', { p: a, what: 'stars', arg: '0' });
-    const pa: [number, number, number] = [-5000, 1, -5000]; // loin de tout piéton et de toute voiture
-    bus.emit('crime', { kind: 'tir', by: a, x: pa[0], z: pa[2] });
-    ok(police.heatOf('a') === 0, 'tir sans témoin : aucune chaleur');
-    const w = makePed(900002, 'passant', 1, city, 55);
-    w.x = pa[0] + 5; w.z = pa[2]; w.st = PED_ST.IDLE; w.timer = 1e9;
-    (peds.peds as ReturnType<typeof makePed>[]).push(w);
-    tickAll(1); // reconstruit la grille des piétons
-    bus.emit('crime', { kind: 'tir', by: a, x: pa[0], z: pa[2] });
-    ok(police.heatOf('a') === CRIME_HEAT.tir, 'tir devant un piéton : chaleur ajoutée');
+    const pa: [number, number, number] = [-5000, 1, -5000]; // loin de tout
+    const shoot = () => bus.emit('crime', { kind: 'tir', by: a, x: pa[0], z: pa[2] });
+    const aim = (x: number, z: number) => { a.input = { ...a.input, ad: [x, 0, z] }; };
+    const mk = (id: number, kind: 'passant' | 'flic', dx: number) => {
+      const w = makePed(id, kind, 1, city, 55);
+      w.x = pa[0] + dx; w.z = pa[2]; w.st = PED_ST.IDLE; w.timer = 1e9;
+      (peds.peds as ReturnType<typeof makePed>[]).push(w);
+    };
+    // 50 clics dans le vide en pleine ville : témoins partout autour, mais hors du rayon de visée
+    mk(900010, 'passant', 6); mk(900011, 'passant', -6); mk(900012, 'flic', -10);
+    aim(0, 1);
+    for (let i = 0; i < 50; i++) { shoot(); sim.time += 4000; }
+    ok(police.heatOf('a') === 0 && police.starsOf('a') === 0, '50 clics dans le vide en pleine ville : 0 chaleur, 0 étoile');
+    // piéton touché (à 2 m dans la ligne de visée)
+    mk(900002, 'passant', 2);
+    aim(1, 0);
+    shoot();
+    ok(police.heatOf('a') === CRIME_HEAT.tir, 'piéton touché : chaleur ajoutée');
+    for (let i = 0; i < 20; i++) shoot();
+    ok(police.heatOf('a') === CRIME_HEAT.tir, 'rafale sur la même victime : plafonnée (une fois par 3 s)');
+    // flic touché : plus de chaleur
+    bus.emit('debug', { p: a, what: 'stars', arg: '0' });
+    sim.time += 4000;
+    mk(900013, 'flic', -2);
+    aim(-1, 0);
+    shoot();
+    ok(police.heatOf('a') === CRIME_HEAT.agression_flic && CRIME_HEAT.agression_flic > CRIME_HEAT.tir, 'flic touché : davantage de chaleur qu\'un piéton');
+    // impact fourni par game.ts : prioritaire ; valeur invalide ou « rien » : aucune chaleur
+    bus.emit('debug', { p: a, what: 'stars', arg: '0' });
+    sim.time += 4000;
+    aim(0, 1);
+    for (const impact of ['rien', 'decor', 42]) bus.emit('crime', { kind: 'tir', by: a, x: pa[0], z: pa[2], impact } as never);
+    ok(police.heatOf('a') === 0, 'impact rien/decor/invalide : aucune chaleur');
+    bus.emit('crime', { kind: 'tir', by: a, x: pa[0], z: pa[2], impact: 'pieton' } as never);
+    ok(police.heatOf('a') === CRIME_HEAT.tir, 'impact pieton fourni : chaleur');
+    bus.emit('debug', { p: a, what: 'stars', arg: '0' });
     // doublon de crime signalé par deux systèmes : compté une fois
     bus.emit('debug', { p: a, what: 'stars', arg: '0' });
     bus.emit('crime', { kind: 'camera_detruite', by: a, x: 0, z: 0 });

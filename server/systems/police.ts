@@ -29,7 +29,12 @@ const SPAWN_MIN = 75, SPAWN_MAX = 130; // m : toujours hors du champ de vue
 const FAR_RELEASE = 230; // m : une voiture trop loin de tous les joueurs est recyclée
 const MARK_R = 130;
 const MAX_SAVED = 64;
-const DEBOUNCE_MS: Partial<Record<CrimeKind, number>> = { vol_vehicule: 1500, deal_vu: 1500, camera_detruite: 1500, explosion: 1500, agression_flic: 3000 };
+const DEBOUNCE_MS: Partial<Record<CrimeKind, number>> = { vol_vehicule: 1500, deal_vu: 1500, camera_detruite: 1500, explosion: 1500, agression_flic: 3000, tir: 3000 };
+/** Portée d'un coup ou d'un tir à mains nues (m) : aucune arme à distance n'existe encore ; un clic plus loin ne touche rien. */
+export const SHOT_REACH = 3;
+/** Distance (m) à laquelle un flic ou une voiture de police placé dans la direction de visée voit une menace. */
+export const THREAT_R = 6;
+export type ShotImpact = 'rien' | 'pieton' | 'flic' | 'vehicule' | 'decor';
 
 export interface PoliceSystem extends GameSystem {
   /** Étoiles (0..5) d'un joueur (0 si inconnu). */
@@ -42,7 +47,7 @@ export interface PoliceSystem extends GameSystem {
   setStars(playerId: string, stars: number): void;
 }
 
-interface PState { w: WantedState; bust: number; ws: number; last: Map<CrimeKind, number>; seenBy: boolean }
+interface PState { w: WantedState; bust: number; ws: number; last: Map<CrimeKind, number>; seenBy: boolean; lastVictim: number }
 interface Car { ref: VRef; mem: DriveMem; lastHp: number; siren: boolean; x: number; z: number; speed: number }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -65,9 +70,10 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
   const ensure = (p: SimPlayer): PState => {
     let s = states.get(p.id);
     if (!s) {
-      s = { w: newWanted(), bust: 0, ws: -1, last: new Map(), seenBy: false };
-      const sv = saved.get(p.id);
-      if (sv) { s.w = { heat: sv.heat, kills: sv.kills, calm: 0 }; saved.delete(p.id); }
+      s = { w: newWanted(), bust: 0, ws: -1, last: new Map(), seenBy: false, lastVictim: -1 };
+      const key = saved.has(p.name) ? p.name : p.id; // sauvegarde par pseudo (les identifiants p1, p2… changent à chaque démarrage)
+      const sv = saved.get(key);
+      if (sv) { s.w = { heat: sv.heat, kills: sv.kills, calm: 0 }; saved.delete(key); }
       states.set(p.id, s);
     }
     return s;
@@ -93,22 +99,72 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
   };
 
   // ---------- Crimes ----------
-  const commit = (p: SimPlayer, kind: CrimeKind) => {
+  // `victim` : id d'un piéton touché ; une victime différente de la précédente contourne l'anti-rafale d'un tir.
+  const commit = (p: SimPlayer, kind: CrimeKind, victim = -1) => {
     if (!alive(p)) return;
     const s = ensure(p);
     const gap = DEBOUNCE_MS[kind];
-    if (gap) { // plusieurs systèmes peuvent signaler le même crime : un seul compte
+    if (gap) { // doublons entre systèmes : un seul compte ; un tir : au plus une fois par rafale de 3 s
       const t = s.last.get(kind) ?? -1e9;
-      if (sim.time - t < gap) return;
+      const fresh = kind === 'tir' && victim >= 0 && victim !== s.lastVictim;
+      if (sim.time - t < gap && !fresh) return;
       s.last.set(kind, sim.time);
+      if (kind === 'tir') s.lastVictim = victim;
     }
     s.w = addCrime(s.w, kind);
     publish(p, s);
   };
 
+  /**
+   * Que touche un coup/tir ? Piéton ou flic sur le rayon de visée à moins de SHOT_REACH, véhicule via sim.raycastProbe, sinon rien.
+   * `threat` : un flic ou une voiture de police se trouve dans la direction de visée à courte portée. Tout doute = 'rien'.
+   */
+  const classifyShot = (p: SimPlayer, x: number, z: number): { impact: ShotImpact; victim: number; threat: boolean } => {
+    const none = { impact: 'rien' as ShotImpact, victim: -1, threat: false };
+    const ad = p.input?.ad;
+    if (!ad || !Number.isFinite(x + z + ad[0] + ad[1] + ad[2])) return none;
+    const hl = Math.hypot(ad[0], ad[2]);
+    const n3 = Math.hypot(ad[0], ad[1], ad[2]);
+    if (hl < 1e-4 || n3 < 1e-4) return none;
+    const dx = ad[0] / hl, dz = ad[2] / hl;
+    let best: { impact: ShotImpact; victim: number } | null = null, bt = Infinity, threat = false;
+    const peds = pedsSys()?.peds;
+    if (peds) {
+      for (const q of peds) {
+        if (q.gone) continue;
+        const rx = q.x - x, rz = q.z - z;
+        const t = rx * dx + rz * dz;
+        const side = Math.abs(rx * dz - rz * dx);
+        if (q.kind === 'flic' && t > 0 && t <= THREAT_R && side <= 3 + t * 0.35) threat = true;
+        if (t < -0.3 || t > SHOT_REACH || side > 0.9) continue;
+        if (t < bt) { bt = t; best = { impact: q.kind === 'flic' ? 'flic' : 'pieton', victim: q.id }; }
+      }
+    }
+    for (const c of cars.values()) {
+      const rx = c.x - x, rz = c.z - z, t = rx * dx + rz * dz;
+      if (t > 0 && t <= THREAT_R && Math.abs(rx * dz - rz * dx) <= 3 + t * 0.35) threat = true;
+    }
+    if (best) return { ...best, threat };
+    if (bodyOk(p.body)) {
+      const h = sim.raycastProbe(x, sim.playerPos(p)[1] + 0.7, z, ad[0] / n3, ad[1] / n3, ad[2] / n3, SHOT_REACH, p.body);
+      if (h?.kind === 'vehicle') return { impact: 'vehicule', victim: -1, threat };
+    }
+    return { impact: 'rien', victim: -1, threat };
+  };
+
   bus.on('crime', (e) => {
     if (e.kind === 'flic_detruit') return; // chaleur nulle : l'effet (baisse) est traité dans vehicleDestroyed
-    if (e.kind === 'tir' && !witnessed(e.x, e.z)) return; // un tir dans le vide ne se remarque pas
+    if (e.kind === 'tir') {
+      // Un clic dans le vide ou contre le décor ne donne AUCUNE chaleur (repli sûr : rien). `impact` (game.ts) prime s'il est fourni.
+      const given = (e as { impact?: unknown }).impact;
+      const c = classifyShot(e.by, e.x, e.z);
+      const impact: ShotImpact = given === 'pieton' || given === 'flic' || given === 'vehicule' || given === 'decor' || given === 'rien' ? given : c.impact;
+      if (impact === 'flic') commit(e.by, 'agression_flic');
+      else if (impact === 'pieton') commit(e.by, 'tir', c.impact === 'pieton' ? c.victim : -1);
+      else if (impact === 'vehicule') { if (witnessed(e.x, e.z)) commit(e.by, 'tir'); }
+      else if (impact === 'rien' && given === undefined && c.threat) commit(e.by, 'tir'); // poing levé sous les yeux d'un flic
+      return;
+    }
     commit(e.by, e.kind);
   });
 
@@ -366,7 +422,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     onJoin(p) { publish(p, ensure(p)); },
     onLeave(p) {
       const s = states.get(p.id);
-      if (s && s.w.heat > 0 && saved.size < MAX_SAVED) saved.set(p.id, { heat: s.w.heat, kills: s.w.kills });
+      if (s && s.w.heat > 0 && saved.size < MAX_SAVED) saved.set(p.name, { heat: s.w.heat, kills: s.w.kills });
       states.delete(p.id);
       hospitalQueue.delete(p.id);
     },
@@ -385,9 +441,9 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       for (const e of list.slice(0, 6)) out.marks.push(e.m);
     },
     serialize() {
-      const w: Record<string, { heat: number; kills: number }> = {};
+      const w: Record<string, { heat: number; kills: number }> = Object.create(null);
       let n = 0;
-      for (const [id, s] of states) if (s.w.heat > 0 && n++ < MAX_SAVED) w[id] = { heat: Math.round(s.w.heat * 10) / 10, kills: s.w.kills };
+      for (const [id, s] of states) if (s.w.heat > 0 && n++ < MAX_SAVED) w[sim.players.get(id)?.name ?? id] = { heat: Math.round(s.w.heat * 10) / 10, kills: s.w.kills };
       for (const [id, s] of saved) if (n++ < MAX_SAVED && !(id in w)) w[id] = { heat: s.heat, kills: s.kills };
       return { v: 1, w };
     },

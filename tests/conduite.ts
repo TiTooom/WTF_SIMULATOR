@@ -434,6 +434,62 @@ function camera() {
   const t2 = mk(); for (let i = 0; i < 60; i++) t2.update(dt, { pos: [0, 1, 0] });
   t2.teleported(); t2.update(dt, { pos: [10, 1, 10] });
   check('caméra : teleported() saute même sous le seuil', Math.hypot(t2.focusX - 10, t2.focusZ - 10) < 0.5);
+  // ---- Réaction aux commandes ----
+  const ft = (opt: { intent?: { x: number; z: number }; cursor?: { x: number; y: number } }, n = 180) => {
+    const c = mk(); c.zoom = 1; let x = 0, maxStep = 0, last = 0, flips = 0, lastD = 0;
+    for (let i = 0; i < n; i++) {
+      if (opt.intent) x += opt.intent.x * 5 * dt;
+      c.update(dt, { pos: [x, 1, 0], ...opt });
+      const d = c.panX - last; last = c.panX; maxStep = Math.max(maxStep, Math.abs(d));
+      if (i > 5 && d * lastD < -1e-9) flips++; lastD = d;
+    }
+    return { c, maxStep, flips };
+  };
+  const still = ft({}), run = ft({ intent: { x: 1, z: 0 } }), up = ft({ intent: { x: 0, z: -1 } });
+  console.log(`  # caméra à pied : repos pan ${still.c.panX.toFixed(2)} m | course vers +x pan ${run.c.panX.toFixed(2)} m | vers le haut pan z ${up.c.panZ.toFixed(2)} m`);
+  check('caméra à pied : aucun décalage sans commande', Math.hypot(still.c.panX, still.c.panZ) < 0.01);
+  check('caméra à pied : décalage dans le sens du déplacement, borné', run.c.panX > 2.5 && run.c.panX < 5 && Math.abs(up.c.panZ + run.c.panX) < 1.2 && up.c.panZ < -2.5);
+  check('caméra à pied : convergence monotone, sans oscillation', run.flips === 0 && up.flips === 0);
+  const cur = ft({ cursor: { x: 1, y: 0 } }), curFar = ft({ cursor: { x: 1, y: 1 } }), dz = ft({ cursor: { x: 0.08, y: -0.05 } });
+  console.log(`  # curseur au bord droit : ${cur.c.panX.toFixed(2)} m, coin : ${Math.hypot(curFar.c.panX, curFar.c.panZ).toFixed(2)} m`);
+  check('caméra à pied : curseur au bord -> décalage vers lui (> 1 m, <= 8 m)', cur.c.panX > 1 && Math.hypot(curFar.c.panX, curFar.c.panZ) <= 8.01 && curFar.c.panZ < 0);
+  check('caméra à pied : zone morte du curseur au repos', Math.hypot(dz.c.panX, dz.c.panZ) < 0.01);
+  check('caméra à pied : pas de dérive du décalage (stable après 3 s puis 6 s)', Math.abs(ft({ cursor: { x: 1, y: 0 } }, 180).c.panX - ft({ cursor: { x: 1, y: 0 } }, 360).c.panX) < 0.01);
+  // pas de saut au changement véhicule <-> à pied et à la téléportation
+  const sw = mk(); sw.zoom = 1;
+  for (let i = 0; i < 120; i++) sw.update(dt, { pos: [0, 1, 0], intent: { x: 1, z: 0 }, cursor: { x: 1, y: 0 } });
+  let prevP = sw.camera.position.clone(), jump = 0;
+  sw.onEnterVehicle();
+  for (let i = 0; i < 120; i++) { sw.update(dt, { pos: [0, 0.7, 0], veh: veh(0) }); jump = Math.max(jump, sw.camera.position.distanceTo(prevP)); prevP = sw.camera.position.clone(); }
+  for (let i = 0; i < 120; i++) { sw.update(dt, { pos: [0, 1, 0], intent: { x: 1, z: 0 } }); jump = Math.max(jump, sw.camera.position.distanceTo(prevP)); prevP = sw.camera.position.clone(); }
+  check('caméra : pas de saut en montant/descendant du véhicule (< 0,25 m par image)', jump < 0.25, `${jump.toFixed(3)} m`);
+  const tp = mk(); for (let i = 0; i < 120; i++) tp.update(dt, { pos: [0, 1, 0], intent: { x: 1, z: 0 }, cursor: { x: 1, y: 0 } });
+  tp.teleported(); tp.update(dt, { pos: [5, 1, 5] });
+  check('caméra : teleported() efface le décalage à pied', Math.hypot(tp.panX, tp.panZ) < 0.01);
+  // véhicule : volant instantané, gaz/frein, frein à main, marche arrière
+  const drv = (ctl: { f: number; s: number; hb?: number }, sp = 15, n = 20, yaw = 0) => {
+    const c = mk(); c.zoom = 1; let z = 0;
+    for (let i = 0; i < 90; i++) { z -= sp * dt; c.update(dt, { pos: [0, 0.7, z], veh: { ...veh(sp, yaw), ctl: { f: 0, s: 0 } } }); }
+    const d0 = c.distance;
+    for (let i = 0; i < n; i++) { z -= sp * dt; c.update(dt, { pos: [0, 0.7, z], veh: { ...veh(sp, yaw), ctl: ctl } }); }
+    return { c, d0 };
+  };
+  const sl = drv({ f: 0, s: -1 }), sr = drv({ f: 0, s: 1 }), s0b = drv({ f: 0, s: 0 });
+  console.log(`  # volant à gauche 1/3 s (cap encore droit) : pivot ${(sl.c.yaw * 57.3).toFixed(1)}° ; droite ${(sr.c.yaw * 57.3).toFixed(1)}° ; neutre ${(s0b.c.yaw * 57.3).toFixed(1)}°`);
+  check('caméra : le volant penche la caméra avant que la voiture ne tourne (bon sens, <= 15°)', sl.c.yaw > 0.03 && sr.c.yaw < -0.03 && Math.abs(s0b.c.yaw) < 0.005 && Math.abs(sl.c.yaw) <= 0.2619);
+  const gas = drv({ f: 1, s: 0 }, 8, 120), brk = drv({ f: -1, s: 0 }, 8, 120);
+  console.log(`  # zoom à 8 m/s : neutre ${s0b.d0.toFixed(1)} m, gaz ${gas.c.distance.toFixed(1)} m, frein ${brk.c.distance.toFixed(1)} m`);
+  check('caméra : zoom out au gaz, zoom in au freinage (< 8 %)', gas.c.distance > gas.d0 + 0.2 && brk.c.distance < brk.d0 - 0.2 && gas.c.distance / gas.d0 < 1.08 && brk.c.distance / brk.d0 > 0.92);
+  const hb = drv({ f: 0, s: -1, hb: 1 }, 18, 40), nohb = drv({ f: 0, s: -1 }, 18, 40);
+  check('caméra : frein à main en virage -> pivot plus marqué, toujours <= 15°', hb.c.yaw > nohb.c.yaw && hb.c.yaw <= 0.2619, `${(hb.c.yaw * 57.3).toFixed(1)}° vs ${(nohb.c.yaw * 57.3).toFixed(1)}°`);
+  // dérapage : cap vers +z (voiture qui regarde -z) mais mouvement vers +x -> l'avance penche vers +x
+  const gl = mk(); gl.zoom = 1; let gx = 0;
+  for (let i = 0; i < 180; i++) { gx += 15 * dt; gl.update(dt, { pos: [gx, 0.7, 0], veh: veh(15, 0) }); }
+  check('caméra : glissade -> l\'avance suit la direction réelle du mouvement', gl.panX > 3, `panX ${gl.panX.toFixed(1)} m`);
+  // marche arrière : l'avance est derrière la voiture
+  const rv = mk(); rv.zoom = 1; let rz = 0;
+  for (let i = 0; i < 240; i++) { rz += 5 * dt; rv.update(dt, { pos: [0, 0.7, rz], veh: veh(-5, 0) }); }
+  check('caméra : marche arrière -> avance vers l\'arrière (+z), pas d\'inversion de lacet', rv.panZ > 1.5 && Math.abs(rv.yaw) < 0.01, `panZ ${rv.panZ.toFixed(1)} m`);
   const nn = mk(); nn.update(NaN, { pos: [0, 1, 0] }); nn.update(5, { pos: [1, 1, 1] });
   check('caméra : dt invalide sans NaN', Number.isFinite(nn.camera.position.x + nn.camera.position.y + nn.camera.position.z));
 }

@@ -4,7 +4,7 @@
   "description": "Grand Theft Auto : Edition UniLaSalle : jeu de ville en vue de dessus, coop entre amis",
   "author": "UniLaSalle",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {

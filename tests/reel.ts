@@ -235,6 +235,15 @@ async function main() {
       check(!!done && !!done.medal, 'mission 1 : événement de fin avec médaille', JSON.stringify(done));
       check(!!done && typeof done.reward === 'number' && done.reward > 0 && !!done.par, 'mission 1 : l’événement de fin porte récompense et objectifs (par)');
       await sleep(900);
+      // Les planches BD de fin passent AVANT l'écran de résultat (file d'attente : jamais empilés) : on les feuillette d'abord
+      let comicSeen = false, stacked = false;
+      for (let i = 0; i < 12; i++) {
+        const st = await ev<string>(`(document.body.innerText.includes('Clic ou Espace : suite') ? 'B' : '') + (document.body.innerText.includes('MISSION RÉUSSIE') ? 'R' : '')`);
+        if (st.includes('B')) { comicSeen = true; if (st.includes('R')) stacked = true; await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', bubbles: true }))`); await sleep(500); }
+        else if (st.includes('R')) break;
+        else await sleep(400);
+      }
+      check(!stacked, 'mission 1 : planches de fin puis résultat, jamais superposés', comicSeen ? 'planches vues' : 'pas de planche pour cette mission');
       const result = await ev<string>(`document.body.innerText.includes('MISSION RÉUSSIE') ? 'MISSION RÉUSSIE' : ''`);
       check(result === 'MISSION RÉUSSIE', 'mission 1 : l’écran de fin (showMissionResult) s’affiche');
       await shot('7_fin_mission');

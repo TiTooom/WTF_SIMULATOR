@@ -1,46 +1,39 @@
 # Grand Theft Auto : Edition UniLaSalle
 
-> **Nouvelle direction** (voir `DA.md`) : le jeu s'appelle désormais « Grand Theft Auto : Edition UniLaSalle », inspiré de GTA: Chinatown Wars : vue de dessus inclinée (50-65°), cel-shading BD avec contours noirs, conduite arcade assistée, économie de rue (marchandises **fictives**), étoiles de recherche, missions courtes avec médailles, mini-jeux < 4 s, interface PDA. Multi coopératif LAN dans la même ville. Plateformes : application Windows ou navigateur **sur ordinateur uniquement (pas de mobile ni tactile)**.
-> Le moteur (Electron, serveur autoritaire, réseau, sauvegarde, chat, réglages, son) est conservé ; la vue FPS, les 12 véhicules, les 33 objets et le mode casser/construire de l'ancien « WTF SIMULATOR » sont à remplacer. Le texte ci-dessous décrit l'état actuel du code (encore l'ancien jeu) tant que la migration n'est pas faite.
-> Agents spécialisés : `art-toon`, `game-camera-driving`, `game-economy`, `game-missions`, `game-minigames` (`.claude/agents/`).
+Vrai jeu à télécharger (application Windows Electron, installateur NSIS publié dans les Releases GitHub, dépôt `TiTooom/WTF_SIMULATOR` conservé volontairement : l'auto-update remplace l'ancien jeu WTF SIMULATOR). Jouable aussi dans un navigateur **sur ordinateur** : **pas de mobile ni de tactile** (décision du projet). Three.js (rendu) + Rapier (physique, côté serveur) + Node (serveur intégré) + Vite + TypeScript strict.
 
-Vrai jeu à télécharger (application Windows Electron, `.exe` portable + installateur, publiés dans les Releases GitHub). Plus d'itch.io. Three.js (rendu) + Rapier (physique, côté serveur) + Node (serveur intégré à l'app) + Vite + TypeScript strict.
+Inspiré de GTA: Chinatown Wars (voir `DA.md`) : vue de dessus inclinée, cel-shading BD à contours noirs, conduite arcade, économie de rue à marchandises **fictives**, étoiles de recherche, missions courtes à médailles, mini-jeux < 4 s, PDA. Violence « fidèle à Chinatown Wars » mais **sans sang explicite**. Clins d'œil légers à l'école, aucune personne réelle, aucune drogue réelle. Argent et sac **individuels** (`/donner`). Coop LAN : l'hôte est le serveur (même Wi-Fi, UDP 41234, pas de NAT traversal). Sauvegarde chez l'hôte dans `%APPDATA%/GTA Edition UniLaSalle/saves/` (`solo.json`, `multi.json`, copie `.bak`).
 
-## Scope
-- Monde ouvert plat, vue première personne, style cartoon léger (MeshToonMaterial, contours, pas d'ombres) pour petites configs.
-- Le joueur conduit tout type de véhicule (voiture, camion + remorque, avion/chasseur, engins de chantier), chacun avec sa spécificité
-  (remorque, train rentrant + tir, godet...) et interagit avec l'environnement (casser, construire, déplacer). Physique arcade crédible.
-- Ordre des véhicules : voiture + marche (fait) → pelleteuse (fait) → camion/remorque → avion.
-- **Tout se fait dans l'application, aucune commande ni .bat** : menu Solo / Héberger / Rejoindre. Multi entre amis sans enjeu : l'hôte = serveur (même Wi-Fi uniquement, LAN, pas de NAT traversal), parties détectées par diffusion UDP (port 41234) ou adresse saisie. Sauvegarde chez l'hôte dans `%APPDATA%/GTA Edition UniLaSalle/saves/` (`solo.json`, `multi.json`).
+**Plan, contrats et propriétaires de fichiers : `docs/ARCHITECTURE-GTA.md` (source de vérité).** Vagues 0 à 5 faites ; reste la release (voir plus bas).
 
 ## Architecture
-- `shared/` : constantes + génération déterministe du monde (arbres, caisses), protocole, **simulation Rapier** (`sim.ts`).
-- `server/server.ts` : `startServer()` (HTTP statique + `/info` + WebSocket + boucle 60 Hz + snapshots 30 Hz + sauvegarde atomique). `server/index.ts` = lancement CLI pour le dev uniquement.
-- `electron/` : `main.ts` (fenêtre, démarre/arrête le serveur, IPC), `preload.ts` (API `launcher`), `menu.html` (menu), `discovery.ts` (annonce/écoute UDP).
-  - Sécurité : `contextIsolation`, sandbox, pas de nodeIntegration. Le menu (file:) a l'API complète ; une page de jeu distante (hôte d'un ami) n'a que `backToMenu`. Les handlers IPC sensibles vérifient `senderFrame.url` (file:).
-- `src/` : client. Aucune physique : il dessine l'état interpolé (~100 ms de retard) et envoie ses commandes (`Input`). Pause = Échap (pointer lock perdu).
-- Serveur **autoritaire** : toute logique de jeu va dans `shared/sim.ts`, jamais dans le client.
-- Ajouter un véhicule : `makeXxx` dans `sim.ts` (+ `VEHICLE_SPECS`, `SaveData`), modèle dans `src/models.ts`, caméra dans `CAMS` (`src/main.ts`), type dans `protocol.ts`.
+- `shared/` : constantes, protocole (`protocol.ts`), contrats (`ids.ts`, `api.ts`, `game.ts`), **simulation Rapier** (`sim.ts`), ville déterministe (`city/layout.ts`, `districts.ts`, `lanes.ts`), véhicules (`vehicles/arcade.ts` + 4 types), `economy/` (prix, gangs, marchandises, commerce : logique pure), `wanted.ts`, `peds.ts`, `missions/`, `activities.ts`, `minigames/rules.ts`, `onfoot.ts`, `ai/drive.ts`, `me.ts` (état privé compact).
+- `server/server.ts` : HTTP statique + `/info` + WebSocket + boucle 60 Hz + snapshots delta 30 Hz compacts + sauvegarde atomique + disjoncteur. `server/game.ts` : `installGame` (bus d'événements typé, `SYSTEMS`). **Systèmes de jeu** dans `server/systems/` : `traffic, peds, police, economy, minigames, theft, missions, activities` (interface `GameSystem`, ordre = ordre d'appel).
+- `electron/` : fenêtre, menu (`menu.html`, `menu.ts`), IPC, `discovery.ts` (UDP), `updater.ts`. Sécurité : `contextIsolation`, sandbox, pas de nodeIntegration ; le menu (file:) a l'API complète, une page distante n'a que `backToMenu` et les réglages ; handlers sensibles vérifient `senderFrame.url`.
+- `src/` : client. **Aucune physique ni logique de jeu** : il dessine l'état interpolé (~100 ms de retard) et envoie des `Input`. `main.ts` (intégration), `camera.ts` (CameraRig : ressort, anticipation, pivot en virage, réagit aux commandes), `aim.ts` (verrouillage), `gfx.ts` (toon + contours coque inversée + estompage des bâtiments + silhouettes XRay), `city/cityView.ts` (25 chunks instanciés), `peds.ts`, `markers.ts`, `hud.ts`, `models.ts`, `fx.ts`, `vehicles/`, `minigames/`, `ui/` (PDA, boutique, vignettes BD, panneau de réglages).
+- Serveur **autoritaire** : toute logique (économie, prix, missions, étoiles, résultats de mini-jeux) côté serveur, jamais dans le client. Tout message client (`GameClientMsg`, `Input`) est revalidé (`parseGameMsg`, `sim.setInput`).
+- Ajouter un système : créer `server/systems/<id>.ts` (`SystemFactory`), ajouter l'id à `SYSTEM_IDS` (`shared/ids.ts`) et à `SYSTEMS` (`server/game.ts`).
 
-- **Réglages** (`shared/settings.ts`) : touches (event.code, une touche = une action, échange en cas de conflit), sensibilité, volumes. Stockés par l'app dans `settings.json` (IPC `settings:get/save`, toujours revalidés par `sanitizeSettings`), sinon localStorage en navigateur. Le panneau `src/ui/settingsPanel.ts` est partagé entre le menu (`electron/menu.ts`, bundle iife) et le jeu.
-- **Chat** : `chat` dans le protocole, historique/anti-spam/nettoyage dans `server/server.ts`, UI `src/chat.ts` (toujours `textContent`). **Son** : `src/audio.ts`, synthèse Web Audio, aucun fichier audio.
-- **Mobile / tactile : abandonné** (décision du projet). `src/touch.ts` supprimé ; ne pas ajouter de support tactile.
-- `window.__wtf` expose l'audio pour les tests CDP.
+## Pièges
+- **Rapier critique** : lire/écrire un corps RETIRÉ du monde empoisonne définitivement Rapier. Les véhicules sont dans un **pool fixe jamais retiré** (`acquireVehicle/releaseVehicle`) ; on ne garde que des `VRef {id, gen}` revalidées par `sim.resolveRef()` et `bodyOk` (`shared/guard.ts`). Les piétons n'ont pas de corps. Un disjoncteur recrée la simulation (`installGame(fresh, {saved})`).
+- `serialize()` d'un système ne lit **jamais** Rapier ; `restore()` valide tout (Map, clés `__proto__`/`constructor`/`prototype` filtrées).
+- Budgets mesurés par `tests/charge.ts` : pas serveur moyen < 4 ms, snapshot delta < 8 Ko, `me` < 1 Ko. Les pics de pas sur Windows viennent des autres processus (quantum de 15,6 ms) : juger sur le minimum de 3 passages.
+- **Sécurité réseau** : Origin + `Host` (localhost/IP privées seulement : les amis saisissent l'IP, pas un nom), seau à jetons par socket, comptes liés à un secret client hashé (`claims`), CSP sur le jeu. Aucun `innerHTML` avec des données réseau (toujours `textContent`).
+- Les touches sont lues via `event.code` (position physique) : AZERTY et QWERTY fonctionnent. Une touche = une action.
+- Pas fixe 1/60 côté serveur. Garder le client léger (pas d'asset lourd, ≤ 150 appels de dessin).
+- Chaque nouveau joueur apparaît sur un POI `spawn` différent.
+- **L'éditeur** (VS Code/Claude Code) définit `ELECTRON_RUN_AS_NODE=1` : pour lancer Electron depuis son terminal, `env -u ELECTRON_RUN_AS_NODE npm run app` (en tâche de fond, sinon l'app se ferme avec la commande).
 
-## Contenu v2 (voir docs/ARCHITECTURE.md, docs/CONTENT-BRIEF.md, docs/wtf-ideas.md)
-- 12 véhicules : un fichier serveur `shared/vehicles/<type>.ts` (VehicleDef) + un fichier client `src/vehicles/<type>.ts` (VehicleViewDef). 33 objets : paquets `shared/packs/*.ts`. Monde : `shared/world.ts`. Événements/modes/commandes : `server/events.ts`, `modes.ts`, `extras.ts`, `commands.ts`.
-- **Piège Rapier critique** : lire/écrire un corps RETIRÉ du monde empoisonne définitivement Rapier (plus aucun `step`). Toujours valider (`shared/guard.ts` : `bodyOk`) avant de lire une référence conservée entre deux ticks. Un disjoncteur recrée la simulation si cela arrive.
-- Tests : `npx tsx tests/<suite>.ts` (smoke, robustesse, vehicules1/2, aeronefs, aeriens, objets1/2/3, monde). Le serveur se défend du réseau (heartbeat, Origin, limites, hôte) : voir `tests/robustesse.ts`.
-- URL de test client : `?name= &cmd=/drive%20<type> &item=<id> &fire= &aim= &nopause`.
+## Tests
+`npx tsx tests/<suite>.ts` : `smoke, robustesse, vehicules1, conduite, economie, economie-sim, pietons, minijeux, minijeux-reel, trafic, police, missions, disjoncteur, sauvegarde, reseau, charge, captures, reel`. Les suites « réel » et `captures` lancent Chrome headless en CDP (rendu logiciel) et sont sensibles à la charge machine : à lancer sur machine calme. Test automatisé de l'app : Electron avec `--remote-debugging-port=9333`.
+- URL de test client : `?name= &cmd=/drive%20<type> &aim= &nopause`. `/debug stars|money|mg <kind>` (hôte seulement). `window.__wtf` expose audio et mesures (drawCalls) pour les tests.
 
 ## Commandes
 - `npm run app` : compile et lance l'application · `npm run dev` : serveur + client dans le navigateur (http://localhost:5173) · `npm run build` : types + client + app · `npm run dist` : `.exe` dans `release/`.
-- Mise à jour auto (Windows seulement, `electron/updater.ts` + `electron-updater`, dépôt public) : le tag `vX.Y.Z` doit égaler `version` de package.json ; la release doit contenir `latest.yml` + `.blockmap` + installateur NSIS. Pas d'auto-update sur macOS (app non signée). Ne pas remettre de cible `portable` (non mise à jour).
-- Release : tag `v*` → `.github/workflows/release.yml` (jobs Windows + macOS ; les `.dmg` ne se fabriquent que sur un Mac/runner macOS). macOS : app non signée mais signée « ad hoc » par `scripts/adhoc-sign.cjs` (hook `afterPack`) ; menu d'application minimal sur darwin (`electron/main.ts`). **Le build macOS n'a jamais été exécuté** (développé sous Windows) : à vérifier au premier tag.
-- **Piège** : l'éditeur (VS Code/Claude Code) définit `ELECTRON_RUN_AS_NODE=1` ; pour lancer Electron depuis son terminal il faut le retirer (`env -u ELECTRON_RUN_AS_NODE npx electron .`).
-- Test automatisé de l'app : lancer Electron avec `--remote-debugging-port=9333` et piloter le menu via le protocole CDP.
+- Mise à jour auto (Windows seulement, `electron/updater.ts` + `electron-updater`, dépôt public) : le tag `vX.Y.Z` doit égaler `version` de `package.json` ; la release doit contenir `latest.yml` + `.blockmap` + installateur NSIS (`GTA-UniLaSalle-Setup-X.Y.Z.exe`). Pas d'auto-update sur macOS (app non signée). Ne pas remettre de cible `portable`.
+- Release : tag `v*` → `.github/workflows/release.yml` (jobs Windows + macOS). macOS : signature « ad hoc » par `scripts/adhoc-sign.cjs`. **Le build macOS n'a jamais été exécuté** : à vérifier au premier tag. **Créer un tag publie le nouveau jeu en remplacement de l'ancien chez tous les joueurs : confirmer avec l'utilisateur avant.**
+- Version actuelle : 0.4.0 (pas encore taguée).
 
-## Règles
-- Pas fixe 1/60 côté serveur. Garder le client léger (pas d'asset lourd).
-- Les touches sont lues via `event.code` (position physique) : AZERTY et QWERTY fonctionnent.
-- Chaque nouveau joueur apparaît décalé (sinon sa caméra est dans un autre joueur).
+## Règles de travail
+- Un commit avant chaque grosse passe, push entre les vagues, au nom de l'utilisateur, **sans ligne Co-Authored-By**.
+- Agents (`.claude/agents/`) : `art-toon`, `game-camera-driving`, `game-economy`, `game-missions`, `game-minigames` + agents génériques (architect, planner, reviewers, build-error-resolver…). Un seul rédacteur par fichier pendant les vagues parallèles ; les fichiers d'intégration (`protocol.ts`, `api.ts`, `sim.ts`, `server.ts`, `game.ts`, `main.ts`, `net.ts`) sont modifiés en fin de vague.

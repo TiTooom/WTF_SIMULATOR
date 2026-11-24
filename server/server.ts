@@ -3,6 +3,7 @@
 // Robustesse : aucun client ne doit pouvoir faire tomber le processus (tout handler est sous try/catch, les sockets ont un
 // écouteur d'erreur, les requêtes HTTP sont validées) et une panique de Rapier (monde empoisonné) est rattrapée par un « disjoncteur » :
 // la simulation est reconstruite à partir du dernier état sain gardé en mémoire, sans déconnecter personne.
+import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -11,6 +12,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { Sim, type SaveData } from '../shared/sim';
 import { DEFAULT_PORT, MAX_PLAYERS, SNAP_HZ, STEP } from '../shared/constants';
 import { MAX_GAME_MSG_CHARS } from '../shared/game';
+import { packMe } from '../shared/me';
 import type { ChatMsg, ClientMsg, GameServerEvent, ServerMsg } from '../shared/protocol';
 import { runCommand } from './commands';
 import { installGame, type Game, type Outgoing } from './game';
@@ -26,6 +28,8 @@ export interface ServerOptions {
   onFatal?: (reason: string) => void;
   /** Période du heartbeat WebSocket (ms, 10 000 par défaut ; réduite par les tests). */
   heartbeatMs?: number;
+  /** Délai minimal entre deux « join » d'une même adresse (ms, 2 000 par défaut ; réduit par les tests). */
+  joinGapMs?: number;
 }
 
 export interface ServerInfo {
@@ -43,6 +47,8 @@ export interface RunningServer {
   stop(): Promise<void>;
   /** Simulation courante (elle change si le disjoncteur reconstruit le monde). Pour les tests et le diagnostic. */
   sim(): Sim;
+  /** Logique de jeu courante (change aussi à chaque reconstruction). Pour les tests et le diagnostic. */
+  game(): Game;
 }
 
 const MIME: Record<string, string> = {
@@ -56,7 +62,32 @@ const JOIN_TIMEOUT_MS = 5000; // un socket qui n'a pas dit « join » dans ce d�
 const JOIN_MIN_GAP_MS = 2000; // 1 join par IP toutes les 2 s
 const GOOD_STATE_EVERY_MS = 10_000; // instantané en mémoire du dernier état sain
 const MAX_REBUILDS = 3; // reconstructions du monde par minute, au-delà : arrêt propre
+const CSP = "default-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const MAX_SAVE_BYTES = 4_000_000; // une vraie sauvegarde fait quelques Ko : au-delà, fichier hostile ou cassé
+const GHOST_MS = 5000; // un joueur muet depuis ce délai, dont le pseudo est redemandé, est un fantôme
+const MAX_REPLAY = 60; // actions mises de côté pendant une reconstruction du monde
 const RESERVED_NAMES = new Set(['serveur', 'server', 'system', 'systeme', 'admin']);
+
+const MAX_CLAIMS = 300; // pseudos liés à un secret (FIFO)
+const MAX_NAMES_PER_IP = 12; // pseudos distincts essayés depuis une même adresse (par heure)
+const BUCKET_CAP = 240; // seau à jetons par socket : rafale max
+const BUCKET_RATE = 0.12; // jetons par ms (120 messages/s)
+const INTERACT_CAP = 10;
+const INTERACT_RATE = 0.01; // 10 interactions/s
+const ABUSE_DROPS = 400; // messages jetés en 5 s avant de couper le socket
+const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
+
+/** En-tête Host accepté : localhost, 127.x, [::1], IPv4 privée ou lien local, avec port facultatif. Refuse les noms de domaine (DNS rebinding). */
+export function hostAllowed(h: string | undefined): boolean {
+  if (!h || h.length > 64) return false;
+  const m = /^(localhost|\[::1\]|\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/i.exec(h);
+  if (!m) return false;
+  if (m[2] && Number(m[2]) > 65535) return false;
+  if (!/^\d/.test(m[1])) return true;
+  const o = m[1].split('.').map(Number);
+  if (o.some((x) => x > 255)) return false;
+  return o[0] === 127 || o[0] === 10 || (o[0] === 192 && o[1] === 168) || (o[0] === 172 && o[1] >= 16 && o[1] <= 31) || (o[0] === 169 && o[1] === 254);
+}
 
 const fold = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const isPrivate = (ip: string) => /^(192\.168|10\.|172\.(1[6-9]|2\d|3[01]))/.test(ip);
@@ -80,14 +111,34 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   // ---------- Simulation + sauvegarde ----------
   let sim = await Sim.create();
   let savedGame: unknown;
-  try {
-    const raw = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
-    sim.restore(raw); // ignore tout ce qui n'est pas une sauvegarde v3
-    savedGame = raw?.version === 3 ? raw.systems : undefined; // état des systèmes de jeu (revalidé par chaque système)
-    log(`Sauvegarde chargée : ${saveFile}`);
-  } catch {
-    log('Nouvelle partie (aucune sauvegarde trouvée).');
-  }
+  // Pseudos liés à un secret (sha256) : empêche qu'un autre joueur du réseau prenne le compte (argent, sac, médailles) d'un pseudo connu.
+  const claims = new Map<string, string>();
+  const bindClaim = (name: string, hash: string) => {
+    claims.delete(name);
+    claims.set(name, hash);
+    while (claims.size > MAX_CLAIMS) claims.delete(claims.keys().next().value as string);
+  };
+  // Lecture tolérante : fichier absent, tronqué, énorme ou hostile → on essaie la copie de la sauvegarde précédente (.bak), sinon partie neuve.
+  const readSave = (file: string): { version?: unknown; systems?: unknown; claims?: unknown } | null => {
+    try {
+      if (fs.statSync(file).size > MAX_SAVE_BYTES) { log(`Sauvegarde ignorée (trop volumineuse) : ${file}`); return null; }
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return raw && typeof raw === 'object' && !Array.isArray(raw) && raw.version === 3 ? raw : null; // v1, v2, tableau, null… : ignorés
+    } catch { return null; }
+  };
+  const loaded = readSave(saveFile) ?? readSave(`${saveFile}.bak`);
+  if (loaded) {
+    try {
+      sim.restore(loaded as never);
+      if (loaded.claims && typeof loaded.claims === 'object' && !Array.isArray(loaded.claims)) {
+        for (const [n, h] of Object.entries(loaded.claims).slice(0, MAX_CLAIMS)) {
+          if (n.length > 0 && n.length <= 16 && n !== '__proto__' && typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)) claims.set(n, h);
+        }
+      }
+      savedGame = loaded.systems && typeof loaded.systems === 'object' ? loaded.systems : undefined; // état des systèmes de jeu (revalidé par chaque système)
+      log(`Sauvegarde chargée : ${saveFile}`);
+    } catch (e) { log(`Sauvegarde illisible, partie neuve : ${e}`); savedGame = undefined; }
+  } else log('Nouvelle partie (aucune sauvegarde exploitable).');
   let game: Game = installGame(sim, { mode, saved: savedGame }); // logique de jeu (systèmes) au-dessus de la physique
   sim.soloMode = mode === 'solo';
 
@@ -108,10 +159,17 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       data ??= lastGood; // monde empoisonné : on sauvegarde le dernier état sain, jamais une lecture du monde cassé
       if (!data) return;
       let gameState: unknown = null;
-      if (!sim.broken && !rebuilding) { try { gameState = game.serialize(); lastGameState = gameState; } catch (e) { log(`Sérialisation du jeu ignorée : ${e}`); } } else gameState = lastGameState;
+      // L'état des systèmes (argent, sac, médailles…) ne lit jamais Rapier : on le sérialise même si le monde est empoisonné (arrêt sur panne),
+      // sinon la sauvegarde retomberait sur l'instantané d'il y a 10 s et ferait perdre des gains.
+      try { gameState = game.serialize(); lastGameState = gameState; } catch (e) { log(`Sérialisation du jeu ignorée : ${e}`); gameState = lastGameState; }
       fs.mkdirSync(saveDir, { recursive: true });
       const tmp = `${saveFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: 3, players: data.players, systems: (gameState && typeof gameState === 'object' ? gameState : {}) as Record<string, unknown> } satisfies SaveData));
+      const body: SaveData & { claims: Record<string, string> } = {
+        version: 3, players: data.players, systems: (gameState && typeof gameState === 'object' ? gameState : {}) as Record<string, unknown>,
+        claims: Object.fromEntries(claims),
+      };
+      fs.writeFileSync(tmp, JSON.stringify(body));
+      if (readSave(saveFile)) { try { fs.copyFileSync(saveFile, `${saveFile}.bak`); } catch { /* copie de secours facultative */ } } // la précédente sauvegarde SAINE reste récupérable
       fs.renameSync(tmp, saveFile); // écriture atomique : jamais de sauvegarde à moitié écrite
     } catch (e) {
       log(`Échec de la sauvegarde : ${e}`);
@@ -128,7 +186,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   const reply = (res: http.ServerResponse, status: number, headers: http.OutgoingHttpHeaders, body?: string | Buffer) => {
     try {
-      res.writeHead(status, { 'X-Content-Type-Options': 'nosniff', ...headers });
+      res.writeHead(status, { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', ...headers });
       res.end(body);
     } catch { /* connexion déjà fermée */ }
   };
@@ -141,6 +199,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       } catch {
         return reply(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Adresse invalide');
       }
+      if (!hostAllowed(req.headers.host)) return reply(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Hôte refusé');
       if (urlPath.includes('\0')) return reply(res, 400, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Adresse invalide');
       if (urlPath === '/info') return reply(res, 200, { 'Content-Type': 'application/json' }, JSON.stringify(info()));
       const file = path.resolve(publicDir, '.' + path.sep + (urlPath === '/' ? 'index.html' : urlPath));
@@ -148,7 +207,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       fs.readFile(file, (err, data) => {
         try {
           if (err) return reply(res, 404, { 'Content-Type': 'text/plain; charset=utf-8' }, urlPath === '/' ? 'Serveur Grand Theft Auto : Edition UniLaSalle en marche, mais le client ne se trouve pas ici. En développement, ouvre le port 5173 ; sinon lance npm run build.' : 'Introuvable');
-          reply(res, 200, { 'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream' }, data);
+          const ext = path.extname(file);
+          reply(res, 200, { 'Content-Type': MIME[ext] ?? 'application/octet-stream', ...(ext === '.html' ? { 'Content-Security-Policy': CSP } : {}) }, data);
         } catch { /* réponse impossible : on ignore */ }
       });
     } catch (e) {
@@ -163,10 +223,12 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const ipCount = new Map<string, number>();
   const ipOf = new WeakMap<WebSocket, string>();
   const lastJoinByIp = new Map<string, number>();
+  const namesByIp = new Map<string, { t: number; names: Set<string> }>();
   const wss = new WebSocketServer({
     server, path: '/ws', maxPayload: 4096,
     verifyClient: ({ origin, req }: { origin: string; req: http.IncomingMessage }) => {
       try {
+        if (!hostAllowed(req.headers.host)) return false;
         // Un site web quelconque ne doit pas pouvoir faire jouer le navigateur d'un ami : l'hôte de l'Origin doit être celui du serveur.
         // (Les clients sans Origin — outils, bots — et l'application Electron, dont la page vient du même hôte, passent.)
         if (origin) {
@@ -197,6 +259,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       } catch { /* socket qui se ferme */ }
     }
   }, opts.heartbeatMs ?? 10_000);
+  const replay: { ws: WebSocket; id: string; msg: ClientMsg }[] = []; // actions reçues pendant la reconstruction du monde
   const needFull = new Set<WebSocket>(); // clients qui n'ont pas encore reçu de snapshot complet (les suivants sont des deltas)
   let nextId = 1;
   const send = (ws: WebSocket, msg: ServerMsg) => {
@@ -207,6 +270,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const chatHistory: ChatMsg[] = []; // derniers messages, renvoyés aux nouveaux arrivants
   const chatTimes = new WeakMap<WebSocket, number[]>(); // anti-spam : 5 messages max par 5 s et par joueur
   const gameTimes = new WeakMap<WebSocket, number[]>(); // anti-spam des messages `game` : 20 par seconde et par socket
+  const lastRx = new WeakMap<WebSocket, number>(); // date du dernier message reçu (détecte un joueur fantôme qui se reconnecte)
   const lastMe = new WeakMap<WebSocket, string>(); // dernier état privé envoyé (le message `me` ne part que s'il change)
   const say = (m: ChatMsg) => {
     chatHistory.push(m);
@@ -226,10 +290,12 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     String(raw ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 
   /** Pseudo propre, unique parmi les joueurs connectés (« (2) » sinon) et jamais un mot réservé (serveur, admin…). */
-  const uniqueName = (raw: unknown): string => {
-    let base = String(raw ?? '').replace(/[^\p{L}\p{N} _-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 16);
+  const cleanName = (raw: unknown): string => String(raw ?? '').replace(/[^\p{L}\p{N} _-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 16);
+  const uniqueName = (raw: unknown, hash = ''): string => {
+    let base = cleanName(raw);
     if (!base || RESERVED_NAMES.has(fold(base))) base = `Joueur${nextId}`;
-    const taken = (n: string) => [...sim.players.values()].some((p) => fold(p.name) === fold(n));
+    // pris = quelqu'un l'utilise en ce moment, ou il est lié à un autre secret (multi seulement : en solo, l'hôte est seul sur sa machine)
+    const taken = (n: string) => [...sim.players.values()].some((p) => fold(p.name) === fold(n)) || (mode === 'multi' && claims.has(n) && claims.get(n) !== hash);
     if (!taken(base)) return base;
     for (let i = 2; i < 100; i++) {
       const suffix = ` (${i})`;
@@ -247,16 +313,50 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       return;
     }
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return; // « null », nombres, tableaux : ignorés
+    lastRx.set(ws, Date.now());
     const id = sockets.get(ws);
+    if (id && (rebuilding || sim.broken) && (msg.type === 'interact' || msg.type === 'game')) {
+      // Monde en reconstruction : les actions ponctuelles sont mises de côté et rejouées sur le nouveau monde (aucun message perdu)
+      if (msg.type === 'game' && String(raw).length > MAX_GAME_MSG_CHARS) return;
+      if (replay.length < MAX_REPLAY) replay.push({ ws, id, msg });
+      return;
+    }
     if (msg.type === 'join' && !id) {
       const ip = ipOf.get(ws) ?? '?';
       const now = Date.now();
-      if (now - (lastJoinByIp.get(ip) ?? 0) < JOIN_MIN_GAP_MS) return send(ws, { type: 'error', message: 'Doucement ! Un seul joueur à la fois et par seconde.' });
+      if (now - (lastJoinByIp.get(ip) ?? 0) < (opts.joinGapMs ?? JOIN_MIN_GAP_MS)) return send(ws, { type: 'error', message: 'Doucement ! Un seul joueur à la fois et par seconde.' });
       lastJoinByIp.set(ip, now);
       if (lastJoinByIp.size > 200) for (const [k, t] of lastJoinByIp) if (now - t > 10_000) lastJoinByIp.delete(k);
       if (rebuilding || sim.broken) return send(ws, { type: 'error', message: 'Le monde hoquette, réessaie dans un instant.' });
       if (sockets.size >= MAX_PLAYERS) return send(ws, { type: 'error', message: 'Serveur plein.' });
-      const name = uniqueName(msg.name);
+      // Reconnexion avec le même pseudo : si l'ancien socket est muet depuis plus de 5 s (coupure brutale, heartbeat pas encore passé),
+      // c'est un fantôme : on le retire tout de suite pour que le joueur retrouve son compte (argent, sac, position) et non « Pseudo (2) ».
+      const sec = (msg as { secret?: unknown }).secret;
+      const hash = typeof sec === 'string' && sec.length >= 8 && sec.length <= 100 ? sha256(sec) : '';
+      const baseName = cleanName(msg.name);
+      if (mode === 'multi' && baseName) { // pseudos distincts essayés depuis une même adresse : plafonnés (anti-éviction des comptes)
+        const e = namesByIp.get(ip);
+        const set = e && now - e.t < 3_600_000 ? e.names : new Set<string>();
+        set.add(fold(baseName));
+        if (set.size > MAX_NAMES_PER_IP) return send(ws, { type: 'error', message: 'Trop de pseudos différents depuis cette adresse.' });
+        namesByIp.set(ip, { t: e && set === e.names ? e.t : now, names: set });
+        if (namesByIp.size > 200) for (const [k, v] of namesByIp) if (now - v.t > 3_600_000) namesByIp.delete(k);
+      }
+      const wanted = fold(baseName);
+      if (wanted) {
+        for (const [ows, oid] of sockets) {
+          const op = sim.players.get(oid);
+          const owner = claims.get(op?.name ?? '');
+          if (op && fold(op.name) === wanted && now - (lastRx.get(ows) ?? 0) > GHOST_MS && (!owner || owner === hash)) {
+            dropped.add(ows);
+            try { leave(ows); } catch (e) { log(`Fantôme non retiré : ${e}`); }
+            try { ows.terminate(); } catch { /* déjà fermé */ }
+            break;
+          }
+        }
+      }
+      const name = uniqueName(msg.name, hash);
+      if (mode === 'multi' && hash && !claims.has(name)) bindClaim(name, hash); // le premier à se présenter avec un secret lie le pseudo (anciennes sauvegardes comprises)
       const pid = `p${nextId++}`;
       try {
         sim.addPlayer(pid, name);
@@ -309,6 +409,52 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     }
   };
 
+  // Seau à jetons par socket (avant tout parsing, join compris) : ~120 messages/s, rafale 240 ; abus prolongé : socket coupé.
+  const buckets = new WeakMap<WebSocket, { tok: number; at: number; itok: number; iat: number; drops: number; dropAt: number }>();
+  const abuse = (ws: WebSocket, b: { drops: number; dropAt: number }, now: number) => {
+    if (now - b.dropAt > 5000) { b.drops = 0; b.dropAt = now; }
+    if (++b.drops >= ABUSE_DROPS) { dropped.add(ws); try { ws.terminate(); } catch { /* déjà fermé */ } }
+  };
+  const admit = (ws: WebSocket, raw: unknown): boolean => {
+    const now = Date.now();
+    let b = buckets.get(ws);
+    if (!b) { b = { tok: BUCKET_CAP, at: now, itok: INTERACT_CAP, iat: now, drops: 0, dropAt: now }; buckets.set(ws, b); }
+    b.tok = Math.min(BUCKET_CAP, b.tok + (now - b.at) * BUCKET_RATE);
+    b.at = now;
+    if (b.tok < 1) { abuse(ws, b, now); return false; }
+    b.tok--;
+    const s = typeof raw === 'string' ? raw : Buffer.isBuffer(raw) ? raw.toString('utf8') : '';
+    if (!sockets.has(ws)) return s.length < 700 && s.includes('"join"'); // pas encore joint : seul un « join » mérite d'être analysé
+    if (s.includes('"interact"')) { // interact : ~10/s
+      b.itok = Math.min(INTERACT_CAP, b.itok + (now - b.iat) * INTERACT_RATE);
+      b.iat = now;
+      if (b.itok < 1) { abuse(ws, b, now); return false; }
+      b.itok--;
+    }
+    return true;
+  };
+
+  /** Retire le joueur d'un socket (idempotent : appelé à la fermeture, ou plus tôt pour un fantôme qui se reconnecte). */
+  const leave = (ws: WebSocket) => {
+    const id = sockets.get(ws);
+    needFull.delete(ws);
+    if (!id) return;
+    const name = sim.players.get(id)?.name;
+    sockets.delete(ws);
+    for (let i = replay.length - 1; i >= 0; i--) if (replay[i].ws === ws) replay.splice(i, 1);
+    log(`- ${name} (${sockets.size} joueur(s))`);
+    try { const pl = sim.players.get(id); if (pl) game.onLeave(pl); } catch (e) { log(`Erreur du jeu au départ (ignorée) : ${e}`); }
+    try { sim.removePlayer(id); } catch (e) { sim.noteError(e); }
+    if (sim.hostId === id || !sim.hostId || !sim.players.has(sim.hostId)) {
+      // le chef est parti : le joueur connecté le plus ancien reprend le flambeau
+      const next = sockets.values().next().value as string | undefined;
+      sim.hostId = next ?? '';
+      if (next && mode === 'multi') say({ from: '', text: `${sim.players.get(next)?.name ?? 'Quelqu’un'} est le nouveau chef de la bande`, sys: true });
+    }
+    if (mode === 'multi' && name) say({ from: '', text: dropped.has(ws) ? `${name} a décroché` : `${name} a quitté la partie`, sys: true });
+    if (sockets.size === 0) save();
+  };
+
   wss.on('connection', (ws, req) => {
     alive.set(ws, { ok: true, missed: 0 });
     ws.on('pong', () => { const st = alive.get(ws); if (st) { st.ok = true; st.missed = 0; } });
@@ -320,6 +466,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const mute = setTimeout(() => { if (!sockets.has(ws)) { try { ws.terminate(); } catch { /* déjà fermé */ } } }, JOIN_TIMEOUT_MS);
     ws.on('message', (raw) => {
       try {
+        if (!admit(ws, raw)) return;
         handleMessage(ws, raw);
       } catch (e) {
         if (sim.noteError(e)) return;
@@ -331,22 +478,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       const n = (ipCount.get(ip) ?? 1) - 1;
       if (n <= 0) ipCount.delete(ip); else ipCount.set(ip, n);
       try {
-        const id = sockets.get(ws);
-        needFull.delete(ws);
-        if (!id) return;
-        const name = sim.players.get(id)?.name;
-        sockets.delete(ws);
-        log(`- ${name} (${sockets.size} joueur(s))`);
-        try { const pl = sim.players.get(id); if (pl) game.onLeave(pl); } catch (e) { log(`Erreur du jeu au départ (ignorée) : ${e}`); }
-        try { sim.removePlayer(id); } catch (e) { sim.noteError(e); }
-        if (sim.hostId === id || !sim.hostId || !sim.players.has(sim.hostId)) {
-          // le chef est parti : le joueur connecté le plus ancien reprend le flambeau
-          const next = sockets.values().next().value as string | undefined;
-          sim.hostId = next ?? '';
-          if (next && mode === 'multi') say({ from: '', text: `${sim.players.get(next)?.name ?? 'Quelqu\'un'} est le nouveau chef de la bande`, sys: true });
-        }
-        if (mode === 'multi' && name) say({ from: '', text: dropped.has(ws) ? `${name} a décroché` : `${name} a quitté la partie`, sys: true });
-        if (sockets.size === 0) save();
+        leave(ws);
       } catch (e) {
         log(`Erreur de déconnexion (ignorée) : ${(e as Error)?.stack ?? e}`);
       }
@@ -372,6 +504,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       const people = old.knownPlayers(); // positions lues sans toucher au monde cassé
       const time = old.time;
       const hostId = old.hostId;
+      let interrupted: Outgoing[] = [];
+      try { interrupted = game.interrupted(); } catch (e) { log(`Interruptions non calculées : ${e}`); } // missions / mini-jeux en cours : à clore proprement côté client
       const fresh = await Sim.create();
       if (stopped) { fresh.dispose(); return; }
       wire(fresh);
@@ -397,6 +531,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       try { lastGood = fresh.serialize(); } catch (e) { fresh.noteError(e); }
       nextGoodAt = performance.now() + GOOD_STATE_EVERY_MS;
       old.dispose();
+      routeOutbox(interrupted);
+      // Actions reçues pendant la reconstruction : rejouées sur le nouveau monde (si le joueur est toujours là)
+      const queued = replay.splice(0, replay.length);
+      for (const q of queued) {
+        try {
+          if (sockets.get(q.ws) !== q.id) continue;
+          if (q.msg.type === 'interact') fresh.interact(q.id);
+          else if (q.msg.type === 'game') { const pl = fresh.players.get(q.id); if (pl) fg.onMessage(pl, (q.msg as { m?: unknown }).m); }
+        } catch (e) { if (fresh.noteError(e)) break; log(`Action rejouée ignorée : ${e}`); }
+      }
       say({ from: '', text: 'Le monde a hoqueté, on remet les choses en place', sys: true });
       log('Monde reconstruit après une panique de la physique.');
     } catch (e) {
@@ -423,7 +567,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       try {
         const p = sim.players.get(id);
         if (!p || ws.readyState !== ws.OPEN) continue;
-        const json = JSON.stringify(game.privateFor(p));
+        const json = JSON.stringify(packMe(game.privateFor(p)));
         if (lastMe.get(ws) === json) continue;
         lastMe.set(ws, json);
         ws.send(`{"type":"me","s":${json}}`);
@@ -439,6 +583,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let last = performance.now();
   let ticks = 0;
   let idle = false;
+  let snapCount = 0;
   const snapEvery = Math.round(1 / STEP / SNAP_HZ);
   const loop = setInterval(() => {
     const now = performance.now();
@@ -468,6 +613,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           if (!idle) { sim.resetDelta(); idle = true; }
         } else {
           idle = false;
+          // Resynchronisation : un snapshot complet toutes les 10 s pour tout le monde (un client qui aurait raté ou mal fusionné un delta se rétablit seul)
+          if (++snapCount % (SNAP_HZ * 10) === 0) for (const ws of sockets.keys()) needFull.add(ws);
           try {
             const d = sim.snapshotDelta();
             if (!d.fx.length) delete (d as Partial<typeof d>).fx; // fx vide : non sérialisé
@@ -537,5 +684,5 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     sim.dispose(); // libère la mémoire WASM de la simulation (après la sauvegarde et la fermeture des sockets)
   }
 
-  return { port: actualPort, info, stop, sim: () => sim };
+  return { port: actualPort, info, stop, sim: () => sim, game: () => game };
 }

@@ -11,7 +11,8 @@ import { WebSocket } from 'ws';
 import { Sim } from '../shared/sim';
 import { STEP } from '../shared/constants';
 import { getCity } from '../shared/city/layout';
-import { startServer } from '../server/server';
+import { startServer, hostAllowed } from '../server/server';
+import { unpackMe } from '../shared/me';
 
 let fails = 0;
 const check = (name: string, ok: boolean, detail = '') => {
@@ -354,8 +355,8 @@ async function partServer() {
     stranger.ws.close();
     // état privé : au moins un message `me`, bien formé, et pas de déluge (envoyé seulement s'il change)
     const meMsgs = B.msgs.filter((m) => m.type === 'me');
-    const s0 = (meMsgs[0]?.s ?? {}) as { money?: number; stars?: number; district?: string; marks?: unknown[]; bag?: object };
-    check('message `me` reçu : état privé bien formé', meMsgs.length >= 1 && typeof s0.money === 'number' && s0.money >= 0 && s0.stars === 0 && typeof s0.district === 'string' && Array.isArray(s0.marks) && typeof s0.bag === 'object');
+    const s0 = unpackMe(meMsgs[0]?.s);
+    check('message `me` reçu : état privé bien formé (format compact, relu par unpackMe)', meMsgs.length >= 1 && !!s0 && s0.money >= 0 && s0.stars === 0 && typeof s0.district === 'string' && Array.isArray(s0.marks) && typeof s0.bag === 'object');
     const n0 = B.msgs.filter((m) => m.type === 'me').length;
     await sleep(1200);
     check('message `me` : pas renvoyé tant que l état ne change pas', B.msgs.filter((m) => m.type === 'me').length - n0 <= 1, String(B.msgs.filter((m) => m.type === 'me').length - n0));
@@ -407,9 +408,124 @@ async function partServer() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ---------- Partie 3 : audit de sécurité (hôte, CSP, seau à jetons, secrets de pseudo, éviction de comptes) ----------
+async function partSecurity() {
+  check('hostAllowed : localhost, 127.x, [::1], IPv4 privées et lien local avec port', ['localhost', 'localhost:3000', '127.0.0.1:3000', '[::1]:3000', '192.168.1.20:3000', '10.0.0.5', '172.16.0.1:80', '172.31.9.9', '169.254.1.1:3000'].every((h) => hostAllowed(h)));
+  check('hostAllowed : refuse domaines, IP publiques, ports absurdes, IPv4 invalides, vide', ['evil.example', 'evil.example:3000', 'localhost.evil.com', '8.8.8.8:3000', '172.32.0.1', '192.169.0.1', '127.0.0.1:99999', '300.1.1.1', '', 'a b', '127.0.0.1.evil.com'].every((h) => !hostAllowed(h)) && !hostAllowed(undefined));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wtf-secu-'));
+  const pub = path.join(dir, 'public');
+  fs.mkdirSync(pub);
+  fs.writeFileSync(path.join(pub, 'index.html'), '<!doctype html><title>t</title>');
+  const saves = path.join(dir, 'saves');
+  fs.mkdirSync(saves);
+  // 100 comptes garnis + 28 comptes vides, hors ligne : de nouveaux pseudos ne doivent évincer que des comptes vides
+  const accounts: unknown[] = [];
+  for (let i = 0; i < 100; i++) accounts.push([`Riche${i}`, 5000 + i, [['cafe_machine', 1]], [], 1]);
+  for (let i = 0; i < 28; i++) accounts.push([`Vide${i}`, 200, [], [], 1]);
+  fs.writeFileSync(path.join(saves, 'multi.json'), JSON.stringify({ version: 3, players: {}, systems: { economy: { v: 1, accounts, camsDown: [] } } }));
+  const logs: string[] = [];
+  const PORT = 3453;
+  let srv = await startServer({ mode: 'multi', saveDir: saves, publicDir: pub, port: PORT, log: (l) => logs.push(l), joinGapMs: 0 });
+
+  // ----- B1 : en-tête Host -----
+  const getH = (host: string, p = '/') => new Promise<{ status: number; headers: http.IncomingHttpHeaders }>((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port: PORT, path: p, method: 'GET', headers: { Host: host } }, (res) => { res.resume(); resolve({ status: res.statusCode ?? 0, headers: res.headers }); });
+    req.on('error', () => resolve({ status: 0, headers: {} }));
+    req.end();
+  });
+  check('HTTP : Host d un nom de domaine refusé (400)', (await getH('evil.example:3453')).status === 400);
+  check('HTTP : Host en IPv4 privée accepté', (await getH('192.168.1.20:3453')).status === 200);
+  const page = await getH(`127.0.0.1:${PORT}`);
+  const csp = String(page.headers['content-security-policy']);
+  check('HTTP : X-Frame-Options DENY + CSP (default-src self, connect-src ws:) sur la page', page.headers['x-frame-options'] === 'DENY' && /default-src 'self'/.test(csp) && /connect-src 'self' ws: wss:/.test(csp));
+  const evilWs = await new Promise<boolean>((resolve) => { const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { Host: 'evil.example' } }); w.on('open', () => { w.close(); resolve(false); }); w.on('error', () => resolve(true)); });
+  check('WebSocket : Host d un nom de domaine refusé', evilWs);
+
+  // ----- M3 : seau à jetons -----
+  const spam = await connect(PORT);
+  for (let i = 0; i < 1500; i++) spam.ws.send('{"type":"chat","text":"x"}'); // jamais joint : seul « join » est analysé
+  check('socket non joint qui inonde de messages : coupé', await until(() => spam.closed, 3000));
+  const J = await connect(PORT);
+  J.ws.send(JSON.stringify({ type: 'join', name: 'Flood' }));
+  await until(() => J.msgs.some((m) => m.type === 'welcome'), 2000);
+  const pid = String(J.msgs.find((m) => m.type === 'welcome')?.id);
+  for (let i = 0; i < 60; i++) { J.ws.send('{"type":"input","i":{"f":1}}'); await sleep(16); } // ~60 messages/s : légitime
+  check('60 messages/s légitimes : socket conservé', !J.closed && srv.sim().players.has(pid));
+  for (let i = 0; i < 700; i++) J.ws.send('{"type":"interact"}');
+  check('700 interact en rafale : ignorés puis socket coupé', await until(() => J.closed, 3000));
+  await sleep(200);
+  check('serveur sain après les inondations', (await info(PORT))?.game === 'jeu3d' && !srv.sim().broken && !srv.sim().players.has(pid));
+
+  // ----- M1 : secret de pseudo -----
+  const names = () => [...srv.sim().players.values()].map((p) => p.name);
+  const joinAs = async (name: string, secret?: string) => {
+    const c = await connect(PORT);
+    c.ws.send(JSON.stringify({ type: 'join', name, ...(secret ? { secret } : {}) }));
+    await until(() => c.msgs.some((m) => m.type === 'welcome'), 2000);
+    return c;
+  };
+  const A = await joinAs('Zoe', 'secret-aaaa-1111');
+  check('1er join avec secret : pseudo lié', names().includes('Zoe'));
+  A.ws.close();
+  await until(() => !names().includes('Zoe'), 2000);
+  const B = await joinAs('Zoe', 'autre-bbbb-2222');
+  check('même pseudo, autre secret (même hors ligne) : Zoe (2), compte non volé', names().includes('Zoe (2)') && !names().includes('Zoe'), names().join('|'));
+  const Bn = await joinAs('Zoe');
+  check('même pseudo, sans secret : pas le compte lié', !names().includes('Zoe'), names().join('|'));
+  const A2 = await joinAs('Zoe', 'secret-aaaa-1111');
+  check('même pseudo, bon secret : retrouve Zoe', names().includes('Zoe'), names().join('|'));
+  // compatibilité : un compte d'ancienne sauvegarde (sans lien) est lié par le premier qui le revendique
+  for (const c of [B, Bn, A2]) c.ws.close(); // 4 sockets max par adresse
+  await sleep(300);
+  const L = await joinAs('Riche7', 'legacy-cccc-3333');
+  const L2 = await joinAs('Riche7', 'voleur-dddd-4444');
+  check('ancienne sauvegarde sans lien : le premier revendique, l autre est écarté', names().includes('Riche7') && names().includes('Riche7 (2)'), names().join('|'));
+  const eco = () => srv.game().system<{ accountNames(): string[]; moneyOf(p: unknown): number }>('economy' as never)!;
+  check('compte revendiqué : argent d origine', eco().moneyOf([...srv.sim().players.values()].find((p) => p.name === 'Riche7')) === 5007);
+  for (const c of [L, L2]) c.ws.close();
+  await sleep(400);
+
+  // ----- M2 : pas d'éviction d'un compte garni par un pseudo inconnu -----
+  const clients: Client[] = [];
+  for (let i = 0; i < 10; i++) {
+    clients.push(await joinAs(`Neuf${i}`, `neuf-secret-${i}-xxxx`));
+    await sleep(60);
+  }
+  const accs = eco().accountNames();
+  check('10 pseudos inconnus : aucun des 100 comptes garnis évincé', Array.from({ length: 100 }, (_, i) => `Riche${i}`).every((n) => accs.includes(n)), `${accs.length} comptes`);
+  check('10 pseudos inconnus : plafond de comptes respecté', accs.length <= 128, String(accs.length));
+  for (const c of clients) c.ws.close();
+  await sleep(300);
+
+  // ----- Plafond de pseudos distincts par adresse -----
+  let refused = 0;
+  for (let i = 0; i < 16; i++) {
+    const c = await connect(PORT);
+    c.ws.send(JSON.stringify({ type: 'join', name: `Essai${i}` }));
+    await sleep(80);
+    if (c.msgs.some((m) => m.type === 'error' && /Trop de pseudos/.test(String(m.message)))) refused++;
+    c.ws.close();
+    await sleep(40);
+  }
+  check('plus de 12 pseudos distincts depuis une même adresse : refusés', refused >= 3, `${refused} refus`);
+
+  // ----- Les liens survivent à un redémarrage -----
+  await srv.stop();
+  const saved = JSON.parse(fs.readFileSync(path.join(saves, 'multi.json'), 'utf8')) as { claims?: Record<string, string> };
+  check('sauvegarde : les liens pseudo -> sha256(secret) sont enregistrés (jamais le secret)', !!saved.claims && /^[0-9a-f]{64}$/.test(saved.claims.Zoe ?? '') && !JSON.stringify(saved).includes('secret-aaaa-1111'));
+  srv = await startServer({ mode: 'multi', saveDir: saves, publicDir: pub, port: PORT, log: (l) => logs.push(l), joinGapMs: 0 });
+  const R = await joinAs('Zoe', 'voleur-eeee-5555');
+  check('après redémarrage : le pseudo lié reste protégé', [...srv.sim().players.values()].some((p) => /^Zoe \(\d+\)$/.test(p.name)) && ![...srv.sim().players.values()].some((p) => p.name === 'Zoe'));
+  R.ws.close();
+  await sleep(100);
+  await srv.stop();
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 async function main() {
   await partSim();
   await partServer();
+  await partSecurity();
   console.log(fails ? `\n${fails} échec(s)` : '\nToutes les vérifications passent.');
   process.exit(fails ? 1 : 0);
 }

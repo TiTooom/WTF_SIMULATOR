@@ -10,6 +10,7 @@ import { STEP } from '../shared/constants';
 import { Sim } from '../shared/sim';
 import { installGame } from '../server/game';
 import { runCommand } from '../server/commands';
+import { packMe } from '../shared/me';
 
 let fails = 0;
 const check = (ok: boolean, msg: string, detail = '') => { if (!ok) fails++; console.log(`${ok ? 'OK   ' : 'ECHEC'} ${msg}${detail ? '  — ' + detail : ''}`); };
@@ -68,7 +69,7 @@ async function pass(seconds: number) {
     if (k % 6 === 0) for (const id of ids) {
       const me = game.privateFor(sim.players.get(id)!);
       starsMax = Math.max(starsMax, me.stars);
-      meMax = Math.max(meMax, Buffer.byteLength(JSON.stringify(me)));
+      meMax = Math.max(meMax, Buffer.byteLength(JSON.stringify(packMe(me)))); // format réel du fil
     }
     if (k % snapEvery === 0) {
       const d = sim.snapshotDelta();

@@ -10,7 +10,7 @@ import { CHUNKS_PER_SIDE, CITY, getCity } from '../../shared/city/layout';
 import { DISTRICTS } from '../../shared/city/districts';
 import { DISTRICT_IDS } from '../../shared/ids';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { PartBuilder, boxGeo, boxHullMat, canvasTexture, hullGeometry, outlineMat, punch, toon, toonRaw, toonVC } from '../gfx';
+import { OCC, PartBuilder, boxGeo, boxHullMat, canvasTexture, hullGeometry, makeOccludable, outlineMat, punch, toon, toonRaw, toonVC } from '../gfx';
 
 const { CELL, ROAD, SIDEWALK, LOT, BORDER } = CITY;
 export const FOG_COLOR = 0x9fd3ff;
@@ -100,7 +100,7 @@ function buildingMaterial() {
         }`);
   };
   m.customProgramCacheKey = () => 'city-windows';
-  return m;
+  return makeOccludable(m);
 }
 
 interface Chunk { cx: number; cz: number; group: THREE.Group }
@@ -117,6 +117,11 @@ export class CityView {
   private readonly tmpDir = new THREE.Vector3();
   private readonly tmpPos = new THREE.Vector3();
   private lastAuto = 0;
+  private readonly focus = new THREE.Vector3(0, 0.6, 0);
+  /** Rayon (m) du trou estompé dans les bâtiments entre la caméra et le joueur ; 0 = désactivé. Plus grand en véhicule (≈ 6,5). */
+  occludeRadius = 5.5;
+  /** Le bâtiment qui contient la caméra devient fantôme (désactivable pour les tests). */
+  ghostInside = true;
 
   constructor(private scene: THREE.Scene) {
     scene.fog = new THREE.Fog(FOG_COLOR, FOG_NEAR, FOG_FAR);
@@ -142,16 +147,31 @@ export class CityView {
    */
   update(xOrFocus: number | readonly number[], z?: number): void {
     let x: number, zz: number;
-    if (typeof xOrFocus === 'number') { x = xOrFocus; zz = z ?? 0; } else { x = xOrFocus[0]; zz = xOrFocus[2]; }
+    let y = 0.3;
+    if (typeof xOrFocus === 'number') { x = xOrFocus; zz = z ?? 0; } else { x = xOrFocus[0]; zz = xOrFocus[2]; y = xOrFocus[1] ?? 0.3; }
     if (!Number.isFinite(x) || !Number.isFinite(zz)) return;
+    this.focus.set(x, (Number.isFinite(y) ? y : 0.3) + 0.6, zz);
     this.manual = true;
     this.setFocus(x, zz);
   }
 
+  /** Bâtiment contenant la caméra (empreinte + marge) → OCC.box ; la caméra de jeu est parfois à l'intérieur d'un immeuble haut. */
+  private insideBuilding(p: THREE.Vector3) {
+    const b = OCC.box.value;
+    b.set(0, 0, -1, -1);
+    if (!this.ghostInside) return;
+    for (const bd of getCity().buildings) {
+      if (p.y < bd.h + 0.6 && Math.abs(p.x - bd.x) < bd.w / 2 + 0.7 && Math.abs(p.z - bd.z) < bd.d / 2 + 0.7) { b.set(bd.x, bd.z, bd.w / 2 + 1, bd.d / 2 + 1); return; }
+    }
+  }
+
   private autoFollow(cam: THREE.Camera) {
     this.scrollWater();
-    if (this.manual) return;
     cam.getWorldPosition(this.tmpPos);
+    OCC.cam.value.copy(this.tmpPos);
+    this.insideBuilding(this.tmpPos);
+    if (this.manual) { OCC.foc.value.set(this.focus.x, this.focus.y, this.focus.z, this.occludeRadius); return; }
+    OCC.foc.value.set(0, 0, 0, 0); // suivi automatique : pas de joueur connu, aucun estompage
     cam.getWorldDirection(this.tmpDir);
     let t = 0;
     if (this.tmpDir.y < -0.05) t = Math.min(80, this.tmpPos.y / -this.tmpDir.y);
@@ -350,7 +370,7 @@ export class CityView {
       signs.push(quad([base[0], base[1] - 0.14 * sinA - 0.03 * cosA, base[2] + 0.14 * cosA - 0.03 * sinA], [w2 + 0.22, 0, 0], [0, (hh * 2 + 0.28) * sinA, -(hh * 2 + 0.28) * cosA], n, 15, true));
     }
     if (signs.length) {
-      const sm = new THREE.Mesh(this.own(mergeGeometries(signs)!), this.own(new THREE.MeshBasicMaterial({ map: atlas, side: THREE.DoubleSide })));
+      const sm = new THREE.Mesh(this.own(mergeGeometries(signs)!), this.own(makeOccludable(new THREE.MeshBasicMaterial({ map: atlas, side: THREE.DoubleSide }))));
       sm.frustumCulled = false;
       this.root.add(sm);
       this.signCount = signs.length / 2;
@@ -416,7 +436,7 @@ export class CityView {
     const per: typeof city.buildings[] = Array.from({ length: CHUNKS_PER_SIDE * CHUNKS_PER_SIDE }, () => []);
     for (const b of city.buildings) per[city.chunkOf(b.x, b.z).id].push(b);
     const wallMat = this.own(buildingMaterial());
-    const roofMat = this.own(toonRaw({}));
+    const roofMat = this.own(makeOccludable(toonRaw({})));
     const unit = boxGeo(1, 1, 1);
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
     for (let cz = 0; cz < CHUNKS_PER_SIDE; cz++) {
@@ -470,6 +490,7 @@ export class CityView {
 
   dispose(): void {
     this.scene.remove(this.root);
+    OCC.foc.value.set(0, 0, 0, 0); OCC.box.value.set(0, 0, -1, -1);
     for (const o of this.owned) o.dispose();
     this.owned = [];
   }

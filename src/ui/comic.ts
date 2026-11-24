@@ -495,7 +495,11 @@ let resultOpen = false;
 /** Écran de fin de mission : médaille animée, statistiques qui s'affichent une à une, gain qui monte. Clic / Espace / Entrée / Échap : fermer. */
 export function showMissionResult(r: MissionResult): Promise<void> {
   if (resultOpen) return Promise.resolve();
-  resultOpen = true;
+  resultOpen = true; // réservé tout de suite : un 2e appel pendant l'attente des planches est ignoré
+  return chain.then(() => buildResult(r)); // les planches BD de fin de mission passent d'abord, puis l'écran de résultat (jamais empilés)
+}
+
+function buildResult(r: MissionResult): Promise<void> {
   return new Promise((resolve) => {
     const tier = r.medal && r.medal in MEDAL_STYLE ? r.medal : null;
     const overlay = document.createElement('div');

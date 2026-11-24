@@ -8,7 +8,8 @@ import { CameraRig } from './camera';
 import { createChat } from './chat';
 import { Fx } from './fx';
 import { copsInSight, createHud } from './hud';
-import { buildAvatar, disposeAvatar, setAvatarState } from './models';
+import { buildAvatar, disposeAvatar, playerColor, setAvatarState } from './models';
+import { XRay } from './gfx';
 import { MarkersView } from './markers';
 import { createMinigames } from './minigames';
 import { Net } from './net';
@@ -37,6 +38,7 @@ const scene = new THREE.Scene();
 const city = buildEnvironment(scene);
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 1, 600);
 const rig = new CameraRig(camera);
+const xray = new XRay(renderer, scene, camera); // silhouettes du joueur et des coéquipiers à travers le décor
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -205,11 +207,13 @@ net.onGame = (e) => {
     if (e.ev === 'done') {
       keys.clear(); m1 = m2 = 0;
       const def = missionById(e.id);
-      void showMissionResult({
+      // « done » précède l'événement « vignettes » (planches de fin) envoyé dans le même tick : on laisse arriver les planches, qui passent d'abord
+      const result = {
         title: def?.name ?? e.id, medal: e.medal ?? null,
         stats: { ms: e.ms, damage: e.damage, accuracy: e.accuracy }, reward: e.reward,
         par: e.par ? { ms: e.par.ms, maxDamage: e.par.maxDamage, minAccuracy: e.par.minAccuracy } : undefined,
-      });
+      };
+      setTimeout(() => { void showMissionResult(result); }, 150);
     } else if (e.text) hud.toast(e.text);
   }
 };
@@ -556,8 +560,27 @@ ${L('interact')} : parler au dealer` : '');
   if (jumped || (wasDead && me.hp > 0)) rig.teleported();
   wasDead = me.hp <= 0;
   lastFocus = [focus[0], focus[2]];
-  if (!frozen) rig.update(dt, { pos: focus, veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance, vmax: VMAX[veh.type] } : undefined });
+  if (!frozen) {
+    // Les commandes du joueur influencent la caméra : intention de déplacement et curseur à pied, volant/gaz/frein à main en véhicule
+    const camBlocked = chat.isOpen() || settingsOpen || pda.isOpen() || shop.isOpen();
+    const ctl = camBlocked ? { f: 0, s: 0, hb: 0 } : { f: axis('forward', 'back'), s: axis('right', 'left'), hb: isDown('jump') ? 1 : 0 };
+    rig.update(dt, {
+      pos: focus,
+      veh: veh && vdef ? { q: veh.q, sp: veh.sp, camDistance: vdef.cam.distance, vmax: VMAX[veh.type], ctl } : undefined,
+      intent: !veh && !camBlocked ? { x: ctl.s, z: -ctl.f } : undefined,
+      cursor: !veh && !camBlocked && !m2 ? { x: (cursorX / innerWidth) * 2 - 1, y: -((cursorY / innerHeight) * 2 - 1) } : undefined,
+    });
+  }
   city.update(focus);
+  city.occludeRadius = veh ? 6.5 : 5.5;
+  xray.clear();
+  if (veh) { const vv = vehicleViews[me.veh]; if (vv) xray.add(vv.view.group, playerColor(me.name), 0.6); }
+  else { const a = avatars.get(net.id); if (a) xray.add(a, playerColor(me.name), 0.6); }
+  for (const p of s.players) {
+    if (p.id === net.id || p.veh >= 0) continue;
+    const a = avatars.get(p.id);
+    if (a) xray.add(a, playerColor(p.name), 0.35);
+  }
   markers.update(me_?.marks ?? [], dt, focus);
 
   // Visée : le curseur est projeté sur un plan horizontal à hauteur d'épaule
@@ -631,6 +654,6 @@ ${L('interact')} : parler au dealer` : '');
   }, me_);
 
   playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');
-  if (!frozen) renderer.render(scene, camera); // sous un mini-jeu plein écran, la dernière image reste affichée
+  if (!frozen) { renderer.render(scene, camera); xray.render(); } // sous un mini-jeu plein écran, la dernière image reste affichée
 }
 requestAnimationFrame(frame);

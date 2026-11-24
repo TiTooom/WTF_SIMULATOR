@@ -1,7 +1,7 @@
 // Suite « captures » (PROPRIÉTAIRE : art-toon) : rend des scènes du client dans Chrome headless (WebGL logiciel) via CDP, SANS serveur de jeu,
 // enregistre des PNG et vérifie les budgets (appels de dessin de la ville).
 // Lancement : npx tsx tests/captures.ts [dossier de sortie] [shot ...]   (Chrome : variable CHROME ou chemin Windows par défaut)
-// Shots : city city_high vehicles taxi peds avatars fx hud_edge markers markers_drive street perf hud pda_carte pda_sms comic_<image> result_<bronze|argent|or>. Saute proprement (code 0) si Chrome est introuvable.
+// Shots : city city_high vehicles taxi peds avatars fx hud_edge occluded occluded_car occluded_off occluded_xray markers markers_drive street perf hud pda_carte pda_sms comic_<image> result_<bronze|argent|or>. Saute proprement (code 0) si Chrome est introuvable.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ const DEBUG = PORT + 100;
 const out = process.argv[2] && !process.argv[2].startsWith('shot=') ? process.argv[2] : join(tmpdir(), 'gta-captures');
 const only = process.argv.slice(3);
 const COMICS = ['campus', 'docks', 'vieux_bourg', 'zone_indus', 'les_hauts', 'amphi_nuit', 'dealer', 'flic', 'medaille', 'argent'].map((c) => 'comic_' + c);
-const SHOTS = only.length ? only : ['city', 'city_high', 'vehicles', 'taxi', 'peds', 'avatars', 'street', 'markers', 'markers_drive', 'hud', 'hud_edge', 'perf', 'fx', 'pda_carte', 'pda_sms', 'comic_ruelle', 'comic_explosion', ...COMICS, 'result_or', 'result_bronze'];
+const SHOTS = only.length ? only : ['city', 'city_high', 'vehicles', 'taxi', 'peds', 'avatars', 'street', 'markers', 'markers_drive', 'hud', 'hud_edge', 'occluded', 'occluded_car', 'occluded_off', 'occluded_xray', 'perf', 'fx', 'pda_carte', 'pda_sms', 'comic_ruelle', 'comic_explosion', ...COMICS, 'result_or', 'result_bronze'];
 const CHROME = process.env.CHROME
   ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].find(existsSync);
 

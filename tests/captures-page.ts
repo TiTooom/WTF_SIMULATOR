@@ -2,12 +2,13 @@
 // Remplit window.__shot = { ready, calls, tris, cityDraw, chunks, ms, signs, geoms, tex } pour tests/captures.ts.
 // La caméra est la VRAIE `CameraRig` de src/camera.ts (mêmes angles et distances qu'en jeu).
 import * as THREE from 'three';
-import { getCity } from '../shared/city/layout';
+import { CITY, getCity } from '../shared/city/layout';
 import type { Mark, PrivateState, VehicleSnap } from '../shared/protocol';
 import { CameraRig } from '../src/camera';
 import { Fx } from '../src/fx';
 import { createHud } from '../src/hud';
-import { buildAvatar, setAvatarState } from '../src/models';
+import { buildAvatar, playerColor, setAvatarState } from '../src/models';
+import { XRay } from '../src/gfx';
 import { ProjectilesView } from '../src/projectiles';
 import { MarkersView } from '../src/markers';
 import { PedsView } from '../src/peds';
@@ -89,6 +90,26 @@ async function run3d() {
     return a;
   }
 
+  // Cas « joueur derrière un immeuble haut » : le plus haut bâtiment dont la face nord donne sur la rue ; le joueur est collé contre cette face
+  // (la caméra est au sud, l'immeuble est donc entre elle et lui). occluded = à pied, occluded_car = en voiture, occluded_off = sans aucun correctif.
+  const occ = shot.startsWith('occluded');
+  const xray = new XRay(renderer, scene, camera);
+  let occTarget: THREE.Object3D | null = null, occMate: THREE.Object3D | null = null, occFocus: [number, number, number] = [0, 0.85, 0];
+  if (occ) {
+    const cty = getCity();
+    const cand = cty.buildings.filter((b) => { const k = cty.blocks[b.block]; return k && k.kind === 'batiments' && b.z - b.d / 2 - (k.z - CITY.LOT / 2) < 4 && Math.abs(b.x) < 200 && Math.abs(b.z) < 200; }).sort((a, b) => b.h - a.h)[0];
+    const car = shot === 'occluded_car';
+    const px = cand.x, pz = cand.z - cand.d / 2 - (car ? 6 : 3.2);
+    occFocus = [px, car ? 0.45 : 0.85, pz];
+    console.log(`occluded : immeuble h=${cand.h.toFixed(1)} w=${cand.w.toFixed(1)} d=${cand.d.toFixed(1)} en (${cand.x.toFixed(1)}, ${cand.z.toFixed(1)}), joueur en (${px.toFixed(1)}, ${pz.toFixed(1)})`);
+    if (car) { driveCam(px, pz, 0); addVehicle('berline', px, pz, 0, { sp: 0 }, 2); occTarget = views[views.length - 1].group; }
+    else {
+      gameCam(px, pz);
+      const me = buildAvatar('Léa'); me.position.set(px, 0.85, pz); setAvatarState(me, 0, false); scene.add(me); occTarget = me;
+    }
+    const mate = buildAvatar('Sam'); mate.position.set(px + 9, 0.85, pz + 0.5); mate.rotation.y = 0.6; scene.add(mate); occMate = mate;
+    addVehicle('citadine', px - 9, pz, Math.PI / 2, {}, 1);
+  }
   const hud = createHud();
   const fx = new Fx(scene, { fx() {}, play() {} } as never);
   const projView = new ProjectilesView(scene, fx);
@@ -151,6 +172,8 @@ async function run3d() {
   } else if (shot === 'perf') {
     driveCam(0, 0, 25);
     for (let i = 0; i < 12; i++) addVehicle(types[i % 4], -22 + (i % 6) * 9, -8 + Math.floor(i / 6) * 9, Math.PI / 2, i % 4 === 1 ? { lv: 1 } : { sp: 2, a: [1] });
+  } else if (occ) {
+    // scène déjà posée plus haut
   } else {
     // city / hud / pda_*
     gameCam(0, 0);
@@ -182,7 +205,7 @@ async function run3d() {
     projView.update(new Float32Array([1, 2, -6, 2, 2, 8, 0, -9, 2, 1, -12, 1, 2, 7, 0, 0, 3, 0, -3, 1, 4, 0, 6, 0, 4, 0, 5, 0.6, 1, 6, 0, 0]), 1 / 30);
   }
 
-  const street = shot === 'street' ? { x: city.signPos[Math.min(8, city.signPos.length - 1)][0], z: city.signPos[Math.min(8, city.signPos.length - 1)][1] - 1 } : { x: 0, z: 0 };
+  const street = occ ? { x: occFocus[0], z: occFocus[2] } : shot === 'street' ? { x: city.signPos[Math.min(8, city.signPos.length - 1)][0], z: city.signPos[Math.min(8, city.signPos.length - 1)][1] - 1 } : { x: 0, z: 0 };
   let frames = 0;
   const t0 = performance.now();
   const loop = () => {
@@ -191,7 +214,7 @@ async function run3d() {
     if (shot === 'avatars') avatars.forEach((a, i) => { a.position.z = i < 3 || i > 5 ? ((frames * (i + 1) * 0.03) % 4) - 2 : 0; });
     if (shot === 'peds') peds.update(pedsFrame(30, 0, 0, t), 1 / 30);
     else if (shot === 'perf') peds.update(pedsFrame(160, 0, -6, t, 1.5), 1 / 30);
-    else if (shot !== 'vehicles' && shot !== 'taxi') peds.update(pedsFrame(shot === 'street' ? 14 : 40, street.x, street.z, t), 1 / 30);
+    else if (shot !== 'vehicles' && shot !== 'taxi') peds.update(pedsFrame(shot === 'street' || occ ? 8 : 40, street.x, street.z, t), 1 / 30);
     if (shot === 'city_high') city.update(0, 0);
     if (shot === 'street') city.update(street.x, street.z);
     const edge = shot === 'hud_edge';
@@ -201,7 +224,18 @@ async function run3d() {
     if (edge && frames === 2) { hud.alert('arrete', 60000); hud.toast('Livraison validée'); hud.toast('Livraison validée'); hud.toast('Arrêté par la police !'); hud.setHint('ZQSD : marcher · Espace : roulade'); }
     if (markList.length) mk.update(markList, 1 / 30, [0, 0, 0]);
     if ((shot === 'fx' || shot === 'perf') && frames < 7) fx.update(1 / 30, camera);
+    if (occ) {
+      const off = shot === 'occluded_off', xr = shot === 'occluded_xray'; // xray : sans trou, silhouette seule
+      city.occludeRadius = off || xr ? 0 : shot === 'occluded_car' ? 6.5 : 5.5;
+      city.ghostInside = !off && !xr; // off / xray : on montre le défaut brut (l'intérieur noir du bâtiment) et la silhouette seule
+      city.update(occFocus);
+      xray.clear();
+      if (!off) { if (occTarget) xray.add(occTarget, playerColor('Léa'), 0.6); if (occMate) xray.add(occMate, playerColor('Sam'), 0.35); }
+    } else if (shot === 'perf') {
+      xray.clear(); xray.add(views[0].group, 0xe63946, 0.6); xray.add(views[1].group, 0x1d8cf8, 0.35); // pire cas : 2 véhicules en silhouette
+    }
     renderer.render(scene, camera);
+    if (occ || shot === 'perf') xray.render();
     if (frames === 12) {
       info.calls = renderer.info.render.calls;
       info.tris = renderer.info.render.triangles;

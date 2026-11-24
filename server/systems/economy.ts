@@ -24,7 +24,7 @@ import { registerCommand } from '../commands';
 import type { PedsSystem } from './peds';
 
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const MAX_ACCOUNTS = 64;
+const MAX_ACCOUNTS = 128;
 const MAX_UNREAD = 60;
 const TRADE_COOLDOWN_MS = 200; // double clic : une seconde transaction du même joueur dans ce délai est ignorée
 const FREEZE_MS = 1500; // après une arrestation ou une mort, plus aucune transaction pendant ce délai (messages déjà en vol)
@@ -118,7 +118,15 @@ export const createEconomy: SystemFactory = (ctx: GameCtx): EconomySystem => {
       a = newAccount();
       if (accounts.size >= MAX_ACCOUNTS) { // purge du plus ancien compte hors ligne
         const online = new Set([...sim.players.values()].map((q) => q.name));
-        for (const k of accounts.keys()) if (!online.has(k)) { accounts.delete(k); break; }
+        // Jamais d'éviction d'un compte qui a du contenu au profit d'un pseudo inconnu : d'abord un compte vide hors ligne, sinon le plus ancien hors ligne
+        let victim: string | undefined;
+        for (const [k, acc] of accounts) {
+          if (online.has(k)) continue;
+          const empty = acc.money === START_MONEY && acc.bag.size === 0 && acc.stash.size === 0;
+          if (empty) { victim = k; break; }
+          victim ??= k;
+        }
+        if (victim !== undefined) accounts.delete(victim);
       }
       accounts.set(p.name, a);
     }

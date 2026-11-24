@@ -1,6 +1,7 @@
 // Messages échangés client <-> serveur (JSON sur WebSocket). CONTRAT : ne pas changer sans prévenir tout le monde.
 
 import type { DistrictId, GangId, GoodId, MedalTier, MinigameKind } from './ids';
+import type { WireMe } from './me';
 
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -89,7 +90,7 @@ export const PROJ_STRIDE = 8;
 export const PED_STRIDE = 6;
 
 export type ClientMsg =
-  | { type: 'join'; name: string }
+  | { type: 'join'; name: string; secret?: string } // secret : aléatoire propre au client, lie le pseudo à son compte (le serveur n'en garde que le sha256)
   | { type: 'input'; i: Input }
   | { type: 'interact' } // monter / descendre
   | { type: 'chat'; text: string }
@@ -106,7 +107,7 @@ export type ServerMsg =
   | { type: 'snap'; s: Snapshot }
   | { type: 'chat'; m: ChatMsg }
   | { type: 'error'; message: string }
-  | { type: 'me'; s: PrivateState } // état privé du joueur (10 Hz max, envoyé seulement s'il change)
+  | { type: 'me'; s: WireMe } // état privé du joueur (format compact de shared/me.ts ; 10 Hz max, envoyé seulement s'il change)
   | { type: 'game'; e: GameServerEvent }; // événement de jeu ponctuel destiné à ce joueur
 
 // ---------- Jeu : état privé, messages, événements (vague 1) ----------

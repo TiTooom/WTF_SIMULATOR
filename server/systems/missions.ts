@@ -109,7 +109,9 @@ export const createMissions: SystemFactory = (ctx: GameCtx): MissionsSystem => {
       m = new Map();
       if (progress.size >= MAX_PLAYERS_SAVED) { // purge du plus ancien joueur hors ligne
         const online = new Set([...sim.players.values()].map((q) => q.name));
-        for (const k of progress.keys()) if (!online.has(k)) { progress.delete(k); break; }
+        let victim: string | undefined; // d'abord un joueur hors ligne sans médaille, sinon le plus ancien hors ligne (jamais un compte garni pour un pseudo inconnu)
+        for (const [k, med] of progress) { if (online.has(k)) continue; if (!med.size) { victim = k; break; } victim ??= k; }
+        if (victim !== undefined) progress.delete(victim);
       }
       progress.set(name, m);
     }
