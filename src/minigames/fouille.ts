@@ -3,6 +3,7 @@
 // l'objet. Les autres tas se balaient aussi (ils sont vides : poussière et canette). Données envoyées : [tas, nombre de balayages].
 // Règle : shared/minigames/rules.ts (fouilleSpec).
 import { FOUILLE_SLOTS, fouilleSpec, rng } from '../../shared/minigames/rules';
+import { HINTS } from './help';
 import { H, INK, PAL, W, box, burst, disc, type MgFactory } from './kit';
 
 const PW = 100;
@@ -39,8 +40,12 @@ export const createFouille: MgFactory = (env) => {
         grabAt = env.now();
         env.sfx('mg_clink');
         env.finish(true, [i, swipes[i]]);
-      } else env.sfx('mg_swoosh', 0);
+      } else {
+        env.sfx('mg_swoosh', 0);
+        env.say(swipes[i] < spec.swipes ? "Pas encore : balaie d'abord !" : "Raté : clique sur l'objet doré !");
+      }
     },
+    hint: () => ({ x: px(spec.slot) + PW / 2, y: PY + PH * 0.5, r: 85, text: swipes[spec.slot] >= spec.swipes ? HINTS.fouille_objet : HINTS.fouille_balai }),
     probe: () => ({ x: px(spec.slot) + PW / 2, left: px(spec.slot), y: PY + PH * 0.55, swipes: swipes[spec.slot] }),
     // Les balayages se comptent à chaque mouvement de souris (pas par image) : robuste aux machines lentes
     onMove(cx, cy) {
@@ -56,6 +61,7 @@ export const createFouille: MgFactory = (env) => {
         acc[i] = Math.sign(acc[i]) === sg ? acc[i] + dx : dx;
         if (Math.abs(acc[i]) >= SWIPE_PX && sg !== lastDir[i]) {
           swipes[i]++;
+          if (i === spec.slot) env.progress();
           lastDir[i] = sg;
           acc[i] = 0;
           env.sfx('mg_swoosh', swipes[i]);

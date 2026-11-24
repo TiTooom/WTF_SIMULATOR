@@ -1,7 +1,9 @@
 // PROPRIÉTAIRE : game-minigames
-// Dosage : 3 bouteilles. Maintenir le clic gauche pour remplir la bouteille courante, relâcher pile sur la ligne rouge ; trop haut = débordement.
+// Dosage : 3 bouteilles. Maintenir le clic gauche pour remplir la bouteille courante, relâcher pile sur la ligne rouge ; trop haut = débordement,
+// la bouteille se vide et on la refait (temps illimité, pas d'échec définitif).
 // Données envoyées : [niveau des 3 bouteilles (0..1)]. Règle : shared/minigames/rules.ts (dosageSpec, DOSAGE_FILL_RATE).
 import { DOSAGE_BOTTLES, DOSAGE_CLIENT_RATE, dosageSpec } from '../../shared/minigames/rules';
+import { HINTS } from './help';
 import { H, INK, PAL, W, box, burst, googly, sweat, type MgFactory } from './kit';
 
 const BW = 90;
@@ -18,22 +20,30 @@ export const createDosage: MgFactory = (env) => {
   const levelNow = () => (filling ? Math.min(1.05, ((env.now() - fillAt) / 1000) * DOSAGE_CLIENT_RATE) : level);
   let done = false;
   let bad = -1;
+  let retryAt = 0; // la bouteille ratée se vide à cet instant, puis on la refait
   let badAt = 0;
   let tick = 0;
   let flash = 0;
 
-  const fail = (t: number) => {
-    done = true;
+  const fail = (t: number, msg: string) => {
     bad = levels.length;
     badAt = t;
+    retryAt = t + 900;
+    filling = false;
     env.sfx('mg_splash');
-    env.finish(false);
+    env.say(msg);
   };
 
   return {
+    hint() {
+      const ci = Math.min(levels.length, DOSAGE_BOTTLES - 1);
+      return filling
+        ? { x: XS[ci], y: BY - spec.targets[ci] * BH, r: 62, text: HINTS.dosage_ligne }
+        : { x: XS[ci], y: BY - BH / 2, r: 78, text: HINTS.dosage_clic };
+    },
     probe: () => ({ level: levelNow(), filling: filling ? 1 : 0, bottle: levels.length }),
     onDown(btn) {
-      if (btn !== 0 || done || levels.length >= DOSAGE_BOTTLES) return;
+      if (btn !== 0 || done || retryAt || levels.length >= DOSAGE_BOTTLES) return;
       filling = true;
       fillAt = env.now();
       level = 0;
@@ -41,12 +51,14 @@ export const createDosage: MgFactory = (env) => {
       env.sfx('mg_push');
     },
     onUp(btn) {
-      if (btn !== 0 || done || !filling) return;
+      if (btn !== 0 || done || retryAt || !filling) return;
       level = Math.min(1, levelNow()); // niveau exact à l'instant du relâchement, quelle que soit la cadence d'affichage
       filling = false;
       const i = levels.length;
-      if (level < 0.03 || Math.abs(level - spec.targets[i]) > spec.tol) { fail(env.now()); return; }
+      if (level < 0.03) { level = 0; return; } // simple clic : on ne compte pas
+      if (Math.abs(level - spec.targets[i]) > spec.tol) { fail(env.now(), level < spec.targets[i] ? 'Pas assez rempli !' : 'Trop haut !'); return; }
       levels.push(Math.round(level * 10000) / 10000);
+      env.progress();
       flash = 0.3;
       env.sfx('mg_ding');
       level = 0;
@@ -54,11 +66,12 @@ export const createDosage: MgFactory = (env) => {
     },
     update(dt) {
       flash = Math.max(0, flash - dt);
+      if (retryAt && env.now() >= retryAt) { retryAt = 0; bad = -1; level = 0; }
       if (done || !filling) return;
       level = levelNow();
       const k = Math.floor(level * 10);
       if (k > tick) { tick = k; env.sfx('mg_glug', k); }
-      if (level > 1) { level = 1; filling = false; fail(env.now()); }
+      if (level > 1) { level = 1; fail(env.now(), 'Ça déborde !'); }
     },
     draw(g, t) {
       box(g, 30, 40, W - 60, H - 70, PAL.paper, 22);

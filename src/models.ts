@@ -1,14 +1,18 @@
 import * as THREE from 'three';
-import { PartBuilder, outlined, outlineMat, toonVC } from './gfx';
+import { PartBuilder, outlined, outlineMat, toonRaw, toonVC } from './gfx';
 
 // Modèles communs. Les véhicules sont dans src/vehicles/, les props dans src/props.ts, les piétons dans src/peds.ts.
 
 // ---------- Personnage joueur ----------
 /**
  * États d'animation (PlayerSnap.an). 0 = au repos / marche / course (déduit de la vitesse réelle du modèle), 1 = arrêté (mains en l'air),
- * 2 = roulade (le jeu fait tourner le groupe en x ; le modèle se met en boule), 3 = K.O. (allongé sur le dos). Toute autre valeur = 0.
+ * 2 = roulade (le jeu fait tourner le groupe en x ; le modèle se met en boule), 3 = K.O. (allongé sur le dos),
+ * 5 = caché dans une cachette (haie, benne, abri) : le personnage rapetisse et devient semi-transparent. Toute autre valeur = 0.
  */
-export const AN = { NORMAL: 0, BUSTED: 1, ROLL: 2, KO: 3 } as const;
+export const AN = { NORMAL: 0, BUSTED: 1, ROLL: 2, KO: 3, HIDDEN: 5 } as const;
+
+/** Matériau « caché » PARTAGÉ (copie transparente de toonVC) : les avatars y basculent sans jamais modifier toonVC, puis reviennent à toonVC. */
+export const ghostVC = toonRaw({ vertexColors: true, transparent: true, opacity: 0.55, depthWrite: false });
 
 const PLAYER_COLORS = [0xe63946, 0x1d8cf8, 0xffd23f, 0x2ec4b6, 0xff7a1a, 0xb15cff, 0xff5fa2, 0x7bd62b, 0x00c2e0, 0xf2f2f2, 0xff9f1c, 0x3a86ff];
 const PANTS_COLORS = [0x2b3a67, 0x3d3d4d, 0x5c3d2e, 0x1f4d3a, 0x4a3a6a, 0x6b5a3a];
@@ -38,6 +42,9 @@ interface Rig {
   lastX: number; lastZ: number; lastT: number;
   speed: number; phase: number; ko: number; busted: number; roll: number;
   an: number;
+  hide: number; // 0..1 : fondu vers l'état caché
+  hidden: boolean; // matériaux fantômes appliqués
+  parts: THREE.Mesh[]; // maillages colorés (hors contours)
 }
 
 const FEET = -0.85; // les pieds sont à 0,85 m sous le centre du corps physique (capsule de 1,7 m)
@@ -125,8 +132,9 @@ export function buildAvatar(name: string): THREE.Group {
   g.add(sprite);
 
   const rig: Rig = {
-    body, torso, head, armL, armR, legL, legR, sprite, lastX: NaN, lastZ: NaN, lastT: 0, speed: 0, phase: 0, ko: 0, busted: 0, roll: 0, an: 0,
+    body, torso, head, armL, armR, legL, legR, sprite, lastX: NaN, lastZ: NaN, lastT: 0, speed: 0, phase: 0, ko: 0, busted: 0, roll: 0, an: 0, hide: 0, hidden: false, parts: [],
   };
+  g.traverse((o) => { if (o instanceof THREE.Mesh && o.material === toonVC) rig.parts.push(o); });
   g.userData.rig = rig;
   // L'animation se joue pendant la mise à jour des matrices (une fois par image, juste avant le rendu) : main.ts n'a rien d'autre à appeler.
   const base = g.updateMatrixWorld.bind(g);
@@ -145,7 +153,17 @@ export function setAvatarState(g: THREE.Group, an: number | undefined, showName 
   const rig = g.userData.rig as Rig | undefined;
   if (!rig) return;
   rig.an = an ?? 0;
-  rig.sprite.visible = showName;
+  rig.sprite.visible = showName && rig.an !== AN.HIDDEN;
+}
+
+/** Bascule les matériaux d'un avatar (normal <-> fantôme) ; les contours se masquent quand il est caché. Toujours revenir à toonVC. */
+function applyHidden(r: Rig, hidden: boolean) {
+  if (r.hidden === hidden) return;
+  r.hidden = hidden;
+  for (const m of r.parts) {
+    m.material = hidden ? ghostVC : toonVC;
+    for (const c of m.children) if ((c as THREE.Mesh).material === outlineMat) c.visible = !hidden;
+  }
 }
 
 const lerpTo = (a: number, b: number, k: number) => a + (b - a) * Math.min(1, k);
@@ -167,6 +185,10 @@ function animate(g: THREE.Group, r: Rig) {
   r.ko = lerpTo(r.ko, r.an === AN.KO ? 1 : 0, k);
   r.busted = lerpTo(r.busted, r.an === AN.BUSTED ? 1 : 0, k);
   r.roll = lerpTo(r.roll, rolling ? 1 : 0, k * 1.5);
+  r.hide = lerpTo(r.hide, r.an === AN.HIDDEN ? 1 : 0, k * 0.8);
+  applyHidden(r, r.hide > 0.05);
+  const hs = 1 - 0.3 * r.hide; // rapetisse dans la cachette
+  r.body.scale.setScalar(hs);
   const moving = Math.min(1, r.speed / 1.5);
   const run = Math.min(1, Math.max(0, (r.speed - 4) / 2));
   r.phase += dt * (6 + r.speed * 1.5);
@@ -194,7 +216,7 @@ export function disposeAvatar(g: THREE.Group) {
     if (o instanceof THREE.Sprite) {
       o.material.map?.dispose();
       o.material.dispose();
-    } else if (o instanceof THREE.Mesh && (o.material === toonVC || o.material === outlineMat)) {
+    } else if (o instanceof THREE.Mesh && (o.material === toonVC || o.material === ghostVC || o.material === outlineMat)) {
       o.geometry.dispose();
     }
   });

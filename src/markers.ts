@@ -13,7 +13,7 @@
 // Types acceptés : ceux de `Mark['k']` + 'cp' (point de passage), 'flic', 'activite' (si le serveur les ajoute).
 import * as THREE from 'three';
 import type { Mark } from '../shared/protocol';
-import { hullGeometry, outlineMat, toon } from './gfx';
+import { boxHullMat, hullGeometry, makeOccludable, outlineMat, toon, toonRaw } from './gfx';
 
 export type MarkKind = Mark['k'] | 'cp' | 'flic' | 'activite';
 export const MARK_COLORS: Record<MarkKind, number> = {
@@ -175,8 +175,9 @@ export class MarkersView {
           let px = (0.5 + ex * 0.5) * W, py = (0.5 - ey * 0.5) * H;
           // Évite le bloc mini-carte / étoiles (bas droite) : on décale vers la gauche ou vers le haut, le plus court
           if (px > W - 240 && py > H - 400) { if (px - (W - 245) < py - (H - 405)) px = W - 245; else py = H - 405; }
-          // Évite aussi le panneau de mission (haut centre)
-          if (py < 140 && Math.abs(px - W / 2) < 280) { px = W / 2 + (px < W / 2 ? -280 : 280); py += 36 * pushed++; } // décalées de côté, empilées si plusieurs
+          // Évite aussi l'objectif (haut gauche) et le panneau de guidage / les bandeaux (haut centre)
+          if (py < 130 && px < 370) py = 130 + 36 * pushed++;
+          else if (py < 140 && Math.abs(px - W / 2) < 300) { px = W / 2 + (px < W / 2 ? -300 : 300); py += 36 * pushed++; } // décalées de côté, empilées si plusieurs
           s.arrow.style.left = `${px}px`;
           s.arrow.style.top = `${py}px`;
           s.tri.style.display = '';
@@ -204,4 +205,157 @@ export class MarkersView {
     for (const m of this.mats.values()) { m.ring.dispose(); m.beam.dispose(); }
     this.mats.clear();
   }
+}
+
+// ---------- Cachettes et champs de vision (vague « furtivité ») ----------
+/** Une cachette (liste fournie par `shared/hiding.ts`) : centre (x, z), rayon de la zone (m) et type d'abri. */
+export interface HidingSpotView { x: number; z: number; r: number; kind: 'haie' | 'buisson' | 'benne' | 'abri' | string }
+/** Cône de vision d'un flic ou d'une caméra : sommet (x, z), cap (même convention que le yaw des joueurs : avant = (−sin, −cos)), portée (m) et ouverture TOTALE (rad). */
+export interface VisionCone { x: number; z: number; yaw: number; range: number; fov: number; kind?: 'cop' | 'camera' | string }
+
+const HIDE_MAX = 100;
+const hash2 = (x: number, z: number) => { const h = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453; return h - Math.floor(h); };
+
+/**
+ * Cachettes instanciées (≤ 100) : haies/buissons (verts), bennes (bleu), abris (bois + toit), chacune avec un anneau vert clair au sol
+ * (zone où l'on est caché, lisible de dessus). 4 appels de dessin au plus (corps, contours des boîtes, buissons, anneaux), aucun asset.
+ * `update(spots, focus?)` : peut être appelé chaque image (rien n'est réécrit si la liste est identique) ; `focus` = [x, z] limite
+ * l'affichage aux cachettes à moins de 160 m. Les corps s'estompent (dithering) devant le joueur comme les bâtiments.
+ */
+export class HidingView {
+  readonly group = new THREE.Group();
+  private readonly boxes: THREE.InstancedMesh;
+  private readonly hulls: THREE.InstancedMesh;
+  private readonly balls: THREE.InstancedMesh;
+  private readonly rings: THREE.InstancedMesh;
+  private sig = '';
+  private readonly m = new THREE.Matrix4();
+  private readonly q = new THREE.Quaternion();
+  private readonly e = new THREE.Euler();
+  private readonly p = new THREE.Vector3();
+  private readonly s = new THREE.Vector3();
+  private readonly c = new THREE.Color();
+  /** Nombre de cachettes affichées. */
+  count = 0;
+
+  constructor(scene: THREE.Scene) {
+    this.boxes = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), makeOccludable(toonRaw({})), HIDE_MAX * 2);
+    this.hulls = new THREE.InstancedMesh(this.boxes.geometry, boxHullMat, HIDE_MAX * 2);
+    this.hulls.instanceMatrix = this.boxes.instanceMatrix;
+    this.balls = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1), makeOccludable(toonRaw({})), HIDE_MAX);
+    const ringGeo = new THREE.RingGeometry(0.8, 1, 28).rotateX(-Math.PI / 2);
+    this.rings = new THREE.InstancedMesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xb6f36a, transparent: true, opacity: 0.6, depthWrite: false, fog: false }), HIDE_MAX);
+    for (const o of [this.boxes, this.hulls, this.balls, this.rings]) { o.count = 0; o.frustumCulled = false; this.group.add(o); }
+    this.rings.renderOrder = 2;
+    scene.add(this.group);
+  }
+
+  update(spots: readonly HidingSpotView[], focus?: readonly [number, number], radius = 160): void {
+    const list: HidingSpotView[] = [];
+    for (const s of spots) {
+      if (list.length >= HIDE_MAX) break;
+      if (!Number.isFinite(s.x) || !Number.isFinite(s.z) || !(s.r > 0)) continue;
+      if (focus && Math.hypot(s.x - focus[0], s.z - focus[1]) > radius) continue;
+      list.push(s);
+    }
+    const sig = list.map((s) => `${s.x | 0},${s.z | 0},${s.r.toFixed(1)},${s.kind}`).join(';');
+    if (sig === this.sig) return;
+    this.sig = sig;
+    this.count = list.length;
+    let nb = 0, nl = 0, nr = 0;
+    const put = (mesh: THREE.InstancedMesh, i: number, x: number, y: number, z: number, ry: number, sx: number, sy: number, sz: number, color?: number) => {
+      this.p.set(x, y, z); this.q.setFromEuler(this.e.set(0, ry, 0)); this.s.set(sx, sy, sz);
+      mesh.setMatrixAt(i, this.m.compose(this.p, this.q, this.s));
+      if (color !== undefined) mesh.setColorAt(i, this.c.setHex(color));
+    };
+    for (const s of list) {
+      const j = hash2(s.x, s.z);
+      const ry = Math.floor(j * 4) * (Math.PI / 2) + (s.kind === 'haie' ? 0 : (j - 0.5) * 0.4);
+      const green = [0x3fae49, 0x2f9e44, 0x56c25a, 0x37a05c][Math.floor(j * 4) % 4];
+      put(this.rings, nr++, s.x, 0.05, s.z, 0, s.r, 1, s.r, 0xffffff);
+      if (s.kind === 'benne') {
+        put(this.boxes, nb++, s.x, 0.8, s.z, ry, s.r * 1.5, 1.6, s.r * 0.85, 0x2f80ed);
+        put(this.boxes, nb++, s.x, 1.65, s.z, ry, s.r * 1.6, 0.14, s.r * 0.95, 0x1f4f99);
+      } else if (s.kind === 'abri') {
+        put(this.boxes, nb++, s.x, 1.1, s.z, ry, s.r * 1.4, 2.2, s.r * 1.2, 0xd9a85b);
+        put(this.boxes, nb++, s.x, 2.35, s.z, ry, s.r * 1.8, 0.3, s.r * 1.6, 0xb5433a);
+      } else if (s.kind === 'haie') {
+        put(this.boxes, nb++, s.x, 0.6, s.z, ry, s.r * 1.9, 1.2, Math.max(0.8, s.r * 0.6), green);
+      } else {
+        put(this.balls, nl++, s.x, s.r * 0.35, s.z, ry, s.r * 0.85, s.r * 0.6 + 0.3, s.r * 0.85, green);
+      }
+    }
+    this.boxes.count = this.hulls.count = nb; this.balls.count = nl; this.rings.count = nr;
+    for (const o of [this.boxes, this.balls, this.rings]) {
+      o.instanceMatrix.needsUpdate = true;
+      if (o.instanceColor) o.instanceColor.needsUpdate = true;
+    }
+  }
+
+  setVisible(v: boolean): void { this.group.visible = v; }
+  dispose(): void {
+    this.group.removeFromParent();
+    for (const o of [this.boxes, this.balls, this.rings]) { o.dispose(); (o.material as THREE.Material).dispose(); }
+    this.balls.geometry.dispose(); this.boxes.geometry.dispose(); this.rings.geometry.dispose();
+  }
+}
+
+const CONE_MAX = 24;
+const CONE_HALF = 0.9; // demi-angle (rad) du maillage unitaire
+/**
+ * Champs de vision des flics et des caméras : UN InstancedMesh de secteurs plats translucides posés au sol (rouge : flic, orange : caméra),
+ * uniquement ceux à moins de 60 m du joueur (`focus`). À alimenter chaque image avec les cônes calculés par `shared/hiding.ts` (`copCameraCones`).
+ * `setVisible(false)` les masque (option « afficher les champs de vision »). Un seul appel de dessin, aucun asset.
+ */
+export class VisionConesView {
+  readonly mesh: THREE.InstancedMesh;
+  private on = true;
+  private readonly m = new THREE.Matrix4();
+  private readonly q = new THREE.Quaternion();
+  private readonly e = new THREE.Euler();
+  private readonly p = new THREE.Vector3();
+  private readonly s = new THREE.Vector3();
+  private readonly c = new THREE.Color();
+  /** Nombre de cônes dessinés à la dernière mise à jour. */
+  count = 0;
+
+  constructor(scene: THREE.Scene) {
+    const N = 10, pos: number[] = [];
+    for (let i = 0; i < N; i++) {
+      const a = -CONE_HALF + (2 * CONE_HALF * i) / N, b = -CONE_HALF + (2 * CONE_HALF * (i + 1)) / N;
+      pos.push(0, 0, 0, Math.sin(a), 0, -Math.cos(a), Math.sin(b), 0, -Math.cos(b));
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide, fog: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+    this.mesh = new THREE.InstancedMesh(geo, mat, CONE_MAX);
+    this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = 3;
+    scene.add(this.mesh);
+  }
+
+  /** `cones` : tous les cônes connus ; `focus` : [x, z] du joueur ; seuls ceux dont le sommet est à moins de `radius` m (plus la moitié de leur portée) sont dessinés. */
+  update(cones: readonly VisionCone[], focus: readonly [number, number], radius = 60): void {
+    let n = 0;
+    if (this.on) {
+      for (const k of cones) {
+        if (n >= CONE_MAX) break;
+        if (!Number.isFinite(k.x + k.z + k.yaw + k.range + k.fov) || k.range <= 0) continue;
+        if (Math.hypot(k.x - focus[0], k.z - focus[1]) > radius + k.range * 0.5) continue;
+        const sx = Math.sin(Math.min(Math.PI * 0.95, Math.max(0.1, k.fov)) / 2) / Math.sin(CONE_HALF);
+        this.p.set(k.x, 0.07, k.z); this.q.setFromEuler(this.e.set(0, k.yaw, 0)); this.s.set(k.range * sx, 1, k.range);
+        this.mesh.setMatrixAt(n, this.m.compose(this.p, this.q, this.s));
+        this.mesh.setColorAt(n, this.c.setHex(k.kind === 'camera' ? 0xff8c1a : 0xff2a2a));
+        n++;
+      }
+    }
+    this.count = n;
+    this.mesh.count = n;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
+
+  /** Afficher / cacher les champs de vision (option du joueur). */
+  setVisible(v: boolean): void { this.on = v; if (!v) { this.mesh.count = 0; this.count = 0; } }
+  get visible(): boolean { return this.on; }
+  dispose(): void { this.mesh.removeFromParent(); this.mesh.geometry.dispose(); (this.mesh.material as THREE.Material).dispose(); this.mesh.dispose(); }
 }

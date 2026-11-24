@@ -8,7 +8,7 @@ import type { GameServerEvent } from '../shared/protocol';
 import { Sim } from '../shared/sim';
 import { VEHICLE_POOL } from '../shared/constants';
 import {
-  addCrime, copDestroyed, copsWanted, COPS_PER_STAR_DROP, CRIME_HEAT, heatOfStars, newWanted, starProgress, starsOf, tickWanted, UNSEEN_DELAY_S, BUST_MONEY_LOSS,
+  addCrime, copDestroyed, copsWanted, COPS_PER_STAR_DROP, CRIME_HEAT, heatOfStars, newWanted, starProgress, starsOf, tickWanted, LOSE_DELAY_S, copSpeed, PLAYER_TOP_SPEED, BUST_MONEY_LOSS,
 } from '../shared/wanted';
 import { CRIME_KINDS } from '../shared/ids';
 import { createPeds, type PedsSystem } from '../server/systems/peds';
@@ -34,18 +34,28 @@ const city = getCity();
     while (starsOf(w.heat) === s && n < 10) { w = copDestroyed(w); n++; }
     ok(n === COPS_PER_STAR_DROP && starsOf(w.heat) === s - 1, `${s} étoiles : ${COPS_PER_STAR_DROP} voitures détruites -> ${s - 1} étoile(s)`);
   }
-  w = { heat: heatOfStars(3), kills: 0, calm: 0 };
-  for (let i = 0; i < 20000; i++) w = tickWanted(w, 0.05, false); // 1000 s sans être vu, loin de tout : 3 étoiles ne s'évaporent PAS
-  ok(starsOf(w.heat) === 3, 'fuir longtemps ne fait pas perdre 3 étoiles');
-  w = { heat: heatOfStars(1) + 2, kills: 0, calm: 0 };
-  for (let i = 0; i < (UNSEEN_DELAY_S - 1) * 20; i++) w = tickWanted(w, 0.05, false);
-  ok(starsOf(w.heat) === 1, 'rien ne se passe avant le délai');
-  for (let i = 0; i < 20 * 300; i++) w = tickWanted(w, 0.05, false);
-  ok(starsOf(w.heat) === 0, '1 étoile s\'évapore très lentement si aucun flic ne voit le joueur');
-  const seen = tickWanted({ heat: 20, kills: 0, calm: 40 }, 1, true);
+  // Se faire oublier : une étoile tombe après le délai de son palier, puis la suivante, jusqu'à 0
+  for (let st = 1; st <= 5; st++) {
+    w = { heat: heatOfStars(st) + 1, kills: 0, calm: 0 };
+    let t = 0;
+    while (starsOf(w.heat) === st && t < 200) { w = tickWanted(w, 0.05, false); t += 0.05; }
+    ok(Math.abs(t - LOSE_DELAY_S[st - 1]) < 0.2 && starsOf(w.heat) === st - 1, `${st} étoile(s) non vu(es) : une étoile tombe après ${t.toFixed(1)} s (attendu ${LOSE_DELAY_S[st - 1]} s)`);
+  }
+  w = { heat: heatOfStars(5), kills: 0, calm: 0 };
+  for (let i = 0; i < 20 * 200; i++) w = tickWanted(w, 0.05, false);
+  ok(w.heat === 0, 'non vu assez longtemps (98 s au total depuis 5 étoiles) : plus aucune étoile');
+  w = { heat: heatOfStars(2) + 1, kills: 0, calm: 0 };
+  for (let i = 0; i < 20 * (LOSE_DELAY_S[1] - 1); i++) w = tickWanted(w, 0.05, false);
+  ok(starsOf(w.heat) === 2, 'rien ne se passe avant le délai');
+  w = tickWanted(w, 0.2, true);
+  ok(w.calm === 0, 'être revu remet le compteur à zéro');
+  for (let i = 0; i < 20 * (LOSE_DELAY_S[1] - 1); i++) w = tickWanted(w, 0.05, false);
+  ok(starsOf(w.heat) === 2, 'après avoir été revu, le délai complet repart');
+  ok(copSpeed(2) < PLAYER_TOP_SPEED && [1, 2, 3, 4].every((s) => copSpeed(s) < PLAYER_TOP_SPEED) && copSpeed(5) <= PLAYER_TOP_SPEED, 'la police est plus lente que la citadine aux étoiles basses');
+  const seen = tickWanted({ heat: 20, kills: 0, calm: 5 }, 1, true);
   ok(seen.calm === 0 && seen.heat === 20, 'être vu remet le compteur à zéro');
   ok(starProgress(0) === 0 && starProgress(heatOfStars(2)) === 0 && starProgress(5) === 0.5, 'starProgress cohérent');
-  ok(copsWanted(0) === 0 && copsWanted(5) <= POLICE_POOL_MAX && copsWanted(5) > copsWanted(1) && BUST_MONEY_LOSS > 0, 'copsWanted croît et reste ≤ pool');
+  ok(copsWanted(0) === 0 && copsWanted(1) === 1 && copsWanted(2) === 2 && copsWanted(3) === 3 && copsWanted(4) === 4 && copsWanted(5) === 6 && copsWanted(5) <= POLICE_POOL_MAX && BUST_MONEY_LOSS > 0, 'effectifs : 1, 2, 3, 4, 6 voitures (≤ pool)');
 }
 
 // ---------- Systèmes ----------
@@ -174,11 +184,12 @@ async function main() {
     bus.emit('debug', { p: a, what: 'stars', arg: '5' });
     bus.emit('debug', { p: b, what: 'stars', arg: '5' });
     let maxAlive = 0, maxMine = 0, minDist = Infinity, tot = 0, n = 0;
-    for (let i = 0; i < 60 * 70; i++) {
+    for (let i = 0; i < 60 * 90; i++) {
       sim.step(); peds.postStep?.();
       const t0 = performance.now(); police.postStep?.(); tot += performance.now() - t0; n++;
       maxAlive = Math.max(maxAlive, policeAlive());
       maxMine = Math.max(maxMine, police.carCount);
+      if (i % 300 === 0) { bus.emit('debug', { p: a, what: 'stars', arg: '5' }); bus.emit('debug', { p: b, what: 'stars', arg: '5' }); } // la furtivité ferait sinon baisser l'indice
       if (i % 30 === 0) {
         const pa = sim.playerPos(a);
         for (const m of priv('a').marks) minDist = Math.min(minDist, Math.hypot(m.x - pa[0], m.z - pa[2]));

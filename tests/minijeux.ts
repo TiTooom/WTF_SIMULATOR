@@ -1,8 +1,9 @@
 // PROPRIÉTAIRE : game-minigames
 // Suite « minijeux » : npx tsx tests/minijeux.ts
 // Système serveur testé sur un vrai Sim (temps de simulation = 60 pas/s), sans réseau ni port : le contexte de jeu est reconstitué à la main.
-// Couvre : résultat trop rapide refusé, sid inconnu/rejoué/d'un autre joueur ignoré, annulation (éloignement, touché, mort, expiration),
-// un seul mini-jeu actif par joueur, validations déterministes par graine pour les 8 jeux, parseGameMsg, serialize sans session.
+// Couvre : résultat trop rapide refusé, sid inconnu/rejoué/d'un autre joueur ignoré, annulation (éloignement, touché, mort), TEMPS ILLIMITÉ (une partie
+// de 9 s ou de plus d'une minute est valide ; seul le garde-fou de 10 min clôt une session fantôme), ABANDON sans punition (ni alarme de vol),
+// un seul mini-jeu actif par joueur, validations déterministes par graine pour les 8 jeux, parseGameMsg, serialize sans session, consignes (help.ts).
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Sim } from '../shared/sim';
@@ -10,10 +11,11 @@ import { GameBus, parseGameMsg, type GameCtx, type GameSystem } from '../shared/
 import { getCity } from '../shared/city/layout';
 import { MINIGAME_KINDS, type MinigameKind } from '../shared/ids';
 import {
-  DIGI_COLS, DOSAGE_CLIENT_RATE, RULES, briseGlaceSpec, courtCircuitSpec, desamorcageSpec, digicodePos, digicodeSpec, dosageSpec, fouilleSpec, liassesSpec, rng, tournevisSpec,
+  ABANDON_MARK, DIGI_COLS, DOSAGE_CLIENT_RATE, DOSAGE_FILL_RATE, MS_CAP, RULES, SESSION_GUARD_MS, briseGlaceSpec, courtCircuitSpec, desamorcageSpec, digicodePos, digicodeSpec, dosageSpec, fouilleSpec, liassesSpec, rng, tournevisSpec,
 } from '../shared/minigames/rules';
 import type { GameServerEvent, MinigameResult } from '../shared/protocol';
-import { TTL_MARGIN_MS, createMinigames, type MinigameDone, type MinigamesSystem } from '../server/systems/minigames';
+import { helpFor, dejaVu, marquerVu } from '../src/minigames/help';
+import { createMinigames, type MinigameDone, type MinigamesSystem } from '../server/systems/minigames';
 import { THEFT_PROFILE, createTheft, profileOf } from '../server/systems/theft';
 
 let fails = 0;
@@ -89,7 +91,7 @@ async function main() {
   reset();
   const sid1 = mg.startMinigame(p1, 'desamorcage', 'test', 0.5, undefined, 777);
   check('startMinigame renvoie un sid et émet mg_start', typeof sid1 === 'number' && starts().length === 1 && starts()[0].sid === sid1 && starts()[0].seed === 777 && starts()[0].kind === 'desamorcage');
-  check('mg_start annonce maxMs de la règle', starts()[0].maxMs === RULES.desamorcage.maxMs);
+  check('mg_start n\'annonce plus de durée de jeu : seulement le garde-fou (10 min)', starts()[0].maxMs === SESSION_GUARD_MS && !('maxMs' in RULES.desamorcage));
   check('un seul mini-jeu actif par joueur', mg.startMinigame(p1, 'digicode', 'bis', 0.5) === null && starts().length === 1 && mg.activeOf(p1)?.sid === sid1);
   check('un autre joueur peut jouer en même temps', typeof mg.startMinigame(p2, 'fouille', 'p2', 0.2) === 'number');
   check('un kind inconnu est refusé', mg.startMinigame(p1, 'nimporte' as MinigameKind, 'x', 0) === null);
@@ -173,7 +175,18 @@ async function main() {
       return RULES.digicode.validate(11, 0.5, { sid: 1, ok: true, ms: h.ms, data: h.data }) && !RULES.digicode.validate(12, 0.5, { sid: 1, ok: true, ms: h.ms, data: h.data });
     })());
     check('ok=false ne valide jamais', MINIGAME_KINDS.every((k) => { const h = honest(k, 5, 0.5); return !RULES[k].validate(5, 0.5, { sid: 1, ok: false, ms: h.ms, data: h.data }); }));
-    check('durées < 4,5 s et minMs < maxMs', MINIGAME_KINDS.every((k) => RULES[k].minMs < RULES[k].maxMs && RULES[k].maxMs <= 4500));
+    check('aucune durée maximale dans les règles, minMs plausible conservé', MINIGAME_KINDS.every((k) => !('maxMs' in RULES[k]) && RULES[k].minMs >= 600 && RULES[k].minMs <= 2000));
+    check('digicode : une partie de plus d\'une minute reste valide (ms plafonné à MS_CAP)', (() => {
+      const s = digicodeSpec(31, 0.4);
+      const stops: number[] = [];
+      let t = 70_000;
+      for (let i = 0; i < DIGI_COLS; i++) {
+        while (Math.abs(digicodePos(s.cols[i], t) - s.cols[i].center) > s.cols[i].half * 0.5) t += 5;
+        stops.push(t);
+        t += 150;
+      }
+      return RULES.digicode.validate(31, 0.4, { sid: 1, ok: true, ms: MS_CAP, data: stops }) && !RULES.digicode.validate(31, 0.4, { sid: 1, ok: true, ms: 5000, data: stops });
+    })());
   }
 
   // ---- 5. annulations ----
@@ -198,9 +211,37 @@ async function main() {
   check('mourir annule', ends().length === 1 && !ends()[0].ok && (dones[0]?.reason === 'mort'), dones[0]?.reason);
   step(6000); // respawn
   reset();
-  const sidC = mg.startMinigame(p2, 'brise_glace', 'exp', 0.3)!;
-  step(RULES.brise_glace.maxMs + 2000);
-  check('session expirée (ttl) : fin automatique en échec', ends('p2').some((e) => e.sid === sidC && !e.ok) && mg.activeOf(p2) === null);
+  mg.cancel(p2); // la session « fouille » du début de test n'expire plus toute seule (temps illimité)
+  reset();
+  const sidC = mg.startMinigame(p2, 'brise_glace', 'exp', 0.3, undefined, 4242)!;
+  step(9000);
+  check('temps illimité : encore ouverte après 9 s (plus d\'expiration à 4,5 s)', ends('p2').length === 0 && mg.activeOf(p2)?.sid === sidC);
+  send('p2', { sid: sidC, ok: true, ms: 8900, data: honest('brise_glace', 4242, 0.3).data });
+  check('temps illimité : une réussite après 9 s est acceptée', ends('p2').length === 1 && ends('p2')[0].ok && dones[0]?.reason === 'ok');
+  reset();
+  const sidG = mg.startMinigame(p2, 'dosage', 'fantome', 0.3)!;
+  step(SESSION_GUARD_MS - 5000);
+  check('garde-fou : toujours ouverte juste avant 10 min', mg.activeOf(p2)?.sid === sidG);
+  step(8000);
+  check('garde-fou : session fantôme close après 10 min (reason expire), plus aucune session', ends('p2').some((e) => e.sid === sidG && !e.ok) && dones.at(-1)?.reason === 'expire' && mg.activeOf(p2) === null);
+  reset();
+  const sidAb = mg.startMinigame(p2, 'liasses', 'abandon', 0.3)!;
+  step(700);
+  send('p2', { sid: sidAb, ok: false, ms: 600, data: [ABANDON_MARK] });
+  check('abandon : mg_end ok=false, raison abandon, session libérée', ends('p2').length === 1 && !ends('p2')[0].ok && dones[0]?.reason === 'abandon' && mg.activeOf(p2) === null);
+  reset();
+  const sidAb2 = mg.startMinigame(p2, 'liasses', 'abandon2', 0.3)!;
+  send('p2', { sid: sidAb2, ok: false, ms: 0, data: [ABANDON_MARK] });
+  check('abandon pendant la consigne (ms = 0) : accepté', dones[0]?.reason === 'abandon' && mg.activeOf(p2) === null);
+  reset();
+  const sidFl = mg.startMinigame(p2, 'liasses', 'echec', 0.3)!;
+  send('p2', { sid: sidFl, ok: false, ms: 800 });
+  check('ok=false sans marque d\'abandon : raison echec (distincte)', dones[0]?.reason === 'echec');
+  const sidAb3 = mg.startMinigame(p2, 'dosage', 'abandon3', 0.3)!;
+  send('p2', { sid: sidAb3, ok: false, ms: 100, data: [3] });
+  check('data d\'abandon falsifiée : pas un abandon', dones.at(-1)?.reason === 'echec');
+  reset();
+  void DOSAGE_FILL_RATE;
   reset();
   mg.startMinigame(p2, 'brise_glace', 'depart', 0.3);
   mg.onLeave!(p2);
@@ -311,13 +352,25 @@ async function main() {
     check('berline : court_circuit', s2.length === 1 && s2[0].kind === 'court_circuit');
     stepAll(1500);
     send('p2', { sid: s2[0].sid, ok: false, ms: 1500 });
-    check('vol échoué : reste verrouillé, à pied, aucun crime', car2.locked && p2.vehicle === null && !crimes.some((c) => c.by === 'p2') && unlocked.length === unlockedBefore);
+    check('vol échoué (échec réel) : reste verrouillé, à pied, aucun crime', car2.locked && p2.vehicle === null && !crimes.some((c) => c.by === 'p2') && unlocked.length === unlockedBefore);
     let honks = 0;
     const origFx = sim.fx.bind(sim);
     sim.fx = (ev) => { if (ev.s === 'horn_5') honks++; origFx(ev); };
     stepAll(1500);
     sim.fx = origFx;
     check('vol échoué : alarme (klaxon répété via fx)', honks >= 2, `${honks} klaxons`);
+
+    // abandon d'un vol : aucune alarme, nouvel essai possible aussitôt
+    reset();
+    sim.interact('p2');
+    const sAb = starts('p2')[0];
+    stepAll(500);
+    honks = 0;
+    sim.fx = (ev) => { if (ev.s === 'horn_5') honks++; origFx(ev); };
+    send('p2', { sid: sAb.sid, ok: false, ms: 400, data: [ABANDON_MARK] });
+    stepAll(3000);
+    sim.fx = origFx;
+    check('abandon d\'un vol : pas d\'alarme, véhicule verrouillé, à pied, aucun crime', honks === 0 && car2.locked && p2.vehicle === null && mg.activeOf(p2) === null && dones.at(-1)?.reason === 'abandon' && !crimes.some((c) => c.by === 'p2'), `${honks} klaxons`);
 
     reset();
     sim.interact('p2');
@@ -464,14 +517,14 @@ async function main() {
     {
       const seedL = 4242;
       const sidL = mg.startMinigame(p1, 'brise_glace', 'tard', 0.2, undefined, seedL)!;
-      stepAll(RULES.brise_glace.maxMs + 400); // au-delà de maxMs + tolérance, avant l'expiration serveur
+      stepAll(30_000); // une partie très lente : aucune limite de durée
       const hl = honest('brise_glace', seedL, 0.2);
-      send('p1', { sid: sidL, ok: true, ms: RULES.brise_glace.maxMs + 380, data: hl.data });
-      check('résultat trop tardif (après maxMs) refusé : trop_long', ends().length === 1 && !ends()[0].ok && dones[0]?.reason === 'trop_long', dones[0]?.reason);
+      send('p1', { sid: sidL, ok: true, ms: 29_900, data: hl.data });
+      check('résultat après 30 s accepté (temps illimité)', ends().length === 1 && ends()[0].ok && dones[0]?.reason === 'ok', dones[0]?.reason);
       reset();
       const sidE = mg.startMinigame(p1, 'brise_glace', 'expire', 0.2, undefined, seedL)!;
-      stepAll(RULES.brise_glace.maxMs + TTL_MARGIN_MS + 500);
-      check('session expirée toute seule (reason expire)', ends().length === 1 && !ends()[0].ok && dones[0]?.reason === 'expire' && mg.activeOf(p1) === null);
+      stepAll(SESSION_GUARD_MS + 500);
+      check('session fantôme close toute seule par le garde-fou (reason expire)', ends().length === 1 && !ends()[0].ok && dones[0]?.reason === 'expire' && mg.activeOf(p1) === null);
       reset();
       send('p1', { sid: sidE, ok: true, ms: 900, data: hl.data });
       check('résultat reçu après l\'expiration : ignoré, aucun événement', out.length === 0 && dones.length === 0);
@@ -491,18 +544,32 @@ async function main() {
       check('fouille : 3 balayages en facile, 4 en difficile', fouilleSpec(5, 0).swipes === 3 && fouilleSpec(5, 1).swipes === 4);
       check('desamorcage : flash plus court avec la difficulté (jamais sous 300 ms)', desamorcageSpec(5, 1).flashMs < desamorcageSpec(5, 0).flashMs && desamorcageSpec(5, 1).flashMs >= 300);
       check('liasses : cible 3..5, tolérance 1 puis 0', seeds.every((s) => { const a = liassesSpec(s, 0).target; const b = liassesSpec(s, 1).target; return a >= 3 && a <= 4 && b >= 4 && b <= 5; }) && liassesSpec(1, 0).maxOver === 1 && liassesSpec(1, 1).maxOver === 0);
-      // faisabilité : le geste le plus long reste sous maxMs avec de la marge humaine, à toutes les difficultés
-      let feasible = true;
-      for (const s of seeds) for (const d of [0, 0.5, 1]) {
-        const ds = dosageSpec(s, d);
-        if (ds.targets.reduce((a, b) => a + b, 0) / DOSAGE_CLIENT_RATE * 1000 + 3 * 300 > RULES.dosage.maxMs) feasible = false;
-        if (briseGlaceSpec(s, d).hits / 6 * 1000 + 300 > RULES.brise_glace.maxMs) feasible = false; // 6 coups/s
-      }
-      check('dosage et brise_glace : réalisables dans les temps à toutes les difficultés', feasible);
+      // le client ne remplit jamais plus vite que la pompe autorisée par le serveur ; les cibles restent atteignables
+      check('dosage : cadence du client sous la limite serveur', DOSAGE_CLIENT_RATE <= DOSAGE_FILL_RATE && seeds.every((s) => dosageSpec(s, 1).targets.every((x) => x > 0.5 && x < 0.95)));
       // la difficulté est bien lue par validate (sinon un client facile gagnerait en difficile)
       check('validate lit la difficulté : fouille difficile exige 4 balayages', !RULES.fouille.validate(8, 1, { sid: 1, ok: true, ms: 1500, data: [fouilleSpec(8).slot, 3] }) && RULES.fouille.validate(8, 1, { sid: 1, ok: true, ms: 1500, data: [fouilleSpec(8).slot, 4] }));
       check('validate lit la difficulté : liasses difficile refuse une liasse de trop', !RULES.liasses.validate(5, 1, { sid: 1, ok: true, ms: 1500, data: [liassesSpec(5, 1).target + 1] }) && RULES.liasses.validate(5, 0, { sid: 1, ok: true, ms: 1500, data: [liassesSpec(5, 0).target + 1] }));
       check('theft : chaque profil utilise un mini-jeu de vol et une difficulté 0..1', Object.values(THEFT_PROFILE).every((pr) => (pr.kind === 'tournevis' || pr.kind === 'court_circuit') && pr.difficulty >= 0 && pr.difficulty <= 1));
+    }
+
+    // 9f2. consignes (help.ts) : une par jeu, en français, courtes ; « déjà vu » sans localStorage ne plante pas
+    {
+      let okAll = true;
+      let detail = '';
+      for (const kind of MINIGAME_KINDS) {
+        for (const d of [0, 1]) {
+          const h = helpFor({ sid: 1, kind, seed: 17, difficulty: d, maxMs: SESSION_GUARD_MS });
+          const good = h.title.length >= 4 && h.steps.length >= 3 && h.steps.length <= 4 && h.steps.every((x) => x.length >= 20 && x.length <= 150 && /[.!?]$/.test(x)) && h.short.length >= 30 && h.short.length <= 160;
+          if (!good) { okAll = false; detail += `${kind} `; }
+        }
+      }
+      check('consignes : titre, 3-4 étapes d\'une phrase et rappel court pour chacun des 8 jeux', okAll, detail);
+      check('consignes : le sens du verrou et le nombre de tours sont donnés (tournevis)', (() => {
+        const a = helpFor({ sid: 1, kind: 'tournevis', seed: 2, difficulty: 0, maxMs: 1 }).steps.join(' ');
+        const b = helpFor({ sid: 1, kind: 'tournevis', seed: 3, difficulty: 1, maxMs: 1 }).steps.join(' ');
+        return /aiguilles/.test(a) && /aiguilles/.test(b) && a.includes('sens inverse') !== b.includes('sens inverse') && a.includes('3 tours') && b.includes('5 tours');
+      })());
+      check('consignes : « déjà vu » sûr sans localStorage (try/catch)', dejaVu('digicode') === false && (() => { marquerVu('digicode'); return true; })());
     }
 
     // 9g. contrôles statiques du client (aucune exécution de navigateur ici) : sons distincts, pas de HTML injecté, pas de tactile, écouteurs appariés
@@ -523,6 +590,8 @@ async function main() {
       check('chaque jeu a au moins un son bien à lui', signature.every(([, own]) => own.length >= 1), signature.filter(([, o]) => !o.length).map(([k]) => k).join(','));
       const all = readdirSync(dir).filter((f) => f.endsWith('.ts')).map((f) => read(f)).join('\n');
       check('aucun innerHTML / insertAdjacentHTML / eval dans les mini-jeux', !/innerHTML|insertAdjacentHTML|outerHTML|\beval\(|new Function/.test(all));
+      check('aucun mini-jeu ne se termine par un échec définitif (retour « recommence ») ni ne lit maxMs', MINIGAME_KINDS.every((k) => !/finish\(false/.test(read(`${k}.ts`)) && !/maxMs/.test(read(`${k}.ts`))) && !/\.maxMs/.test(read('index.ts')));
+      check('bouton « Abandonner (Échap) », bouton « Compris, c\'est parti » et ligne d\'aide présents, indice dans chaque jeu', /Abandonner \(Échap\)/.test(read('index.ts')) && /Compris, c'est parti/.test(read('index.ts')) && /drawStrip/.test(read('index.ts')) && MINIGAME_KINDS.every((k) => /hint/.test(read(`${k}.ts`))));
       check('aucune entrée tactile dans les mini-jeux (souris et clavier seulement)', !/touchstart|touchmove|touchend|pointerdown|pointermove|TouchEvent/.test(all));
       const idx = read('index.ts');
       const adds = [...idx.matchAll(/addEventListener\('([a-z]+)'/g)].map((m) => m[1]).sort();

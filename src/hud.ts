@@ -1,18 +1,23 @@
 // Interface en jeu (PROPRIÉTAIRE : art-toon) : viseur, barres de vie (joueur, véhicule), flash de dégâts (éléments d'index.html, repris tels quels)
-// + HUD de ville créé ici en DOM : argent, étoiles de recherche (+ progression), quartier, mini-carte, objectif de mission, toasts. Aucun `innerHTML`.
+// + HUD de ville créé ici en DOM. Aucun `innerHTML`.
+//
+// PRINCIPE (retour de test « interface trop lourde ») : au repos, SEULS sont visibles la barre de vie (index.html), l'argent, les étoiles
+// (si recherche), l'objectif courant (mission/activité, en haut à gauche) et la mini-carte. Le reste est à la demande ou éphémère :
+// quartier (bandeau 3 s au changement), aide de touche (une ligne, seulement s'il y a une action possible), liste des joueurs
+// (quelques secondes quand elle change, ou tant qu'on la demande), toasts (2 au plus, courts).
 //
 // API pour main.ts :
 //   const hud = createHud();                       // une fois (inchangé)
-//   hud.update({ hp, vehHp, vehName, inVehicle, x, z, yaw, mates? }, me);   // chaque image ; `me` = dernier PrivateState (null avant le premier message `me`)
-//        x, z, yaw : position et cap du joueur (ou du véhicule) pour la mini-carte ; mates : coéquipiers [{ x, z, name }]
-//   hud.toast('texte', 3500);                      // SEUL chemin des bandeaux (SMS, médaille...) : un texte identique déjà affiché est prolongé, jamais dupliqué
-//   hud.alert('arrete' | 'ko', 3200);              // vignette d'alerte (remplace le toast « Arrêté ! » / « K.O. ! » : toast équivalent ignoré pendant l'alerte)
-//   hud.setHint('texte');                          // aide contextuelle (une seule zone, haut gauche). Le texte du <div id="hud"> d'index.html y est recopié
-//                                                  // automatiquement et l'original est masqué : plus de double affichage.
+//   hud.update({ hp, vehHp, vehName, inVehicle, x, z, yaw, mates?, cops?, search? }, me);   // chaque image
+//   hud.toast('texte', 3500);                      // bandeaux courts (SMS : « Nouveau SMS » suffit, le détail est dans le PDA)
+//   hud.alert('arrete' | 'ko', 3200);              // vignette d'alerte
+//   hud.setHint('E : monter dans la berline');     // UNE ligne d'aide contextuelle (vide = rien). Le texte du <div id="hud"> n'est PLUS recopié.
+//   hud.setPlayers(['Léa (toi)', 'Sam']);          // liste des joueurs : apparaît 5 s quand elle change ; hud.showPlayers(true/false) pour la forcer
 //   hud.flash(force) ; hud.tick(dt) ; hud.setVisible(bool)
-//   HudState.cops : nombre de flics à vue (copsInSight(...) ci-dessous) ; défini => les étoiles alternent rouge/bleu seulement si cops > 0.
+//   hud.topOffset(px)                              // décale les toasts vers le bas (le guide occupe le haut-centre pendant le tutoriel)
+//   HudState.cops : flics à vue (copsInSight) ; HudState.search : état de recherche renvoyé par le serveur (libellé court près des étoiles).
 import { DISTRICTS } from '../shared/city/districts';
-import { DISTRICT_IDS, PED_KINDS } from '../shared/ids';
+import { PED_KINDS } from '../shared/ids';
 import { PED_STRIDE, type Mark, type PrivateState } from '../shared/protocol';
 import { playerColor } from './models';
 import { MAP_EXTENT, MARK_STYLE, cityMapCanvas, worldToMap } from './ui/pda/carte';
@@ -29,6 +34,19 @@ export interface HudState {
   mates?: { x: number; z: number; name?: string }[];
   /** Flics à vue (voir copsInSight). Absent : les étoiles clignotent dès que la recherche est active. */
   cops?: number;
+  /** État de recherche (optionnel). 'repere' : « Repéré ! » ; 'recherche' : « Recherché » ; 'cache' : « Caché » ; 'libre' avec des étoiles : « Semé ». Absent : déduit de `cops`. */
+  search?: 'libre' | 'repere' | 'recherche' | 'cache';
+}
+
+export type SearchKind = 'repere' | 'recherche' | 'cache' | 'seme';
+/** Libellé court de l'état de recherche (null : rien à dire). Exporté pour les tests et le guide. */
+export function searchLabel(stars: number, search?: HudState['search'], cops?: number): { text: string; kind: SearchKind } | null {
+  if (stars <= 0) return null;
+  const st = search ?? (cops === undefined ? 'recherche' : cops > 0 ? 'repere' : 'recherche');
+  if (st === 'repere') return { text: 'Repéré !', kind: 'repere' };
+  if (st === 'cache') return { text: 'Caché', kind: 'cache' };
+  if (st === 'libre') return { text: 'Semé', kind: 'seme' };
+  return { text: 'Recherché', kind: 'recherche' };
 }
 
 /** Nombre de flics (piétons 'flic' + véhicules de police) à moins de `radius` m de (x, z) : à passer dans HudState.cops. */
@@ -52,43 +70,46 @@ export function copsInSight(x: number, z: number, peds: ArrayLike<number> | unde
 const MAP_PX = 176; // taille d'affichage de la mini-carte
 const MAP_BASE = 768; // taille du fond partagé
 const MAP_RADIUS = 105; // demi-largeur visible (m)
+const MAX_TOASTS = 2;
 
 const CSS = `
 #gta-hud{position:fixed;inset:0;pointer-events:none;z-index:6;font-family:"Segoe UI",Verdana,sans-serif;font-weight:900}
-#gta-hud .gh-right{position:absolute;right:14px;bottom:18px;display:flex;flex-direction:column;align-items:flex-end;gap:7px}
-#gta-hud .gh-stars{display:flex;gap:3px;align-items:center}
-#gta-hud .gh-star{font-size:30px;line-height:1;color:#2b2b3d;-webkit-text-stroke:2px #000;text-shadow:2px 2px 0 #000}
+#gta-hud .gh-right{position:absolute;right:14px;bottom:18px;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+#gta-hud .gh-stars{display:none;align-items:center;gap:8px}
+#gta-hud .gh-stars.on{display:flex}
+#gta-hud .gh-starrow{display:flex;gap:2px;align-items:center}
+#gta-hud .gh-star{font-size:28px;line-height:1;color:#2b2b3d;-webkit-text-stroke:2px #000;text-shadow:2px 2px 0 #000}
 #gta-hud .gh-star.on{color:#ffd23f}
 #gta-hud .gh-star.blink{animation:ghblink .5s steps(2,jump-none) infinite}
+#gta-hud .gh-star.dim{opacity:.6}
 @keyframes ghblink{50%{opacity:.25}}
-#gta-hud .gh-prog{width:150px;height:8px;border:3px solid #000;border-radius:6px;background:#2b2b3d;overflow:hidden;box-shadow:2px 2px 0 #000}
+#gta-hud .gh-slabel{padding:1px 10px;border:3px solid #000;border-radius:8px;font-size:15px;box-shadow:2px 2px 0 #000;color:#1b1b2b;background:#ffd23f}
+#gta-hud .gh-slabel.repere{background:#ff3b30;color:#fff;animation:ghblink .5s steps(2,jump-none) infinite}
+#gta-hud .gh-slabel.cache{background:#74d3ff}
+#gta-hud .gh-slabel.seme{background:#69db7c}
+#gta-hud .gh-prog{width:130px;height:7px;border:3px solid #000;border-radius:6px;background:#2b2b3d;overflow:hidden;box-shadow:2px 2px 0 #000}
 #gta-hud .gh-prog>div{height:100%;width:0;background:#e63946}
-#gta-hud .gh-money{position:relative;font-size:30px;color:#ffd23f;-webkit-text-stroke:2px #000;paint-order:stroke fill;text-shadow:3px 3px 0 #000;letter-spacing:.02em}
+#gta-hud .gh-money{position:relative;font-size:32px;color:#ffd23f;-webkit-text-stroke:2px #000;paint-order:stroke fill;text-shadow:3px 3px 0 #000;letter-spacing:.02em}
 #gta-hud .gh-delta{position:absolute;right:0;top:-6px;font-size:22px;animation:ghfloat 1.4s ease-out forwards;white-space:nowrap}
 #gta-hud .gh-delta.up{color:#69db7c}#gta-hud .gh-delta.down{color:#ff6b6b}
 @keyframes ghfloat{from{transform:translateY(0);opacity:1}to{transform:translateY(-34px);opacity:0}}
 #gta-hud .gh-map{width:${MAP_PX}px;height:${MAP_PX}px;border:5px solid #000;border-radius:16px;box-shadow:5px 5px 0 #000;background:#2a8fe0;overflow:hidden}
 #gta-hud .gh-map canvas{display:block;width:100%;height:100%}
-#gta-hud .gh-district{padding:2px 12px;border:4px solid #000;border-radius:8px;font-size:14px;color:#fff;text-shadow:1px 1px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000;box-shadow:3px 3px 0 #000;max-width:${MAP_PX + 10}px;text-align:center}
-#gta-hud .gh-top{position:absolute;left:50%;top:14px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;max-width:min(560px,70vw)}
-#gta-hud .gh-box{padding:7px 16px;border:4px solid #000;border-radius:10px;background:#fff6dc;color:#1b1b2b;font-size:16px;box-shadow:4px 4px 0 #000;text-align:center}
-#gta-hud .gh-mission{display:none;min-width:260px;border-color:#000;background:#fff6dc}
-#gta-hud .gh-mission b{display:block;font-size:11px;letter-spacing:.12em;color:#e63946}
-#gta-hud .gh-mpips{display:flex;gap:5px;justify-content:center;margin-top:5px}
-#gta-hud .gh-mpips i{width:16px;height:9px;border:2px solid #000;border-radius:3px;background:#d8d3c2}
-#gta-hud .gh-mpips i.done{background:#3ddc84}#gta-hud .gh-mpips i.cur{background:#ffd23f;animation:ghblink .8s steps(2,jump-none) infinite}
-#gta-hud .gh-mtime{font-size:15px;color:#1b1b2b}#gta-hud .gh-mtime.low{color:#e63946;animation:ghblink .5s steps(2,jump-none) infinite}
-#gta-hud .gh-legend{display:flex;gap:4px;justify-content:center;margin-top:-2px}
-#gta-hud .gh-legend i{width:15px;height:15px;border:3px solid #000;border-radius:4px;box-shadow:2px 2px 0 #000;opacity:.8}
-#gta-hud .gh-legend i.here{opacity:1;transform:translateY(-3px) scale(1.25)}
-#gta-hud .gh-mission small{display:block;font-size:12px;color:#5a5d7a}
-#gta-hud .gh-toast{background:#ffd23f;animation:ghpop .25s ease-out}
+#gta-hud .gh-top{position:absolute;left:50%;top:14px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:6px;max-width:min(520px,70vw)}
+#gta-hud .gh-box{padding:6px 14px;border:4px solid #000;border-radius:10px;background:#fff6dc;color:#1b1b2b;font-size:16px;box-shadow:4px 4px 0 #000;text-align:center}
+#gta-hud .gh-obj{position:absolute;left:14px;top:14px;display:none;max-width:min(340px,38vw);text-align:left;padding:6px 14px 7px}
+#gta-hud .gh-obj b{display:block;font-size:12px;letter-spacing:.1em;color:#c92a35}
+#gta-hud .gh-obj .gh-otext{font-size:17px;line-height:1.2;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#gta-hud .gh-obj .gh-osub{margin-top:2px;font-size:13px;color:#4a4d6a}
+#gta-hud .gh-obj .gh-osub.low{color:#c92a35;animation:ghblink .5s steps(2,jump-none) infinite}
+#gta-hud .gh-toast{background:#ffd23f;font-size:15px;animation:ghpop .25s ease-out}
 @keyframes ghpop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
 #gta-hud .gh-banner{position:absolute;left:50%;top:22%;transform:translateX(-50%);padding:6px 26px;border:5px solid #000;border-radius:12px;font-size:30px;color:#fff;text-shadow:3px 3px 0 #000;box-shadow:6px 6px 0 #000;opacity:0;transition:opacity .5s;text-align:center;white-space:nowrap}
 #gta-hud .gh-banner small{display:block;font-size:14px}
 #gta-hud .gh-star.cop{animation:ghcop .45s steps(2,jump-none) infinite}
 @keyframes ghcop{0%{color:#ff3b30}50%{color:#3b82ff}}
-#gta-hud .gh-hint{position:absolute;left:14px;top:12px;max-width:min(520px,45vw);padding:6px 12px;border:3px solid #000;border-radius:10px;background:rgba(255,246,220,.92);color:#1b1b2b;font-size:13px;font-weight:800;white-space:pre-wrap;box-shadow:3px 3px 0 #000;display:none}
+#gta-hud .gh-hint{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);max-width:min(480px,50vw);padding:5px 16px;border:3px solid #000;border-radius:10px;background:rgba(255,246,220,.95);color:#1b1b2b;font-size:16px;font-weight:900;text-align:center;box-shadow:3px 3px 0 #000;display:none}
+#gta-hud .gh-players{position:absolute;right:54px;top:14px;display:none;padding:5px 12px;border:3px solid #000;border-radius:10px;background:rgba(255,246,220,.92);color:#1b1b2b;font-size:14px;font-weight:800;white-space:pre;text-align:right;box-shadow:3px 3px 0 #000;max-height:40vh;overflow:hidden}
 #gta-hud .gh-alert{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;opacity:0;transition:opacity .25s}
 #gta-hud .gh-alert.ko{background:radial-gradient(ellipse at center,rgba(0,0,0,0) 35%,rgba(200,20,30,.75) 100%)}
 #gta-hud .gh-alert.arrete{background:radial-gradient(ellipse at center,rgba(0,0,0,0) 35%,rgba(30,70,220,.75) 100%)}
@@ -103,6 +124,7 @@ const fmtMs = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
+const ACTIVITY_NAMES: Record<string, string> = { taxi: 'TAXI', ambulance: 'AMBULANCE', pompier: 'POMPIERS', justicier: 'JUSTICIER' };
 
 export function createHud() {
   const crosshair = $('crosshair');
@@ -126,14 +148,17 @@ export function createHud() {
   root.style.display = 'none';
   const right = document.createElement('div'); right.className = 'gh-right';
   const starsEl = document.createElement('div'); starsEl.className = 'gh-stars';
+  const starRow = document.createElement('div'); starRow.className = 'gh-starrow';
   const starNodes: HTMLSpanElement[] = [];
   for (let i = 0; i < 5; i++) {
     const s = document.createElement('span');
     s.className = 'gh-star';
     s.textContent = '★';
-    starsEl.appendChild(s);
+    starRow.appendChild(s);
     starNodes.push(s);
   }
+  const sLabel = document.createElement('span'); sLabel.className = 'gh-slabel';
+  starsEl.append(sLabel, starRow);
   const prog = document.createElement('div'); prog.className = 'gh-prog';
   const progFill = document.createElement('div'); prog.appendChild(progFill);
   const money = document.createElement('div'); money.className = 'gh-money';
@@ -143,33 +168,21 @@ export function createHud() {
   const map = document.createElement('canvas');
   map.width = map.height = MAP_PX * 2;
   mapBox.appendChild(map);
-  const districtTag = document.createElement('div'); districtTag.className = 'gh-district';
-  // Légende des quartiers sous la mini-carte : une pastille par quartier (celui où l'on se trouve ressort), nom complet au survol
-  const legend = document.createElement('div'); legend.className = 'gh-legend';
-  const legendChips = new Map<string, HTMLElement>();
-  for (const id of DISTRICT_IDS) {
-    const c = document.createElement('i');
-    c.style.background = hex(DISTRICTS[id].color);
-    c.title = `${DISTRICTS[id].name} (${DISTRICTS[id].gangName})`;
-    legend.appendChild(c);
-    legendChips.set(id, c);
-  }
-  right.append(starsEl, prog, money, mapBox, districtTag, legend);
+  right.append(starsEl, prog, money, mapBox);
+  // Objectif courant (mission ou activité) : en haut à gauche, 2 lignes au plus
+  const objBox = document.createElement('div'); objBox.className = 'gh-box gh-obj';
+  const objTag = document.createElement('b');
+  const objText = document.createElement('div'); objText.className = 'gh-otext';
+  const objSub = document.createElement('div'); objSub.className = 'gh-osub';
+  objBox.append(objTag, objText, objSub);
   const top = document.createElement('div'); top.className = 'gh-top';
-  const missionBox = document.createElement('div'); missionBox.className = 'gh-box gh-mission';
-  const missionTag = document.createElement('b');
-  const missionMain = document.createElement('div');
-  const missionTime = document.createElement('div'); missionTime.className = 'gh-mtime';
-  const missionSub = document.createElement('small');
-  const missionPips = document.createElement('div'); missionPips.className = 'gh-mpips';
-  missionBox.append(missionTag, missionMain, missionTime, missionSub, missionPips);
-  top.appendChild(missionBox);
   const banner = document.createElement('div'); banner.className = 'gh-banner';
   const hint = document.createElement('div'); hint.className = 'gh-hint';
+  const playersEl = document.createElement('div'); playersEl.className = 'gh-players';
   const alertEl = document.createElement('div'); alertEl.className = 'gh-alert';
   const alertMain = document.createElement('b'), alertSub = document.createElement('small');
   alertEl.append(alertMain, alertSub);
-  root.append(right, top, banner, hint, alertEl);
+  root.append(right, objBox, top, banner, hint, playersEl, alertEl);
   document.body.appendChild(root);
 
   const g = map.getContext('2d')!;
@@ -178,21 +191,26 @@ export function createHud() {
   let lastDistrict = '';
   let bannerT = 0;
   let visible = true;
-  let lastStars = -1;
   let copsSeen: number | undefined;
+  let searchState: HudState['search'];
   let alertT = 0;
   let alertText = '';
+  let playersT = 0;
+  let playersForced = false;
+  let playersKey = '';
+  let semeT = 0; // « Semé » reste affiché un instant après la perte des étoiles
+  let lastStars = 0;
   const setHint = (t: string) => {
-    if (hint.textContent === t) return;
-    hint.textContent = t;
-    hint.style.display = t && visible ? 'block' : 'none';
+    const txt = String(t ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 1).join('');
+    if (hint.textContent === txt) return;
+    hint.textContent = txt;
+    hint.style.display = txt && visible ? 'block' : 'none';
   };
-  // Une seule zone d'aide : on recopie le texte du <div id="hud"> (écrit par main.ts) et on masque l'original.
+  // L'ancien <div id="hud"> (aide permanente) est masqué : les textes contextuels passent par setHint, les touches par l'aide F1.
   const oldHud = $('hud');
-  if (oldHud) {
-    oldHud.style.display = 'none';
-    new MutationObserver(() => setHint(oldHud.textContent ?? '')).observe(oldHud, { childList: true, characterData: true, subtree: true });
-  }
+  if (oldHud) oldHud.style.display = 'none';
+  const oldPlayers = $('players');
+  if (oldPlayers) oldPlayers.style.display = 'none';
 
   function drawMap(s: HudState, me: PrivateState | null) {
     const now = performance.now();
@@ -240,6 +258,28 @@ export function createHud() {
     g.restore();
   }
 
+  function applyStars(stars: number, progress: number) {
+    // Si la recherche vient de tomber à 0 : « Semé » 3 s (puis la rangée disparaît ; au repos, aucune étoile à l'écran)
+    if (lastStars > 0 && stars === 0) semeT = 3;
+    lastStars = stars;
+    const showSeme = stars === 0 && semeT > 0;
+    const lab = showSeme ? { text: 'Semé', kind: 'seme' as SearchKind } : searchLabel(stars, searchState, copsSeen);
+    starsEl.classList.toggle('on', stars > 0 || showSeme);
+    sLabel.style.display = lab ? '' : 'none';
+    if (lab) { sLabel.textContent = lab.text; sLabel.className = 'gh-slabel ' + lab.kind; }
+    const seen = lab?.kind === 'repere';
+    const hidden = lab?.kind === 'cache';
+    starNodes.forEach((s, i) => {
+      s.classList.toggle('on', i < stars);
+      s.classList.toggle('cop', seen && i < stars); // crans allumés alternés rouge/bleu tant qu'un flic voit le joueur
+      s.classList.toggle('dim', hidden && i < stars);
+      s.classList.toggle('blink', lab?.kind === 'recherche' && i === stars - 1);
+    });
+    starRow.style.display = stars > 0 ? '' : 'none';
+    progFill.style.width = `${Math.max(0, Math.min(1, progress)) * 100}%`;
+    prog.style.display = stars > 0 ? '' : 'none';
+  }
+
   function applyMe(me: PrivateState) {
     const m = Math.round(me.money);
     if (m !== lastMoney) {
@@ -253,22 +293,9 @@ export function createHud() {
       }
       lastMoney = m;
     }
-    const stars = Math.max(0, Math.min(5, Math.round(me.stars)));
-    if (stars !== lastStars) {
-      lastStars = stars;
-    }
-    const seen = copsSeen === undefined ? stars > 0 : copsSeen > 0;
-    starNodes.forEach((s, i) => {
-      s.classList.toggle('on', i < stars);
-      s.classList.toggle('cop', seen && i < stars); // crans allumés alternés rouge/bleu tant qu'un flic voit le joueur
-      s.classList.toggle('blink', !seen && stars > 0 && i === stars - 1); // flics hors de vue : dernier cran qui clignote (recherche)
-    });
-    progFill.style.width = `${Math.max(0, Math.min(1, me.starProgress)) * 100}%`;
-    prog.style.display = stars > 0 || me.starProgress > 0.02 ? '' : 'none';
+    applyStars(Math.max(0, Math.min(5, Math.round(me.stars))), me.starProgress);
     const d = DISTRICTS[me.district];
     if (d && me.district !== lastDistrict) {
-      districtTag.textContent = d.name;
-      districtTag.style.background = hex(d.color);
       if (lastDistrict) {
         banner.textContent = d.name.toUpperCase();
         const sub = document.createElement('small');
@@ -279,29 +306,31 @@ export function createHud() {
         bannerT = 3;
       }
       lastDistrict = me.district;
-      for (const [id, c] of legendChips) c.classList.toggle('here', id === me.district);
+      mapBox.title = `${d.name} (${d.gangName})`;
     }
     const ms = me.mission, ac = me.activity;
     if (ms) {
-      missionBox.style.display = 'block';
-      missionTag.textContent = 'MISSION';
-      missionMain.textContent = ms.text;
+      objBox.style.display = 'block';
+      objTag.textContent = 'MISSION';
+      objText.textContent = ms.text;
       const left = ms.timeLimitMs ? ms.timeLimitMs - ms.ms : 0;
-      missionTime.textContent = ms.timeLimitMs ? `⏱ ${fmtMs(Math.max(0, left))}` : `⏱ ${fmtMs(ms.ms)}`;
-      missionTime.className = 'gh-mtime' + (ms.timeLimitMs && left < 30000 ? ' low' : '');
-      missionTime.style.display = '';
-      missionSub.textContent = `Étape ${Math.min(ms.step, ms.steps)}/${ms.steps}`;
-      const total = Math.max(1, Math.min(12, ms.steps));
-      if (missionPips.childElementCount !== total) { missionPips.textContent = ''; for (let i = 0; i < total; i++) missionPips.appendChild(document.createElement('i')); }
-      Array.from(missionPips.children).forEach((p, i) => { p.className = i + 1 < ms.step ? 'done' : i + 1 === ms.step ? 'cur' : ''; });
-      missionPips.style.display = '';
+      const step = ms.steps > 1 ? `Étape ${Math.min(ms.step, ms.steps)} sur ${ms.steps}` : '';
+      const time = ms.timeLimitMs ? `Temps : ${fmtMs(Math.max(0, left))}` : '';
+      objSub.textContent = [step, time].filter(Boolean).join(' · ');
+      objSub.className = 'gh-osub' + (ms.timeLimitMs && left < 30000 ? ' low' : '');
+      objSub.style.display = objSub.textContent ? '' : 'none';
     } else if (ac) {
-      missionBox.style.display = 'block';
-      missionTag.textContent = ac.kind.toUpperCase();
-      missionMain.textContent = ac.text;
-      missionTime.style.display = 'none'; missionPips.style.display = 'none';
-      missionSub.textContent = `score ${ac.score}`;
-    } else missionBox.style.display = 'none';
+      objBox.style.display = 'block';
+      objTag.textContent = ACTIVITY_NAMES[ac.kind] ?? ac.kind.toUpperCase();
+      objText.textContent = ac.text;
+      objSub.className = 'gh-osub';
+      objSub.textContent = `Score : ${ac.score}`;
+      objSub.style.display = '';
+    } else objBox.style.display = 'none';
+  }
+
+  function refreshPlayers() {
+    playersEl.style.display = visible && (playersForced || playersT > 0) && playersEl.textContent ? 'block' : 'none';
   }
 
   return {
@@ -309,6 +338,7 @@ export function createHud() {
       visible = v;
       for (const e of [crosshair, vitals]) if (e) e.style.display = v ? '' : 'none';
       root.style.display = v ? '' : 'none';
+      hint.style.display = v && hint.textContent ? 'block' : 'none';
     },
     /** Met à jour tout le HUD. `me` : dernier état privé (null tant qu'aucun n'est reçu). */
     update(s: HudState, me?: PrivateState | null) {
@@ -328,17 +358,18 @@ export function createHud() {
       }
       if (!visible) return;
       copsSeen = s.cops;
+      searchState = s.search;
       if (me) applyMe(me);
       const hasPos = Number.isFinite(s.x) && Number.isFinite(s.z);
       mapBox.style.display = hasPos ? '' : 'none';
       if (hasPos) drawMap(s, me ?? null);
     },
-    /** Bandeau temporaire en haut de l'écran (texte brut). */
-    toast(text: string, ms = 3500) {
-      const txt = String(text).slice(0, 160);
+    /** Bandeau temporaire (texte brut, 2 au plus : le plus ancien disparaît). */
+    toast(text: string, ms = 3000) {
+      const txt = String(text).slice(0, 90);
       if (alertT > 0 && alertText && txt.toLowerCase().replace(/[ !.]/g, '').includes(alertText)) return; // déjà dit par la vignette d'alerte
       for (const c of Array.from(top.children) as HTMLElement[]) {
-        if (c !== missionBox && c.textContent === txt) { // même toast : on prolonge au lieu de dupliquer
+        if (c.textContent === txt) { // même toast : on prolonge au lieu de dupliquer
           clearTimeout(Number(c.dataset.t));
           c.dataset.t = String(setTimeout(() => c.remove(), ms));
           return;
@@ -348,10 +379,21 @@ export function createHud() {
       t.className = 'gh-box gh-toast';
       t.textContent = txt;
       top.appendChild(t);
-      while (top.children.length > 4) top.children[1]?.remove();
+      while (top.children.length > MAX_TOASTS) top.firstElementChild?.remove();
       t.dataset.t = String(setTimeout(() => t.remove(), ms));
     },
     setHint,
+    /** Décale les toasts vers le bas (px) : le guide occupe le haut-centre pendant le tutoriel. */
+    topOffset(px: number) { top.style.top = `${14 + Math.max(0, px)}px`; },
+    /** Liste des joueurs (une ligne chacun). Réaffichée 5 s quand elle change ; `showPlayers(true)` la maintient. */
+    setPlayers(lines: readonly string[]) {
+      const txt = lines.slice(0, 12).join('\n');
+      const key = lines.length > 1 ? txt : ''; // seul : rien à lister
+      playersEl.textContent = lines.length > 1 ? txt : '';
+      if (key !== playersKey) { playersKey = key; if (key) playersT = 5; }
+      refreshPlayers();
+    },
+    showPlayers(v: boolean) { playersForced = v; refreshPlayers(); },
     /** Vignette d'alerte plein écran (bleue : arrêté ; rouge : K.O.). */
     alert(kind: 'arrete' | 'ko', ms = 3200) {
       alertEl.className = 'gh-alert ' + kind;
@@ -380,6 +422,8 @@ export function createHud() {
         bannerT -= dt;
         if (bannerT <= 0) banner.style.opacity = '0';
       }
+      if (semeT > 0) { semeT -= dt; if (semeT <= 0) applyStars(0, 0); }
+      if (playersT > 0) { playersT -= dt; if (playersT <= 0) refreshPlayers(); }
     },
   };
 }

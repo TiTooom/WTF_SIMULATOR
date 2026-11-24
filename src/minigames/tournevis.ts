@@ -2,6 +2,7 @@
 // Tournevis dans le contact : maintenir le clic pour enfoncer, puis décrire des cercles rapides autour du barillet jusqu'à briser le verrou.
 // Données envoyées : [tours accomplis, ms d'enfoncement]. Règle : shared/minigames/rules.ts (tournevisSpec).
 import { tournevisSpec } from '../../shared/minigames/rules';
+import { HINTS } from './help';
 import { H, INK, PAL, W, box, burst, clamp, disc, googly, line, type MgFactory } from './kit';
 
 const CX = W / 2;
@@ -56,6 +57,7 @@ export const createTournevis: MgFactory = (env) => {
     const step = Math.floor(acc / (Math.PI / 6)); // un cran tous les 30°
     if (step > tickAt) {
       tickAt = step;
+      env.progress();
       env.sfx('mg_ratchet', Math.floor((acc / goal) * 8));
       sparks.push({ x: CX + (Math.random() - 0.5) * 60, y: CY + (Math.random() - 0.5) * 60, vx: (Math.random() - 0.5) * 240, vy: -Math.random() * 200, life: 0.35 });
       shake = 0.12;
@@ -71,7 +73,8 @@ export const createTournevis: MgFactory = (env) => {
 
   return {
     probe: () => ({ cx: CX, cy: CY, acc, push }),
-    onDown(btn) { if (btn !== 0) return; advance(); holding = true; env.sfx('mg_push'); },
+    onDown(btn) { if (btn !== 0) return; advance(); holding = true; env.sfx('mg_push'); env.progress(); },
+    hint: () => (holding && push > 0.5 ? { x: CX, y: CY, r: 100, text: HINTS.tournevis_cercle } : { x: CX, y: CY, r: 100, text: HINTS.tournevis_clic }),
     onUp(btn) { if (btn !== 0) return; advance(); holding = false; },
     onMove: track,
     update(dt) {
@@ -154,6 +157,34 @@ export const createTournevis: MgFactory = (env) => {
       g.beginPath();
       g.arc(CX, CY, 150, -Math.PI / 2, -Math.PI / 2 + TWO_PI * p);
       g.stroke();
+      // flèche : sens de rotation à suivre
+      {
+        const R = 104;
+        const a0 = -Math.PI / 2 - 0.7 * spec.dir;
+        const a1 = -Math.PI / 2 + 0.7 * spec.dir;
+        for (const [lw, col] of [[11, INK], [5, '#fff']] as const) {
+          g.lineWidth = lw;
+          g.strokeStyle = col;
+          g.lineCap = 'round';
+          g.beginPath();
+          g.arc(CX, CY, R, a0, a1, spec.dir < 0);
+          g.stroke();
+        }
+        const hx = CX + Math.cos(a1) * R;
+        const hy = CY + Math.sin(a1) * R;
+        const tx = -Math.sin(a1) * spec.dir;
+        const ty = Math.cos(a1) * spec.dir;
+        g.beginPath();
+        g.moveTo(hx + tx * 16, hy + ty * 16);
+        g.lineTo(hx - ty * 11 - tx * 3, hy + tx * 11 - ty * 3);
+        g.lineTo(hx + ty * 11 - tx * 3, hy - tx * 11 - ty * 3);
+        g.closePath();
+        g.fillStyle = '#fff';
+        g.fill();
+        g.lineWidth = 4;
+        g.strokeStyle = INK;
+        g.stroke();
+      }
       for (const s of sparks) burst(g, s.x, s.y, 8 + s.life * 20, PAL.yellow, 5, s.life * 6);
     },
   };

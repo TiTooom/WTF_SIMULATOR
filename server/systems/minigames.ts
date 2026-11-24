@@ -1,15 +1,15 @@
 // PROPRIÉTAIRE : game-minigames
 // Sessions de mini-jeux : un seul mini-jeu actif par joueur, `sid` unique à usage unique, validation du résultat par les règles de
-// shared/minigames/rules.ts (durée plausible, graine, anti-triche), annulation si le joueur s'éloigne, est touché, meurt ou monte en véhicule.
+// shared/minigames/rules.ts (durée minimale plausible, graine, anti-triche), annulation si le joueur s'éloigne, est touché, meurt ou monte en véhicule.
+// TEMPS ILLIMITÉ : aucune durée maximale de jeu. Seul un garde-fou très large (SESSION_GUARD_MS, 10 min) clôt une session fantôme.
+// ABANDON : le client envoie ok:false + data [ABANDON_MARK de rules.ts] -> raison 'abandon' (aucune punition, pas d'alarme de vol).
 // Aucun corps Rapier n'est conservé : la position vient de `sim.playerPos` (qui vérifie `bodyOk`), le temps de `sim.time`.
 import type { SimPlayer, SimVehicle } from '../../shared/api';
 import type { GameCtx, GameSystem, SystemFactory } from '../../shared/game';
 import { MINIGAME_KINDS, isIn, type MinigameKind } from '../../shared/ids';
-import { RULES, clamp01 } from '../../shared/minigames/rules';
+import { RULES, SESSION_GUARD_MS, clamp01, isAbandon } from '../../shared/minigames/rules';
 import type { GameClientMsg, MinigameResult } from '../../shared/protocol';
 
-/** Marge (ms) entre la fin de la durée maximale et l'expiration serveur de la session (latence réseau). */
-export const TTL_MARGIN_MS = 1500;
 /** Tolérance (ms) sur les durées annoncées par le client. */
 const SLACK_MS = 250;
 /** Perte de points de vie qui compte comme « touché ». */
@@ -65,10 +65,9 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
 
   /** Jugement d'un résultat reçu. Retourne [ok, motif]. */
   const judge = (s: Session, r: MinigameResult, elapsed: number): [boolean, string] => {
-    if (!r.ok) return [false, 'echec'];
+    if (!r.ok) return [false, isAbandon(r) ? 'abandon' : 'echec'];
     const rule = RULES[s.kind];
     if (r.ms < rule.minMs || elapsed < rule.minMs - SLACK_MS) return [false, 'trop_rapide'];
-    if (r.ms > rule.maxMs + SLACK_MS || elapsed > rule.maxMs + TTL_MARGIN_MS) return [false, 'trop_long'];
     if (r.ms > elapsed + SLACK_MS) return [false, 'incoherent']; // le client dit avoir joué plus longtemps que la session n'existe
     let valid = false;
     try { valid = rule.validate(s.seed, s.difficulty, r); } catch { valid = false; }
@@ -84,16 +83,15 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
 
   const startMinigame: MinigamesSystem['startMinigame'] = (p, kind, tag, difficulty, onDone, seed) => {
     if (!p || !isIn(MINIGAME_KINDS, kind) || !ctx.sim.players.has(p.id) || sessions.has(p.id) || p.hp <= 0) return null;
-    const rule = RULES[kind];
     const d = clamp01(difficulty);
     const sd = Number.isFinite(seed) ? (Math.floor(seed as number) >>> 0) % 0x7fffffff : Math.floor(Math.random() * 0x7fffffff);
     const s: Session = {
       p, sid: nextSid++, kind, tag: String(tag ?? '').slice(0, 48), seed: sd, difficulty: d,
-      startedAt: ctx.sim.time, ttlAt: ctx.sim.time + rule.maxMs + TTL_MARGIN_MS,
+      startedAt: ctx.sim.time, ttlAt: ctx.sim.time + SESSION_GUARD_MS,
       pos: ctx.sim.playerPos(p), hp: p.hp, vehicle: p.vehicle, onDone,
     };
     sessions.set(p.id, s);
-    ctx.sendTo(p.id, { k: 'mg_start', s: { sid: s.sid, kind, seed: sd, difficulty: d, maxMs: rule.maxMs } });
+    ctx.sendTo(p.id, { k: 'mg_start', s: { sid: s.sid, kind, seed: sd, difficulty: d, maxMs: SESSION_GUARD_MS } });
     return s.sid;
   };
 
@@ -156,7 +154,7 @@ export const createMinigames: SystemFactory = (ctx: GameCtx): MinigamesSystem =>
       finish(p, s, ok, ok ? m.r.ms : Math.min(m.r.ms, elapsed), reason);
     },
 
-    // Les sessions sont éphémères (quelques secondes) : rien à sauvegarder.
+    // Les sessions sont éphémères : rien à sauvegarder.
     serialize: () => ({ v: 1 }),
     restore: () => {},
   };

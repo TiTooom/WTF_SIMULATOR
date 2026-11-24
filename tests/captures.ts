@@ -1,7 +1,7 @@
 // Suite « captures » (PROPRIÉTAIRE : art-toon) : rend des scènes du client dans Chrome headless (WebGL logiciel) via CDP, SANS serveur de jeu,
 // enregistre des PNG et vérifie les budgets (appels de dessin de la ville).
 // Lancement : npx tsx tests/captures.ts [dossier de sortie] [shot ...]   (Chrome : variable CHROME ou chemin Windows par défaut)
-// Shots : city city_high vehicles taxi peds avatars fx hud_edge occluded occluded_car occluded_off occluded_xray markers markers_drive street perf hud pda_carte pda_sms comic_<image> result_<bronze|argent|or>. Saute proprement (code 0) si Chrome est introuvable.
+// Shots : city city_high vehicles taxi peds avatars fx hud_edge occluded occluded_car occluded_off occluded_xray markers markers_drive street perf hud pda_carte pda_sms onboarding tip controls hud_rest hiding xray_leak comic_<image> result_<bronze|argent|or>. Saute proprement (code 0) si Chrome est introuvable.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ const DEBUG = PORT + 100;
 const out = process.argv[2] && !process.argv[2].startsWith('shot=') ? process.argv[2] : join(tmpdir(), 'gta-captures');
 const only = process.argv.slice(3);
 const COMICS = ['campus', 'docks', 'vieux_bourg', 'zone_indus', 'les_hauts', 'amphi_nuit', 'dealer', 'flic', 'medaille', 'argent'].map((c) => 'comic_' + c);
-const SHOTS = only.length ? only : ['city', 'city_high', 'vehicles', 'taxi', 'peds', 'avatars', 'street', 'markers', 'markers_drive', 'hud', 'hud_edge', 'occluded', 'occluded_car', 'occluded_off', 'occluded_xray', 'perf', 'fx', 'pda_carte', 'pda_sms', 'comic_ruelle', 'comic_explosion', ...COMICS, 'result_or', 'result_bronze'];
+const SHOTS = only.length ? only : ['city', 'city_high', 'vehicles', 'taxi', 'peds', 'avatars', 'street', 'markers', 'markers_drive', 'hud', 'hud_rest', 'hud_edge', 'onboarding', 'tip', 'controls', 'hiding', 'xray_leak', 'occluded', 'occluded_car', 'occluded_off', 'occluded_xray', 'perf', 'fx', 'pda_carte', 'pda_sms', 'comic_ruelle', 'comic_explosion', ...COMICS, 'result_or', 'result_bronze'];
 const CHROME = process.env.CHROME
   ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].find(existsSync);
 
@@ -63,7 +63,7 @@ async function main() {
       if (Date.now() > deadline) { console.log('captures : délai global atteint.'); break; }
       logs.length = 0;
       await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/tests/captures.html?shot=${shot}` });
-      let info: { ready: boolean; calls: number; tris: number; cityDraw: number; chunks: number; ms: number; signs: number; geoms: number; tex: number } | null = null;
+      let info: { ready: boolean; calls: number; tris: number; cityDraw: number; chunks: number; ms: number; signs: number; geoms: number; tex: number; checks: Record<string, boolean> } | null = null;
       for (let k = 0; k < 80 && Date.now() < deadline; k++) {
         await sleep(400);
         const r = await send('Runtime.evaluate', { expression: 'JSON.stringify(window.__shot || null)', returnByValue: true });
@@ -77,6 +77,8 @@ async function main() {
       writeFileSync(file, Buffer.from(png.data, 'base64'));
       console.log(`     ${shot} -> ${file} (rendu ${info.calls} appels, ${info.tris} triangles, ${info.geoms} géométries, ${info.tex} textures, ville ${info.cityDraw} maillages, ${info.chunks} chunks, ${info.signs} enseignes)`);
       check(logs.length === 0, `${shot} : aucune erreur console ${logs.slice(0, 3).join(' | ')}`);
+      for (const [name, ok] of Object.entries(info.checks ?? {})) check(ok, `${shot} : ${name}`);
+      if (['onboarding', 'tip', 'controls', 'hiding', 'xray_leak', 'hud_rest'].includes(shot)) check(info.calls <= 150, `${shot} : ≤ 150 appels de dessin (${info.calls})`);
       if (shot === 'perf') {
         console.log(`PERF scène la plus chargée : ${info.calls} appels de dessin, ${info.tris} triangles (ville ${info.cityDraw} maillages visibles)`);
         check(info.calls <= 220, `perf : ≤ 220 appels de dessin au total (${info.calls})`);

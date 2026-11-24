@@ -15,6 +15,13 @@ export const VIEW_TYPES = ['citadine', 'berline', 'camionnette', 'police'] as co
 /** Vues disponibles. */
 export const VIEWS: Record<string, VehicleViewDef> = { citadine, berline, camionnette, police };
 
+/** Les groupes des véhicules ne sont JAMAIS dessinés en silhouette « rayons X » (XRay.add les ignore). */
+function noXray(def: VehicleViewDef): VehicleViewDef {
+  const build = def.build.bind(def);
+  return { ...def, build: (seed) => { const v = build(seed); v.group.userData.noXray = true; return v; } };
+}
+for (const k of Object.keys(VIEWS)) VIEWS[k] = noXray(VIEWS[k]);
+
 function hashColor(s: string) {
   let h = 0;
   for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -58,6 +65,6 @@ export function viewFor(type: string): VehicleViewDef {
   const v = VIEWS[type];
   if (v) return v;
   let f = fallbacks.get(type);
-  if (!f) fallbacks.set(type, (f = buildFallback(type)));
+  if (!f) fallbacks.set(type, (f = noXray(buildFallback(type))));
   return f;
 }

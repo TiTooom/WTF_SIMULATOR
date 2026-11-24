@@ -2,6 +2,7 @@
 // Brise-glace : marteler la vitre (clic gauche ou Espace) ; chaque coup agrandit la fissure, le dernier la fait voler en éclats.
 // Données envoyées : [nombre de coups]. Règle : shared/minigames/rules.ts (briseGlaceSpec).
 import { briseGlaceSpec, rng } from '../../shared/minigames/rules';
+import { HINTS } from './help';
 import { H, INK, PAL, W, box, burst, clamp, googly, line, type MgFactory } from './kit';
 
 const CX = W / 2;
@@ -36,6 +37,7 @@ export const createBriseGlace: MgFactory = (env) => {
     if (t - last < 62) return; // reste sous la cadence maximale du serveur
     last = t;
     hits++;
+    env.progress();
     swing = 1;
     shake = 0.12;
     if (hits >= spec.hits) {
@@ -49,6 +51,7 @@ export const createBriseGlace: MgFactory = (env) => {
   return {
     onDown(btn) { if (btn === 0) hit(); },
     onKey(code) { if (code === 'Space') hit(); },
+    hint: () => ({ x: CX, y: CY, r: 130, text: HINTS.glace }),
     update(dt) {
       swing = Math.max(0, swing - dt * 7);
       shake = Math.max(0, shake - dt);
@@ -69,7 +72,7 @@ export const createBriseGlace: MgFactory = (env) => {
         g.lineTo(CX - 170, CY - 40);
         g.fill();
         // l'eau monte derrière la vitre (la pression du temps) ; un poisson curieux passe et écarquille les yeux à chaque coup
-        const wl = CY + 150 - (0.15 + 0.5 * clamp(env.now() / env.start.maxMs, 0, 1)) * 300;
+        const wl = CY + 150 - (0.15 + 0.3 * clamp(hits / spec.hits, 0, 1)) * 300; // l'eau monte avec les coups (décor, aucune pression de temps)
         g.save();
         g.beginPath();
         g.roundRect(CX - 200, CY - 150, 400, 300, 18);

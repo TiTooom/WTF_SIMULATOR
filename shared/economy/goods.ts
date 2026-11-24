@@ -19,12 +19,12 @@ export const GOODS: Record<GoodId, GoodDef> = {
   cafe_machine: { id: 'cafe_machine', name: 'Café de la machine', emoji: '☕', blurb: 'Couleur incertaine, goût de gobelet. Réveille quand même.', base: 14, weight: 2, rarity: 1 },
   annales_secretes: { id: 'annales_secretes', name: 'Annales secrètes', emoji: '📜', blurb: '« Retrouvées » dans un tiroir. Le corrigé est faux, mais avec aplomb.', base: 180, weight: 4, rarity: 3 },
   croissant_pirate: { id: 'croissant_pirate', name: 'Croissants de contrebande', emoji: '🥐', blurb: 'Livrés avant 7 h, sans ticket de caisse.', base: 22, weight: 2, rarity: 1 },
-  poudre_de_craie: { id: 'poudre_de_craie', name: 'Poudre de craie', emoji: '🖍️', blurb: 'De la craie de tableau noir. Rien d\'autre, le prof insiste.', base: 45, weight: 2, rarity: 2 },
+  poudre_de_craie: { id: 'poudre_de_craie', name: 'Craie de Picardie', emoji: '🖍️', blurb: 'De la vraie craie du coin, en sachet. Rien d\'autre, le prof insiste.', base: 45, weight: 2, rarity: 2 },
   cables_hdmi: { id: 'cables_hdmi', name: 'Câbles HDMI douteux', emoji: '🔌', blurb: 'Marchent un jour sur deux, juste avant la soutenance.', base: 85, weight: 3, rarity: 2 },
-  fromage_clandestin: { id: 'fromage_clandestin', name: 'Fromage clandestin', emoji: '🧀', blurb: 'Une meule non déclarée. On la sent avant de la voir.', base: 160, weight: 5, rarity: 2 },
-  balles_dorees: { id: 'balles_dorees', name: 'Balles de golf dorées', emoji: '⛳', blurb: 'Plaquées or, donc plus chères que le green.', base: 320, weight: 4, rarity: 3 },
+  fromage_clandestin: { id: 'fromage_clandestin', name: 'Macarons de contrebande', emoji: '🍪', blurb: 'Les vrais, d\'Amiens, sortis par la porte de derrière. Jamais plus de deux par personne.', base: 160, weight: 5, rarity: 2 },
+  balles_dorees: { id: 'balles_dorees', name: 'Balles dorées de la Citadelle', emoji: '🥎', blurb: 'Plaquées or, tombées des remparts. Plus chères que la vue.', base: 320, weight: 4, rarity: 3 },
   ecrous_de_12: { id: 'ecrous_de_12', name: 'Écrous de 12', emoji: '🔩', blurb: 'Évidemment. Il en manque toujours un.', base: 18, weight: 1, rarity: 1 },
-  sardines_de_quai: { id: 'sardines_de_quai', name: 'Sardines de quai', emoji: '🐟', blurb: 'Arrivage non homologué. Ne pas laisser dans la voiture.', base: 30, weight: 3, rarity: 1 },
+  sardines_de_quai: { id: 'sardines_de_quai', name: 'Ficelles picardes (périmées)', emoji: '🥞', blurb: 'Jambon, champignons, crème… et date dépassée depuis la dernière Saint-Leu. À manger à ses risques.', base: 30, weight: 3, rarity: 1 },
   copies_blanches: { id: 'copies_blanches', name: 'Copies blanches', emoji: '📄', blurb: 'Vierges, signées d\'avance. Très recherchées en juin.', base: 240, weight: 4, rarity: 3 },
 };
 

@@ -7,10 +7,12 @@ import type { Mark, PrivateState, VehicleSnap } from '../shared/protocol';
 import { CameraRig } from '../src/camera';
 import { Fx } from '../src/fx';
 import { createHud } from '../src/hud';
-import { buildAvatar, playerColor, setAvatarState } from '../src/models';
-import { XRay } from '../src/gfx';
+import { buildAvatar, ghostVC, playerColor, setAvatarState } from '../src/models';
+import { XRay, toonVC } from '../src/gfx';
+import { Guide } from '../src/ui/guide';
+import { createControls } from '../src/ui/controls';
 import { ProjectilesView } from '../src/projectiles';
-import { MarkersView } from '../src/markers';
+import { HidingView, MarkersView, VisionConesView } from '../src/markers';
 import { PedsView } from '../src/peds';
 import { buildEnvironment } from '../src/scene';
 import { Pda } from '../src/ui/pda';
@@ -21,7 +23,7 @@ import type { VehicleView } from '../src/vehicles/types';
 
 const q = new URLSearchParams(location.search);
 const shot = q.get('shot') ?? 'city';
-const info = { ready: false, calls: 0, tris: 0, cityDraw: 0, chunks: 0, ms: 0, signs: 0, geoms: 0, tex: 0, shot };
+const info = { ready: false, calls: 0, tris: 0, cityDraw: 0, chunks: 0, ms: 0, signs: 0, geoms: 0, tex: 0, shot, checks: {} as Record<string, boolean> };
 (window as unknown as { __shot: typeof info }).__shot = info;
 
 const ME: PrivateState = {
@@ -111,6 +113,8 @@ async function run3d() {
     addVehicle('citadine', px - 9, pz, Math.PI / 2, {}, 1);
   }
   const hud = createHud();
+  const perfAvatars: THREE.Group[] = [];
+  if (shot === 'perf') for (let i = 0; i < 2; i++) { const a = buildAvatar('Perf' + i); a.position.set(-3 + i * 6, 0.85, -4); scene.add(a); perfAvatars.push(a); }
   const fx = new Fx(scene, { fx() {}, play() {} } as never);
   const projView = new ProjectilesView(scene, fx);
   const avatars: THREE.Group[] = [];
@@ -174,11 +178,36 @@ async function run3d() {
     for (let i = 0; i < 12; i++) addVehicle(types[i % 4], -22 + (i % 6) * 9, -8 + Math.floor(i / 6) * 9, Math.PI / 2, i % 4 === 1 ? { lv: 1 } : { sp: 2, a: [1] });
   } else if (occ) {
     // scène déjà posée plus haut
+  } else if (shot === 'hiding') {
+    gameCam(0, 0, 1.7);
+    addVehicle('police', 16, -6, Math.PI / 2, { a: [1] }, 0);
+    addVehicle('berline', -4, 9, 0.3, {}, 3);
+  } else if (shot === 'xray_leak') {
+    gameCam(0, 0, 0.7);
   } else {
     // city / hud / pda_*
     gameCam(0, 0);
     types.forEach((t, i) => addVehicle(t, -9 + i * 6, 3.5 + (i % 2) * -1, Math.PI / 2, { sp: 0 }, i + 2));
     addVehicle('police', 12, -2.5, -Math.PI / 2, {}, 0);
+  }
+  // Guidage / cachettes / aide des touches
+  const mem = new Map<string, string>();
+  const storage = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => void mem.set(k, v), removeItem: (k: string) => void mem.delete(k) };
+  const LBL: Record<string, string> = { forward: 'Z', left: 'Q', back: 'S', right: 'D', interact: 'E', pda: 'Tab', jump: 'Espace', sprint: 'Maj', horn: 'H', activity: 'A', chat: 'Entrée' };
+  const keyLabel = (a: string) => LBL[a] ?? '?';
+  if (shot === 'tip') mem.set('gta-guide-v1', JSON.stringify({ seen: [], tuto: 'skipped' }));
+  const guide = shot === 'onboarding' || shot === 'tip' ? new Guide({ keyLabel, storage }) : null;
+  const controls = shot === 'controls' ? createControls({ keyLabel, tips: { get: () => true, set: () => {}, replay: () => {} } }) : null;
+  const hiding = shot === 'hiding' ? new HidingView(scene) : null;
+  const cones = shot === 'hiding' ? new VisionConesView(scene) : null;
+  let hidAvatar: THREE.Group | null = null, mateAvatar: THREE.Group | null = null;
+  if (hiding && cones) {
+    hiding.update([
+      { x: -8, z: -3, r: 2.2, kind: 'haie' }, { x: 6, z: -8, r: 1.8, kind: 'buisson' }, { x: 11, z: 3, r: 2, kind: 'benne' },
+      { x: -4, z: -13, r: 2.5, kind: 'abri' }, { x: -13, z: 5, r: 1.6, kind: 'buisson' }, { x: 3, z: 6, r: 1.5, kind: 'haie' },
+    ]);
+    hidAvatar = buildAvatar('Léa'); hidAvatar.position.set(-8, 0.85, -3); scene.add(hidAvatar);
+    mateAvatar = buildAvatar('Sam'); mateAvatar.position.set(3, 0.85, 1); mateAvatar.rotation.y = 2.2; scene.add(mateAvatar);
   }
   const markList: readonly Mark[] = shot === 'hud' || shot === 'city' ? ME.marks
     : shot === 'markers' ? NEAR.slice(0, 9)
@@ -193,6 +222,8 @@ async function run3d() {
     pda.open(shot === 'pda_sms' ? 'sms' : 'carte');
   }
   void pda;
+  if (controls) setTimeout(() => controls.open(), 50);
+  const xrayCheck = shot === 'xray_leak' ? xrayLeakTest() : null;
 
   if (shot === 'fx' || shot === 'perf') {
     const ev = (k: string, p: [number, number, number], o: object = {}) => fx.handle({ k, p, ...o });
@@ -206,6 +237,72 @@ async function run3d() {
   }
 
   const street = occ ? { x: occFocus[0], z: occFocus[2] } : shot === 'street' ? { x: city.signPos[Math.min(8, city.signPos.length - 1)][0], z: city.signPos[Math.min(8, city.signPos.length - 1)][1] - 1 } : { x: 0, z: 0 };
+  /** Fait avancer l'horloge de l'animation de l'avatar (performance.now) : ~16 ms par appel. */
+  function spin() { const t = performance.now(); while (performance.now() - t < 16) { /* attente active courte */ } }
+  /**
+   * Reproduit « je monte, j'explose la voiture, je descends / réapparais » : l'avatar doit retrouver EXACTEMENT ses couleurs et matériaux d'origine
+   * (aucune couche rayons X résiduelle, aucun matériau partagé teinté), et le véhicule ne doit jamais produire de silhouette.
+   */
+  function xrayLeakTest() {
+    const av = buildAvatar('Léa'); av.position.set(0, 0.85, 0); scene.add(av);
+    addVehicle('berline', 7, 0, 0, {}, 2);
+    const car = views[views.length - 1].group;
+    const snap = () => {
+      const parts: string[] = [];
+      av.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        const col = m.geometry.getAttribute('color');
+        let sum = 0;
+        if (col) for (let i = 0; i < col.count; i++) sum += col.getX(i) * 3 + col.getY(i) * 5 + col.getZ(i) * 7;
+        parts.push(`${m.material === toonVC ? 'toon' : m.material === ghostVC ? 'ghost' : 'autre'}|${m.layers.mask}|${m.visible}|${sum.toFixed(3)}`);
+      });
+      return parts.join('/') + `|${toonVC.color.getHex()}|${toonVC.opacity}|${toonVC.transparent}`;
+    };
+    const px = () => {
+      renderer.render(scene, camera);
+      const c2 = document.createElement('canvas'); c2.width = W; c2.height = H;
+      const g2 = c2.getContext('2d')!; g2.drawImage(renderer.domElement, 0, 0);
+      const p = new THREE.Vector3(0, 0.95, 0).project(camera);
+      const x = Math.round((p.x * 0.5 + 0.5) * W), y = Math.round((-p.y * 0.5 + 0.5) * H);
+      const d = g2.getImageData(x - 6, y - 6, 12, 12).data;
+      let r = 0, g = 0, b = 0;
+      for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+      const n = d.length / 4;
+      return [r / n, g / n, b / n];
+    };
+    return () => {
+      gameCam(0, 0, 0.7);
+      av.updateMatrixWorld(true);
+      const before = snap(), pxBefore = px();
+      // 1. monte : l'avatar est caché, le véhicule est demandé en silhouette (doit être ignoré)
+      av.visible = false;
+      xray.clear(); xray.add(car, 0x7a2cff, 0.6); xray.add(av, 0x7a2cff, 0.6);
+      const ignored = xray.count === 0;
+      renderer.render(scene, camera); xray.render();
+      // 2. explosion : le véhicule disparaît, quelques images
+      car.visible = false;
+      for (let i = 0; i < 5; i++) { xray.clear(); xray.add(car, 0x7a2cff, 0.6); renderer.render(scene, camera); xray.render(); }
+      // 3. réapparition à pied : silhouette discrète, puis plus rien
+      av.visible = true; setAvatarState(av, 0, true);
+      for (let i = 0; i < 5; i++) { xray.clear(); xray.add(av, 0x7a2cff, 0.9); renderer.render(scene, camera); xray.render(); }
+      xray.clear();
+      av.updateMatrixWorld(true);
+      const after = snap(), pxAfter = px();
+      let layersClean = true;
+      scene.traverse((o) => { if (o.layers.mask !== 1) layersClean = false; });
+      const dpx = Math.max(Math.abs(pxBefore[0] - pxAfter[0]), Math.abs(pxBefore[1] - pxAfter[1]), Math.abs(pxBefore[2] - pxAfter[2]));
+      console.log(`xray_leak : pixel avant ${pxBefore.map(Math.round)} après ${pxAfter.map(Math.round)}`);
+      // caché (fantôme) puis revenu : retrouve toonVC
+      setAvatarState(av, 5, false); for (let i = 0; i < 30; i++) { spin(); av.updateMatrixWorld(true); }
+      const ghosted = snap().includes('ghost');
+      setAvatarState(av, 0, true); for (let i = 0; i < 80; i++) { spin(); av.updateMatrixWorld(true); }
+      return {
+        vehiculeIgnore: ignored, avatarIdentique: before === after, couchesNettoyees: layersClean, pixelsIdentiques: dpx <= 4,
+        alphaPlafonne: XRay.MAX_ALPHA <= 0.35, cacheFantome: ghosted, cacheRestaure: snap() === before,
+      };
+    };
+  }
   let frames = 0;
   const t0 = performance.now();
   const loop = () => {
@@ -214,13 +311,32 @@ async function run3d() {
     if (shot === 'avatars') avatars.forEach((a, i) => { a.position.z = i < 3 || i > 5 ? ((frames * (i + 1) * 0.03) % 4) - 2 : 0; });
     if (shot === 'peds') peds.update(pedsFrame(30, 0, 0, t), 1 / 30);
     else if (shot === 'perf') peds.update(pedsFrame(160, 0, -6, t, 1.5), 1 / 30);
-    else if (shot !== 'vehicles' && shot !== 'taxi') peds.update(pedsFrame(shot === 'street' || occ ? 8 : 40, street.x, street.z, t), 1 / 30);
+    else if (shot !== 'vehicles' && shot !== 'taxi' && shot !== 'hiding' && shot !== 'xray_leak') peds.update(pedsFrame(shot === 'street' || occ ? 8 : 40, street.x, street.z, t), 1 / 30);
     if (shot === 'city_high') city.update(0, 0);
+    if (shot === 'hiding') { city.occludeRadius = 5.5; city.update([-8, 0.85, -3]); } // le joueur caché est au centre de l'estompage
     if (shot === 'street') city.update(street.x, street.z);
     const edge = shot === 'hud_edge';
-    hud.update({ hp: 80, vehHp: null, vehName: '', inVehicle: false, x: edge ? 326 : -30 + t, z: edge ? -326 : 50, yaw: 0.8, cops: edge ? 2 : undefined },
-      shot === 'hud' || shot === 'city' || edge || shot === 'perf' ? ME : null);
-    hud.setVisible(shot.startsWith('hud') || shot === 'perf');
+    const ME_REST: PrivateState = { ...ME, stars: 0, starProgress: 0, mission: undefined };
+    hud.update({ hp: 80, vehHp: null, vehName: '', inVehicle: false, x: edge ? 326 : -30 + t, z: edge ? -326 : 50, yaw: 0.8, cops: edge ? 2 : undefined, search: shot === 'hud' ? 'repere' : undefined },
+      shot === 'hud' || shot === 'city' || edge || shot === 'perf' ? ME : shot === 'hud_rest' || shot === 'onboarding' || shot === 'tip' || shot === 'controls' ? ME_REST : null);
+    hud.setVisible(shot.startsWith('hud') || shot === 'perf' || shot === 'onboarding' || shot === 'tip' || shot === 'controls');
+    if (guide) {
+      const dealerMark = [{ k: 'dealer', x: 170, z: -40 }]; // à droite : la flèche doit pointer à droite
+      if (shot === 'onboarding') {
+        const stp = guide.currentStep;
+        const ctx = { x: stp === 0 ? frames * 2 : 12, z: 0, onFoot: stp < 1, stars: 0, money: 120, bagCount: 0, camYaw: 0, marks: dealerMark };
+        guide.update(ctx, frames < 12 ? 0.5 : 1 / 60);
+        hud.topOffset(guide.topHeight);
+      } else guide.update({ x: 0, z: 0, onFoot: true, dealerNear: true, stars: 0, money: 120, bagCount: 0 }, 1 / 60);
+    }
+    if (hidAvatar && mateAvatar && cones) {
+      setAvatarState(hidAvatar, 5, false); setAvatarState(mateAvatar, 0, true);
+      cones.update([
+        { x: 16, z: -6, yaw: Math.PI / 2, range: 24, fov: 1.0, kind: 'cop' },
+        { x: -14, z: -14, yaw: -3 * Math.PI / 4, range: 24, fov: 1.1, kind: 'camera' },
+        { x: 300, z: 300, yaw: 0, range: 20, fov: 1, kind: 'cop' }, // trop loin : non dessiné
+      ], [0, 0], 60);
+    }
     if (edge && frames === 2) { hud.alert('arrete', 60000); hud.toast('Livraison validée'); hud.toast('Livraison validée'); hud.toast('Arrêté par la police !'); hud.setHint('ZQSD : marcher · Espace : roulade'); }
     if (markList.length) mk.update(markList, 1 / 30, [0, 0, 0]);
     if ((shot === 'fx' || shot === 'perf') && frames < 7) fx.update(1 / 30, camera);
@@ -230,9 +346,9 @@ async function run3d() {
       city.ghostInside = !off && !xr; // off / xray : on montre le défaut brut (l'intérieur noir du bâtiment) et la silhouette seule
       city.update(occFocus);
       xray.clear();
-      if (!off) { if (occTarget) xray.add(occTarget, playerColor('Léa'), 0.6); if (occMate) xray.add(occMate, playerColor('Sam'), 0.35); }
+      if (!off) { if (occTarget) xray.add(occTarget, XRay.NEUTRAL, 0.3); if (occMate) xray.add(occMate, playerColor('Sam'), 0.35); }
     } else if (shot === 'perf') {
-      xray.clear(); xray.add(views[0].group, 0xe63946, 0.6); xray.add(views[1].group, 0x1d8cf8, 0.35); // pire cas : 2 véhicules en silhouette
+      xray.clear(); xray.add(views[0].group, 0xe63946, 0.6); xray.add(views[1].group, 0x1d8cf8, 0.35); for (const a of perfAvatars) xray.add(a, XRay.NEUTRAL, 0.3); // véhicules ignorés (noXray) ; 2 personnages en silhouette
     }
     renderer.render(scene, camera);
     if (occ || shot === 'perf') xray.render();
@@ -245,6 +361,10 @@ async function run3d() {
       info.chunks = city.chunksVisible;
       info.signs = city.signCount;
       info.ms = (performance.now() - t0) / frames;
+      if (hiding && cones) { info.checks.cachettes = hiding.count === 6; info.checks.cones = cones.count === 2; cones.setVisible(false); info.checks.conesMasques = cones.count === 0; cones.setVisible(true); cones.update([{ x: 16, z: -6, yaw: Math.PI / 2, range: 24, fov: 1.0, kind: 'cop' }, { x: -14, z: -14, yaw: -3 * Math.PI / 4, range: 24, fov: 1.1, kind: 'camera' }], [0, 0], 60); }
+      if (guide) info.checks.guideEtape = shot === 'tip' ? true : guide.currentStep === 2;
+      if (controls) info.checks.aideTouches = controls.rows().some((r) => r === 'Avancer=Z') && controls.rows().some((r) => r.startsWith('Ouvrir le PDA=Tab'));
+      if (xrayCheck) Object.assign(info.checks, xrayCheck());
       info.ready = true;
     }
     requestAnimationFrame(loop);

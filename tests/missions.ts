@@ -201,7 +201,7 @@ function playMission(w: World, p: SimPlayer, def: MissionDef, o: PlayOpts = {}):
         } else { w.bus.emit('cameraDestroyed', { by: p, id: 'cam_test' }); w.tick(10); }
         break;
       }
-      case 'semer': killPolice(w, p); w.tick(30); break;
+      case 'semer': killPolice(w, p); w.tick(30); if (process.env.DBG) console.log('semer', def.id, w.police.phaseOf(p.id), w.police.starsOf(p.id), w.police.carCount, JSON.stringify(w.police.lastKnownOf(p.id)), w.sim.playerPos(p).map(Math.round)); break;
       case 'attendre': w.tick(60); break;
     }
   }

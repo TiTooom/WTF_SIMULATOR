@@ -8,14 +8,26 @@
 //  - Arrestation : à pied, avec ≥ 1 étoile, un flic (piéton `flic` du système peds, ou voiture de police près de soi) à moins de
 //    BUST_R pendant BUST_S secondes -> `playerBusted` (l'économie confisque sac + part de l'argent), retour au commissariat, event `arrete`.
 //  - Mort : event `mort`, puis réapparition à l'hôpital une fois que la simulation a relevé le joueur.
+// FURTIVITÉ (shared/hiding.ts, shared/wanted.ts) :
+//  - Vision : chaque voiture de police (60 m, 110°) et chaque flic à pied (45 m, 100°) a un cône dans son sens de marche ; les caméras de surveillance
+//    intactes balayent ± 50° (35 m) ; à moins de 7 m on est perçu dans toutes les directions ; les bâtiments bloquent la vue (lineOfSight).
+//  - États (`ws` publié dans l'état privé) : 0 libre, 1 repéré (vu : poursuite directe), 2 recherche (dernière position connue, puis quadrillage lent),
+//    3 caché. Non vu pendant LOSE_DELAY_S[étoiles - 1] secondes : une étoile tombe, puis la suivante, jusqu'à 0. Revu : le compteur repart.
+//  - Cachettes : E près d'une cachette (avec au moins 1 étoile) cache le joueur (immobile, an = 5, invisible, ni conduite ni tir) ; E ou un mouvement
+//    ressort. Grillée si un flic ≤ 15 m en ligne de vue le voit entrer. Un flic à ≤ 3 m d'un joueur caché le découvre. En recherche, une voiture
+//    qui arrive sur son point de quadrillage fouille la cachette la plus proche de la dernière position connue avec 25 % de chances (jamais deux fois la même de suite).
+//  - Une voiture est visible comme un piéton ; la police ne suit que le joueur, jamais une voiture vide : l'abandonner (même dans un garage) la rend sans effet.
 import type { SimPlayer, VRef } from '../../shared/api';
 import { bodyOk } from '../../shared/guard';
 import type { GameSystem, SystemFactory } from '../../shared/game';
 import type { CrimeKind } from '../../shared/ids';
 import type { Mark, PrivateState } from '../../shared/protocol';
-import { newDriveMem, steerTo, type DriveMem } from '../../shared/ai/drive';
+import { newDriveMem, steerTo, type DriveMem, type Pose } from '../../shared/ai/drive';
+import { canSee, copCameraCones, lineOfSight as canSeeLine, hidingSpots, nearestHidingSpot, VISION, type CopEye, type HidingSpot, type VisionCone } from '../../shared/hiding';
+import { PED_ST } from '../../shared/peds';
+import type { EconomySystem } from './economy';
 import { nearestLane } from '../../shared/city/lanes';
-import { addCrime, copDestroyed, copSpeed, copsWanted, HEAT_MAX, heatOfStars, newWanted, starProgress, starsOf, tickWanted, type WantedState } from '../../shared/wanted';
+import { addCrime, copAccelFactor, copDestroyed, copSpeed, copsWanted, copTurnFactor, HEAT_MAX, heatOfStars, newWanted, searchPhase, starProgress, starsOf, tickWanted, unseenLeft, type WantedState } from '../../shared/wanted';
 import type { PedsSystem } from './peds';
 
 export const POLICE_POOL_MAX = 10; // taille du pool de voitures de police (shared/constants VEHICLE_POOL.police)
@@ -25,7 +37,15 @@ export const BUST_S = 2; // s de contact continu
 const AI_EVERY = 3; // ticks entre deux décisions de conduite (20 Hz)
 const AI_DT = AI_EVERY / 60;
 const SPAWN_EVERY = 30; // ticks (0,5 s) : au plus une voiture de police créée par passage
-const SPAWN_MIN = 75, SPAWN_MAX = 130; // m : toujours hors du champ de vue
+const SPAWN_MIN = 100, SPAWN_MAX = 150; // m : loin, toujours hors du champ de vue
+const FIRST_SPAWN_MS = 3000; // délai entre le premier crime et l'arrivée de la première voiture
+const REINFORCE_MS = 6000; // délai entre deux voitures (pas de renfort instantané)
+const QUADRILLE_PART = 0.45; // part de la vitesse de poursuite pendant le quadrillage
+const GOTO_PART = 0.85; // part de la vitesse pour rejoindre la dernière position connue
+const GOTO_DONE = 25; // m : la voiture est « arrivée » à la dernière position connue
+const FOUILLE_CHANCE = 0.25, FOUILLE_COOLDOWN_MS = 6000, FOUILLE_RADIUS = 30;
+const BURN_MS = 60_000; // une cachette grillée reste inutilisable aussi longtemps
+const HOLD_SEEN_MS = 3000; // un joueur découvert reste « repéré » au moins ce temps
 const FAR_RELEASE = 230; // m : une voiture trop loin de tous les joueurs est recyclée
 const MARK_R = 130;
 const MAX_SAVED = 64;
@@ -45,10 +65,40 @@ export interface PoliceSystem extends GameSystem {
   readonly carCount: number;
   /** Fixe l'indice d'un joueur (0..5 ; missions, activités). Sans effet si le joueur est inconnu. */
   setStars(playerId: string, stars: number): void;
+  /** Cachette où le joueur est caché (null sinon). */
+  hiddenIn(playerId: string): HidingSpot | null;
+  /** État de recherche (WS) : 0 libre, 1 repéré, 2 recherche, 3 caché. */
+  phaseOf(playerId: string): number;
+  /** Dernière position connue du joueur par la police. */
+  lastKnownOf(playerId: string): { x: number; z: number } | null;
 }
 
-interface PState { w: WantedState; bust: number; ws: number; last: Map<CrimeKind, number>; seenBy: boolean; lastVictim: number }
-interface Car { ref: VRef; mem: DriveMem; lastHp: number; siren: boolean; x: number; z: number; speed: number }
+interface HideState { spot: HidingSpot; armed: boolean; burned: boolean; since: number }
+interface PState {
+  w: WantedState; bust: number; ws: number; last: Map<CrimeKind, number>; seenBy: boolean; lastVictim: number;
+  lk: { x: number; z: number } | null; // dernière position connue du joueur
+  lkRoad: { src: { x: number; z: number }; x: number; z: number } | null; // point de la chaussée le plus proche de `lk` (cache)
+  hide: HideState | null;
+  phase: number; // WS publié
+  holdSeenUntil: number; // ms de simulation
+  fouilleAt: number; // ms : pas de nouvelle fouille avant
+  lastSearched: string | null;
+}
+interface Car {
+  ref: VRef; mem: DriveMem; lastHp: number; siren: boolean; x: number; z: number; speed: number; yaw: number;
+  wp: { x: number; z: number } | null; wpAt: number; fouille: HidingSpot | null; onSite: boolean;
+}
+
+/**
+ * Commandes d'une voiture de police : steerTo plafonné à copSpeed(étoiles) × `speedScale`, avec une poussée et un braquage réduits
+ * (copAccelFactor / copTurnFactor) : la police est moins vive que la citadine du joueur. Exportée pour les tests.
+ */
+export function copInput(pose: Pose, target: { x: number; z: number }, stars: number, mem: DriveMem, opts: { dt?: number; speedScale?: number; arrive?: number } = {}): { f: number; s: number; jump: number } {
+  const out = steerTo(pose, target, { maxSpeed: copSpeed(stars) * (opts.speedScale ?? 1), arriveRadius: opts.arrive ?? 1.5, dt: opts.dt ?? AI_DT, mem });
+  let f = out.f ?? 0;
+  if (f > 0) f *= copAccelFactor(stars);
+  return { f, s: (out.s ?? 0) * copTurnFactor(stars), jump: out.jump ?? 0 };
+}
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const BAD = new Set(['__proto__', 'constructor', 'prototype']);
@@ -60,17 +110,32 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
   const cars = new Map<number, Car>(); // id de véhicule -> voiture pilotée par la police (VRef revalidée à chaque lecture)
   const hospitalQueue = new Set<string>(); // morts en attente de réapparition (transférés à l'hôpital)
   let tick = 0;
+  let nextSpawnAt = 0; // ms de simulation : pas de renfort avant
+  let wasWanted = false;
   let idleTicks = 0; // durée sans aucune recherche (recyclage des voitures)
   let rng = 987654;
   const rand = () => (rng = (rng * 16807) % 2147483647) / 2147483647;
   const commissariat = city.poisOf('commissariat')[0];
   const hopital = city.poisOf('hopital')[0];
   const pedsSys = () => ctx.get<PedsSystem>('peds');
+  const spots = hidingSpots(city);
+  const cameras = city.poisOf('camera');
+  const destroyedCams = new Set<string>(); // caméras vues détruites sur le bus (repli si l'économie n'expose pas isCameraDown)
+  bus.on('cameraDestroyed', (e) => { if (typeof e.id === 'string') destroyedCams.add(e.id); });
+  const camDown = (id: string): boolean => {
+    const eco = ctx.get<EconomySystem>('economy') as (EconomySystem & { isCameraDown?: (id: string) => boolean }) | undefined;
+    if (!eco) return destroyedCams.has(id);
+    if (typeof eco.isCameraDown === 'function') return !!eco.isCameraDown(id);
+    if (eco.camerasDown() === 0) { destroyedCams.clear(); return false; }
+    return destroyedCams.has(id);
+  };
+  const burned = new Map<string, number>(); // cachette -> ms de simulation de fin de grillage
+  const coneBuf: VisionCone[] = [];
 
   const ensure = (p: SimPlayer): PState => {
     let s = states.get(p.id);
     if (!s) {
-      s = { w: newWanted(), bust: 0, ws: -1, last: new Map(), seenBy: false, lastVictim: -1 };
+      s = { w: newWanted(), bust: 0, ws: -1, last: new Map(), seenBy: false, lastVictim: -1, lk: null, lkRoad: null, hide: null, phase: 0, holdSeenUntil: 0, fouilleAt: 0, lastSearched: null };
       const key = saved.has(p.name) ? p.name : p.id; // sauvegarde par pseudo (les identifiants p1, p2… changent à chaque démarrage)
       const sv = saved.get(key);
       if (sv) { s.w = { heat: sv.heat, kills: sv.kills, calm: 0 }; saved.delete(key); }
@@ -81,6 +146,22 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
   const publish = (p: SimPlayer, s: PState) => {
     const n = starsOf(s.w.heat);
     if (n !== s.ws) { s.ws = n; sim.setPlayerSnap(p.id, { ws: n }); }
+  };
+  const noteHeat = (p: SimPlayer, s: PState) => { // les flics sont prévenus du lieu du crime
+    const q = sim.playerPos(p);
+    s.lk = { x: q[0], z: q[2] };
+  };
+  const unhide = (p: SimPlayer, s: PState) => {
+    if (!s.hide) return;
+    s.hide = null;
+    sim.setPlayerSnap(p.id, { an: 0 });
+  };
+  const found = (p: SimPlayer, s: PState, text: string) => {
+    unhide(p, s);
+    noteHeat(p, s);
+    s.holdSeenUntil = sim.time + HOLD_SEEN_MS;
+    s.w = { ...s.w, calm: 0 };
+    ctx.sendTo(p.id, { k: 'toast', text });
   };
   const alive = (p: SimPlayer) => p.hp > 0 && sim.players.get(p.id) === p;
 
@@ -112,6 +193,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       if (kind === 'tir') s.lastVictim = victim;
     }
     s.w = addCrime(s.w, kind);
+    noteHeat(p, s);
     publish(p, s);
   };
 
@@ -218,7 +300,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
 
   bus.on('playerDied', ({ p }) => {
     const s = states.get(p.id);
-    if (s) { s.w = newWanted(); s.bust = 0; publish(p, s); }
+    if (s) { s.w = newWanted(); s.bust = 0; s.lk = null; unhide(p, s); publish(p, s); }
     hospitalQueue.add(p.id);
     ctx.sendTo(p.id, { k: 'mort' });
   });
@@ -230,6 +312,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     const s = ensure(p);
     const stars = Math.max(0, Math.min(5, n));
     s.w = { heat: heatOfStars(stars), kills: 0, calm: 0 };
+    if (stars > 0) noteHeat(p, s); else s.lk = null;
     publish(p, s);
   });
 
@@ -237,6 +320,8 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
   const bust = (p: SimPlayer, s: PState) => {
     s.w = newWanted();
     s.bust = 0;
+    s.lk = null;
+    unhide(p, s);
     publish(p, s);
     bus.emit('playerBusted', { p }); // l'économie confisque le sac et une part de l'argent (BUST_MONEY_LOSS)
     if (commissariat && bodyOk(p.body)) {
@@ -248,6 +333,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
   };
 
   // ---------- Conduite et population des voitures ----------
+  const yawOf = (q: { x: number; y: number; z: number; w: number }) => Math.atan2(2 * (q.x * q.z + q.w * q.y), 1 - 2 * (q.x * q.x + q.y * q.y));
   const liveCar = (id: number, c: Car) => {
     const v = sim.resolveRef(c.ref);
     if (!v || v.driver) { cars.delete(id); return null; } // recyclée, détruite ou volée
@@ -263,6 +349,8 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       const t = b.translation();
       c.x = t.x; c.z = t.z;
       c.speed = sim.forwardSpeed(b);
+      const yw = yawOf(sim.quatOf(b));
+      if (Number.isFinite(yw)) c.yaw = yw;
       if (v.hp < c.lastHp - 4 && v.lastHitBy) { // un joueur abîme une voiture de police
         const by = sim.players.get(v.lastHitBy);
         if (by) commit(by, 'agression_flic');
@@ -271,28 +359,87 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     }
   };
 
-  const yawOf = (q: { x: number; y: number; z: number; w: number }) => Math.atan2(2 * (q.x * q.z + q.w * q.y), 1 - 2 * (q.x * q.x + q.y * q.y));
+  type Wanted = { p: SimPlayer; s: PState; pos: [number, number, number]; seen: boolean };
 
-  const driveCars = (wantedPlayers: { p: SimPlayer; s: PState; pos: [number, number, number] }[]) => {
+  /** Point de chaussée le plus proche (une voiture ne roule pas dans les bâtiments) ; le point lui-même si aucune voie à 70 m. */
+  const snap = (x: number, z: number): { x: number; z: number } => {
+    const near = nearestLane(city, x, z, 70);
+    if (!near) return { x, z };
+    const { lane, t } = near;
+    return { x: lane.x0 + (lane.x1 - lane.x0) * t, z: lane.z0 + (lane.z1 - lane.z0) * t };
+  };
+  const lkRoadOf = (s: PState): { x: number; z: number } | null => {
+    const lk = s.lk;
+    if (!lk) return null;
+    if (!s.lkRoad || s.lkRoad.src !== lk) { const r = snap(lk.x, lk.z); s.lkRoad = { src: lk, x: r.x, z: r.z }; }
+    return s.lkRoad;
+  };
+
+  /** Une voiture arrivée sur son point de quadrillage : fouille éventuelle d'une cachette proche de la dernière position connue. */
+  const maybeFouille = (c: Car, w: Wanted) => {
+    const lk = w.s.lk;
+    if (!lk || sim.time < w.s.fouilleAt) return;
+    w.s.fouilleAt = sim.time + FOUILLE_COOLDOWN_MS;
+    if (rand() >= FOUILLE_CHANCE) return;
+    let best: HidingSpot | null = null, bd = FOUILLE_RADIUS;
+    for (const sp of spots) {
+      if (sp.id === w.s.lastSearched) continue; // pas deux fois de suite la même
+      const d = Math.hypot(sp.x - lk.x, sp.z - lk.z);
+      if (d < bd) { bd = d; best = sp; }
+    }
+    if (!best) return;
+    w.s.lastSearched = best.id;
+    c.fouille = best;
+    c.wp = snap(best.x, best.z);
+    c.wpAt = sim.time;
+  };
+
+  const driveCars = (wantedPlayers: Wanted[]) => {
     for (const [id, c] of [...cars]) {
       const v = liveCar(id, c);
       if (!v || !v.ai) continue;
-      let tgt: (typeof wantedPlayers)[number] | null = null;
+      // Joueur visé : le plus proche de sa position connue (réelle s'il est repéré, sinon la dernière position connue)
+      let tgt: Wanted | null = null;
       let bd = Infinity;
       for (const w of wantedPlayers) {
-        const d = Math.hypot(w.pos[0] - c.x, w.pos[2] - c.z);
+        const ax = w.seen || !w.s.lk ? w.pos[0] : w.s.lk.x, az = w.seen || !w.s.lk ? w.pos[2] : w.s.lk.z;
+        const d = Math.hypot(ax - c.x, az - c.z);
         if (d < bd) { bd = d; tgt = w; }
       }
       const inp = v.ai.input;
       if (!tgt) { inp.f = 0; inp.s = 0; inp.jump = 0; inp.hn = 0; continue; }
       const b = v.behavior.body;
       if (!bodyOk(b)) { cars.delete(id); continue; }
-      const out = steerTo(
-        { x: c.x, z: c.z, yaw: yawOf(sim.quatOf(b)), speed: c.speed },
-        { x: tgt.pos[0], z: tgt.pos[2] },
-        { maxSpeed: copSpeed(starsOf(tgt.s.w.heat)), arriveRadius: 1.5, dt: AI_DT, mem: c.mem },
-      );
-      inp.f = out.f ?? 0; inp.s = out.s ?? 0; inp.jump = out.jump ?? 0;
+      const stars = starsOf(tgt.s.w.heat);
+      let target: { x: number; z: number };
+      let scale = 1, arrive = 1.5;
+      if (tgt.seen || !tgt.s.lk) { // repéré : poursuite directe
+        target = { x: tgt.pos[0], z: tgt.pos[2] };
+        c.wp = null; c.fouille = null; c.onSite = false;
+      } else {
+        const lk = lkRoadOf(tgt.s) ?? tgt.s.lk; // on rejoint la chaussée la plus proche de la dernière position connue
+        if (!c.onSite && Math.hypot(lk.x - c.x, lk.z - c.z) <= GOTO_DONE) c.onSite = true;
+        if (!c.onSite) { // rejoindre la dernière position connue
+          target = lk; scale = GOTO_PART; arrive = 6;
+        } else { // quadrillage lent autour de la dernière position connue
+          if (!c.wp || sim.time - c.wpAt > 14_000) {
+            const a = rand() * Math.PI * 2, d = 20 + rand() * 50;
+            c.wp = snap(lk.x + Math.cos(a) * d, lk.z + Math.sin(a) * d);
+            c.wpAt = sim.time; c.fouille = null;
+          }
+          target = c.wp; scale = QUADRILLE_PART; arrive = 6;
+          if (Math.hypot(c.wp.x - c.x, c.wp.z - c.z) < 10) {
+            const f = c.fouille;
+            c.wp = null; c.fouille = null;
+            if (f) { // fouille effectuée : le joueur est-il caché ici ?
+              const h = tgt.s.hide;
+              if (h && !h.burned && h.spot.id === f.id) found(tgt.p, tgt.s, 'Un policier fouille votre cachette : vous êtes découvert !');
+            } else maybeFouille(c, tgt);
+          }
+        }
+      }
+      const out = copInput({ x: c.x, z: c.z, yaw: c.yaw, speed: c.speed }, target, stars, c.mem, { dt: AI_DT, speedScale: scale, arrive });
+      inp.f = out.f; inp.s = out.s; inp.jump = out.jump;
       inp.hn = !c.siren ? 1 : 0; // front montant unique : allume la sirène
       c.siren = true;
     }
@@ -320,17 +467,20 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       if (all.some(([px, pz]) => Math.hypot(px - x, pz - z) < SPAWN_MIN - 5)) continue; // jamais en vue d'un joueur
       const v = sim.acquireVehicle('police', x, z, lane.yaw, { ai: true });
       if (!v) return; // pool vide : on réessaiera plus tard
-      cars.set(v.id, { ref: sim.refOf(v), mem: newDriveMem(), lastHp: v.hp, siren: false, x, z, speed: 0 });
+      cars.set(v.id, { ref: sim.refOf(v), mem: newDriveMem(), lastHp: v.hp, siren: false, x, z, speed: 0, yaw: lane.yaw, wp: null, wpAt: 0, fouille: null, onSite: false });
+      nextSpawnAt = sim.time + REINFORCE_MS;
       return;
     }
   };
 
-  const manageCars = (wantedPlayers: { p: SimPlayer; s: PState; pos: [number, number, number] }[]) => {
+  const manageCars = (wantedPlayers: Wanted[]) => {
+    if (wantedPlayers.length && !wasWanted) nextSpawnAt = Math.max(nextSpawnAt, sim.time + FIRST_SPAWN_MS); // l'alerte met du temps à arriver
+    wasWanted = wantedPlayers.length > 0;
     let desired = 0;
     for (const w of wantedPlayers) desired += copsWanted(starsOf(w.s.w.heat));
     desired = Math.min(POLICE_POOL_MAX, desired);
     idleTicks = wantedPlayers.length ? 0 : idleTicks + SPAWN_EVERY;
-    if (cars.size < desired) { spawnCar(wantedPlayers); return; }
+    if (cars.size < desired) { if (sim.time >= nextSpawnAt) spawnCar(wantedPlayers); return; }
     // Distances à tous les joueurs (recyclage des voitures inutiles ou perdues)
     const players: [number, number][] = [];
     for (const p of sim.players.values()) { const q = sim.playerPos(p); players.push([q[0], q[2]]); }
@@ -349,37 +499,68 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     }
   };
 
+  // ---------- Vision ----------
+  const eyes: CopEye[] = [];
+  type PedLike = { kind: string; gone: boolean; st: number; id: number; x: number; z: number; yaw: number };
+  /** Remplit `coneBuf` : cônes de toutes les voitures de police, des flics à pied et des caméras intactes. */
+  const buildCones = (peds: readonly PedLike[] | undefined) => {
+    eyes.length = 0;
+    for (const [id, c] of cars) eyes.push({ id, x: c.x, z: c.z, yaw: c.yaw, car: true });
+    if (peds) for (const q of peds) if (q.kind === 'flic' && !q.gone && q.st !== PED_ST.KNOCKED) eyes.push({ id: q.id, x: q.x, z: q.z, yaw: q.yaw, car: false });
+    copCameraCones(eyes, cameras, camDown, sim.time / 1000, coneBuf);
+  };
+  const seenByCones = (x: number, z: number): boolean => {
+    for (const c of coneBuf) if (canSee(city, c, x, z)) return true;
+    return false;
+  };
+  /** Un flic (toutes directions, ligne de vue) à moins de GRILLE_R m, ou une caméra dont le cône couvre le point ? */
+  const spotted = (x: number, z: number, peds: readonly PedLike[] | undefined): boolean => {
+    const r = VISION.GRILLE_R;
+    for (const c of cars.values()) if (Math.hypot(c.x - x, c.z - z) <= r && canSeeLine(city, c.x, c.z, x, z)) return true;
+    if (peds) for (const q of peds) if (q.kind === 'flic' && !q.gone && Math.hypot(q.x - x, q.z - z) <= r && canSeeLine(city, q.x, q.z, x, z)) return true;
+    for (const c of coneBuf) if (c.kind === 'camera' && canSee(city, c, x, z)) return true;
+    return false;
+  };
+  const nearCop = (x: number, z: number, r: number, peds: readonly PedLike[] | undefined): boolean => {
+    for (const c of cars.values()) if (Math.hypot(c.x - x, c.z - z) <= r) return true;
+    if (peds) for (const q of peds) if (q.kind === 'flic' && !q.gone && Math.hypot(q.x - x, q.z - z) <= r) return true;
+    return false;
+  };
+
   // ---------- Pas de jeu ----------
   const fast = () => {
     refreshCars();
     const peds = pedsSys()?.peds;
-    const wantedPlayers: { p: SimPlayer; s: PState; pos: [number, number, number] }[] = [];
+    buildCones(peds);
+    const wantedPlayers: Wanted[] = [];
     for (const p of sim.players.values()) {
       const s = ensure(p);
       const pos = sim.playerPos(p);
       if (!alive(p)) { publish(p, s); continue; }
-      // Vu par un flic ? (voiture à 70 m, piéton flic à 40 m)
-      let seen = false;
       let contact = false;
-      for (const c of cars.values()) {
-        const d = Math.hypot(c.x - pos[0], c.z - pos[2]);
-        if (d < 70) seen = true;
-        if (d < BUST_CAR_R) contact = true;
+      for (const c of cars.values()) if (Math.hypot(c.x - pos[0], c.z - pos[2]) < BUST_CAR_R) contact = true;
+      if (peds) for (const q of peds) if (q.kind === 'flic' && !q.gone && Math.hypot(q.x - pos[0], q.z - pos[2]) < BUST_R) contact = true;
+      const starsBefore = starsOf(s.w.heat);
+      // Vu ? Un joueur caché (cachette valable) est invisible aux cônes ; un flic tout près le découvre.
+      let seen = false;
+      if (starsBefore > 0) {
+        const hiddenOk = !!s.hide && !s.hide.burned;
+        if (hiddenOk) { if (nearCop(pos[0], pos[2], VISION.FIND_R, peds)) found(p, s, 'Un policier vous a débusqué !'); }
+        if (!s.hide || s.hide.burned) seen = seenByCones(pos[0], pos[2]);
+        if (sim.time < s.holdSeenUntil) seen = true;
+        if (seen) s.lk = { x: pos[0], z: pos[2] };
       }
-      if (peds) {
-        for (const q of peds) {
-          if (q.kind !== 'flic' || q.gone) continue;
-          const d = Math.hypot(q.x - pos[0], q.z - pos[2]);
-          if (d < 40) seen = true;
-          if (d < BUST_R) contact = true;
-        }
-      }
+      s.seenBy = seen;
       s.w = tickWanted(s.w, AI_DT, seen);
       const stars = starsOf(s.w.heat);
+      if (stars < starsBefore) {
+        ctx.sendTo(p.id, { k: 'toast', text: stars === 0 ? 'Vous avez semé la police.' : `La police perd votre trace : ${stars} étoile${stars > 1 ? 's' : ''}.` });
+        if (stars === 0) s.lk = null;
+      }
+      s.phase = searchPhase(stars, seen, !!s.hide && !s.hide.burned);
       publish(p, s);
-      s.seenBy = seen;
-      if (stars > 0) wantedPlayers.push({ p, s, pos });
-      // Arrestation : à pied, contact continu avec un flic
+      if (stars > 0) wantedPlayers.push({ p, s, pos, seen });
+      // Arrestation : à pied, contact continu avec un flic (même pour un joueur caché : une arrestation en cours n'est pas interrompue)
       if (stars > 0 && !p.vehicle && contact && p.hp > 0 && sim.time >= p.invulnUntil) {
         s.bust += AI_DT;
         if (s.bust >= BUST_S) bust(p, s);
@@ -387,6 +568,48 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     }
     driveCars(wantedPlayers);
     if (tick % SPAWN_EVERY < AI_EVERY) manageCars(wantedPlayers);
+  };
+
+  // ---------- Cachettes ----------
+  const tryHide = (p: SimPlayer): boolean => {
+    const s = states.get(p.id);
+    if (!s || !alive(p) || p.vehicle) return false;
+    if (s.hide) { unhide(p, s); return true; } // E : on ressort
+    if (starsOf(s.w.heat) === 0) return false; // sans recherche, E garde ses autres usages (monter, dealer, planque...)
+    const pos = sim.playerPos(p);
+    const spot = nearestHidingSpot(spots, pos[0], pos[2]);
+    if (!spot) return false;
+    const peds = pedsSys()?.peds;
+    buildCones(peds);
+    const isBurned = (burned.get(spot.id) ?? 0) > sim.time || spotted(pos[0], pos[2], peds);
+    if (isBurned) burned.set(spot.id, sim.time + BURN_MS);
+    if (burned.size > 400) burned.clear();
+    s.hide = { spot, armed: false, burned: isBurned, since: sim.time };
+    sim.setPlayerSnap(p.id, { an: 5 });
+    if (isBurned) {
+      noteHeat(p, s);
+      s.holdSeenUntil = sim.time + HOLD_SEEN_MS;
+      s.w = { ...s.w, calm: 0 };
+      s.phase = 1;
+      ctx.sendTo(p.id, { k: 'toast', text: 'Cachette grillée : un policier vous a vu entrer !' });
+    } else {
+      ctx.sendTo(p.id, { k: 'toast', text: 'Vous êtes caché. E ou un mouvement pour sortir.' });
+    }
+    return true;
+  };
+
+  /** Avant chaque pas : un joueur caché qui bouge, saute ou clique ressort (avant que la simulation ne le déplace ou ne le fasse tirer). */
+  const watchHidden = () => {
+    for (const [id, s] of states) {
+      const h = s.hide;
+      if (!h) continue;
+      const p = sim.players.get(id);
+      if (!p || !alive(p) || p.vehicle) { if (p) unhide(p, s); else s.hide = null; continue; }
+      const i = p.input;
+      const idle = !!i && Math.abs(i.f) < 0.2 && Math.abs(i.s) < 0.2 && !i.jump && !i.m1 && !i.m2;
+      if (idle) h.armed = true; // il faut d'abord relâcher les touches pressées pour rejoindre la cachette
+      else if (h.armed) unhide(p, s);
+    }
   };
 
   const hospitalTransfer = () => {
@@ -412,8 +635,18 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       if (!p || typeof n !== 'number' || !Number.isFinite(n)) return;
       const s = ensure(p);
       s.w = { heat: heatOfStars(Math.max(0, Math.min(5, n))), kills: 0, calm: 0 };
+      if (s.w.heat > 0) noteHeat(p, s); else s.lk = null;
       publish(p, s);
     },
+    preStep() { watchHidden(); },
+    onInteract: (p) => tryHide(p),
+    canEnter: (p) => (states.get(p.id)?.hide ? false : undefined),
+    /** Cachette où se trouve le joueur (null sinon) : tests, HUD. */
+    hiddenIn: (id: string) => states.get(id)?.hide?.spot ?? null,
+    /** État de recherche (WS 0..3) du joueur. */
+    phaseOf: (id: string) => states.get(id)?.phase ?? 0,
+    /** Dernière position connue du joueur par la police (null sinon). */
+    lastKnownOf: (id: string) => { const l = states.get(id)?.lk; return l ? { x: l.x, z: l.z } : null; },
     postStep() {
       tick++;
       if (hospitalQueue.size) hospitalTransfer();
@@ -430,6 +663,10 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       const s = states.get(p.id);
       out.stars = starsOf(s?.w.heat ?? 0);
       out.starProgress = s ? Math.round(starProgress(s.w.heat) * 100) / 100 : 0;
+      // Détail de recherche pour le HUD : `ws` 0 libre, 1 repéré, 2 recherche, 3 caché ; `wl` = secondes avant la prochaine étoile perdue (si non vu)
+      const o = out as PrivateState & { ws?: number; wl?: number };
+      o.ws = s ? s.phase : 0;
+      if (s && s.w.heat > 0 && !s.seenBy) o.wl = Math.ceil(unseenLeft(s.w));
       if (!cars.size) return;
       const pos = sim.playerPos(p);
       const list: { d: number; m: Mark }[] = [];

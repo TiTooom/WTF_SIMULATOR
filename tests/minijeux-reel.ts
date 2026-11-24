@@ -1,7 +1,9 @@
 // PROPRIÉTAIRE : game-minigames
 // Vérification « en vrai » des 8 mini-jeux : serveur réel (startServer, port aléatoire, SAVE_DIR temporaire) + Chrome headless (CDP, rendu logiciel).
-// Chaque jeu est lancé par `/debug mg <kind>` puis JOUÉ avec de vraies entrées (Input.dispatchMouseEvent / dispatchKeyEvent) ; captures à mi-partie
-// et à la fin ; le serveur doit renvoyer mg_end ok=true. Un joueur passif doit échouer (expiration), Échap annule, etc.
+// Chaque jeu est lancé par `/debug mg <kind>` : on LIT d'abord la consigne (capture de l'écran d'instructions, jeu figé pendant la lecture), on démarre au clic
+// ou à une touche, puis on JOUE avec de vraies entrées (Input.dispatchMouseEvent / dispatchKeyEvent) ; captures à mi-partie et à la fin ; le serveur doit
+// renvoyer mg_end ok=true. Temps illimité : un joueur passif > 5,5 s reste en jeu (indice affiché), puis abandonne au bouton « Abandonner (Échap) ».
+// Une erreur volontaire (« Trop haut ! », « Mauvais fil ! ») laisse recommencer. Échap et perte du pointer lock = abandon propre (pas de pause).
 // Lancement : npx tsx tests/minijeux-reel.ts [dossier de captures]
 // Prérequis : client compilé (`npx vite build`, dist/public ou variable MG_PUBLIC) ; Chrome (variable CHROME ou chemin par défaut ; saute si absent).
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -11,7 +13,7 @@ import { join, resolve } from 'node:path';
 import { startServer } from '../server/server';
 import { getCity } from '../shared/city/layout';
 import { MINIGAME_KINDS, type MinigameKind } from '../shared/ids';
-import { DIGI_COLS, RULES, briseGlaceSpec, digicodePos, digicodeSpec, dosageSpec, tournevisSpec } from '../shared/minigames/rules';
+import { DIGI_COLS, briseGlaceSpec, digicodePos, digicodeSpec, dosageSpec, liassesSpec, tournevisSpec } from '../shared/minigames/rules';
 
 const PORT = 3100 + Math.floor(Math.random() * 800);
 const DEBUG = 9400 + Math.floor(Math.random() * 400);
@@ -67,6 +69,7 @@ async function main() {
     // Compteur d'écouteurs sur window/document (détection des fuites) installé avant tout script de la page
     await send('Page.addScriptToEvaluateOnNewDocument', {
       source: `(() => {
+        window.__esc = 0; window.addEventListener('keydown', (e) => { if (e.code === 'Escape') window.__esc++; }, true);
         const ids = new WeakMap(); let n = 0; const reg = new Set();
         const key = (t, type, fn, opt) => { if (!fn || (t !== window && t !== document)) return null; let i = ids.get(fn); if (!i) { i = ++n; ids.set(fn, i); }
           const cap = typeof opt === 'object' ? !!(opt && opt.capture) : !!opt; return (t === window ? 'w' : 'd') + '|' + type + '|' + cap + '|' + i; };
@@ -225,7 +228,7 @@ async function main() {
       async desamorcage(c) {
         // le fil flashe 0,5 s ; on attend le mélange puis on tranche la même couleur à sa nouvelle place
         let p = await probe();
-        for (let i = 0; i < 60 && !p.shuffled; i++) { await sleep(40); p = await probe(); }
+        for (let i = 0; i < 120 && !p.shuffled; i++) { await sleep(40); p = await probe(); }
         await c.mid();
         p = await probe();
         await moveTo(W / 2, p.y);
@@ -247,33 +250,116 @@ async function main() {
       },
     };
 
-    /** Lance le jeu, le joue (ou pas), renvoie le résultat serveur et la durée côté client. */
-    async function run(kind: MinigameKind, how: 'jouer' | 'passif', tag: string, vue = false) {
+    // ---------- erreurs volontaires : le jeu doit afficher un retour explicite et laisser recommencer (aucun échec définitif) ----------
+    const errAction: Partial<Record<MinigameKind, (c: Ctx) => Promise<void>>> = {
+      async digicode(c) {
+        const s = digicodeSpec(c.start.seed, c.start.difficulty);
+        for (let i = 0; i < 400; i++) { // clic dès que le curseur de la colonne 1 est nettement hors de la zone verte
+          const t = await mgNow();
+          if (Math.abs(digicodePos(s.cols[0], t + 30) - s.cols[0].center) > s.cols[0].half + 0.18) break;
+          await sleep(8);
+        }
+        await click();
+      },
+      async dosage(c) {
+        const s = dosageSpec(c.start.seed, c.start.difficulty);
+        await down();
+        for (let i = 0; i < 600; i++) { const p = await probe(); if (p.gone || p.level >= Math.min(0.97, s.targets[0] + s.tol + 0.07)) break; await sleep(4); }
+        await up();
+      },
+      async desamorcage() {
+        let p = await probe();
+        for (let i = 0; i < 80 && !p.shuffled; i++) { await sleep(40); p = await probe(); }
+        p = await probe();
+        await moveTo(W / 2, p.y > 200 ? p.y - 56 : p.y + 56);
+        await click();
+      },
+      async liasses(c) {
+        const s = liassesSpec(c.start.seed, c.start.difficulty);
+        const p = await probe();
+        for (let i = 0; i < s.target + s.maxOver + 1; i++) {
+          await moveTo(p.sx, p.sy, 140, 0);
+          await down();
+          await moveTo(p.gx, p.gy, 140, 0);
+          await up();
+        }
+      },
+      async fouille() {
+        const p = await probe();
+        await moveTo(p.x, p.y); // clic sur l'objet avant d'avoir balayé
+        await click();
+      },
+    };
+
+    /** Attend l'écoulement de l'animation de sortie (la superposition se retire seule). */
+    const overlayGone = async () => { for (let i = 0; i < 40 && (await ev<boolean>(`!!document.getElementById('mg-overlay')`)); i++) await sleep(100); };
+
+    type Mode = 'jouer' | 'passif' | 'erreur';
+    /**
+     * Lance le jeu : LIT la consigne (capture), démarre au clic ou à une touche, puis joue / reste passif / se trompe d'abord.
+     * Retourne ce qu'on a vu (première fois, consigne affichée, jeu figé pendant la consigne...) et le résultat serveur.
+     */
+    async function run(kind: MinigameKind, mode: Mode, tag: string, opt: { shots?: boolean; touche?: boolean } = {}) {
+      const shots = !!opt.shots;
       home();
       mx = 640; my = 360; await mouse('mouseMoved'); // la souris repart du centre à chaque partie (le curseur du jeu aussi) : pas de dérive hors fenêtre
       await clearEv();
+      await ev('delete window.__mgHintMs');
       await sendChat(`/debug mg ${kind}`);
       let st: Ev | undefined;
       for (let i = 0; i < 40 && !st; i++) { await sleep(100); st = (await events()).find((e) => e.k === 'mg_start'); }
-      if (!st?.s) return { started: false, ok: false, ms: 0, starts: 0 };
+      if (!st?.s) return { started: false, ok: false, ms: 0, starts: 0, first: false, intro: false, frozen: false, still: false, hint: false, closedOk: false };
       for (let i = 0; i < 20 && !(await ev<boolean>('!!window.__mg')); i++) await sleep(50);
       const t0 = Date.now();
-      if (vue && how === 'jouer') await shot(`${tag}_0_debut`, true);
-      if (how === 'jouer') {
-        await Promise.race([
-          bots[kind]({ start: st.s, mid: async () => { if (vue) await shot(`${tag}_1_mi`); } }),
-          sleep(SCENARIO_MS).then(() => { throw new Error('bot trop long'); }),
-        ]);
-        if (vue) await shot(`${tag}_2_fin`);
+      const first = await ev<boolean>('__mg.first()');
+      const intro = (await ev<string>('__mg.phase()')) === 'intro';
+      await sleep(250);
+      if (shots) await shot(`${tag}_0_consigne${first ? '_longue' : '_courte'}`);
+      await sleep(600); // « lecture » de la consigne : pendant ce temps, le jeu ne tourne pas
+      const frozen = (await ev<string>('__mg.phase()')) === 'intro' && (await mgNow()) === 0 && Object.keys(await probe()).length === 0;
+      // démarrage : un clic (souris) ou une touche (clavier)
+      if (opt.touche) await key('Space', 32, ' '); else await click();
+      for (let i = 0; i < 20 && (await ev<string>('__mg.phase()')) !== 'play'; i++) await sleep(50);
+      const playing = (await ev<string>('__mg.phase()')) === 'play';
+      let still = false;
+      let hint = false;
+      let closedOk = false;
+      const bot = () => Promise.race([
+        bots[kind]({ start: st!.s!, mid: async () => { if (shots) await shot(`${tag}_1_mi`); } }),
+        sleep(SCENARIO_MS).then(() => { throw new Error('bot trop long'); }),
+      ]);
+      if (playing && mode === 'passif') {
+        await ev('window.__mgHintMs = 1200');
+        await sleep(1800);
+        hint = await ev<boolean>('__mg.hintShown()');
+        if (shots) await shot(`${tag}_3_indice`);
+        await sleep(3800); // plus de 5,5 s depuis le début : l'ancienne limite (4,5 s) est dépassée
+        still = (await ev<boolean>('!!document.getElementById("mg-overlay")')) && !(await ev<boolean>('__mg.sent()')) && !(await events()).some((e) => e.k === 'mg_end');
+        // bouton « Abandonner (Échap) » cliqué à la souris
+        await moveTo(W - 100, H + 26, 60, 4);
+        if (shots) await shot(`${tag}_4_abandon`);
+        await click();
+        let end: Ev | undefined;
+        for (let i = 0; i < 30 && !end; i++) { await sleep(100); end = (await events()).find((e) => e.k === 'mg_end'); }
+        await overlayGone();
+        closedOk = !!end && end.ok === false && !(await ev<boolean>(`!!document.getElementById('mg-overlay')`));
+      } else if (playing) {
+        if (mode === 'erreur') {
+          await errAction[kind]!({ start: st.s, mid: async () => {} });
+          await sleep(300);
+          if (shots) await shot(`${tag}_2_erreur`);
+          still = (await ev<boolean>('!!document.getElementById("mg-overlay")')) && !(await ev<boolean>('__mg.sent()')) && !(await events()).some((e) => e.k === 'mg_end');
+          await sleep(1700); // le temps que le jeu se remette en place (« recommence »)
+        }
+        await bot();
+        if (shots) await shot(`${tag}_5_fin`);
       }
       let end: Ev | undefined;
       for (let i = 0; i < 100 && !end; i++) { await sleep(100); end = (await events()).find((e) => e.k === 'mg_end'); }
-      if (vue && how === 'passif') await shot(`${tag}_3_echec`); // animation de sortie en rouge
       const starts = (await events()).filter((e) => e.k === 'mg_start').length;
-      if (process.env.DEBUGMG) console.log('     [debug]', kind, how, JSON.stringify((await events()).map((e) => ({ k: e.k, ok: e.ok, at: Math.round(e.at) }))), 'hp', player().hp);
-      // la superposition se ferme d'elle-même après l'animation de sortie
-      for (let i = 0; i < 30 && (await ev<boolean>(`!!document.getElementById('mg-overlay')`)); i++) await sleep(100);
-      return { started: true, ok: !!end?.ok, ended: !!end, ms: Date.now() - t0, starts, maxMs: st.s.maxMs, s: st.s };
+      if (process.env.DEBUGMG) console.log('     [debug]', kind, mode, JSON.stringify((await events()).map((e) => ({ k: e.k, ok: e.ok, at: Math.round(e.at) }))), 'hp', player().hp);
+      await overlayGone();
+      return { started: true, ok: !!end?.ok, ended: !!end, ms: Date.now() - t0, starts, s: st.s, first, intro: intro && playing, frozen, still, hint, closedOk };
     }
 
     const baseLis = await ev<number>('window.__lis()');
@@ -283,27 +369,35 @@ async function main() {
     home();
     await sleep(500);
 
-    // ---------- 1. chaque jeu : réussite jouée, échec passif, deuxième essai d'affilée ----------
+    // ---------- 1. chaque jeu : consigne lue, jeu joué, retour d'erreur, 2e partie (consigne courte), passif > 5 s puis abandon au bouton ----------
     const ONLY = (process.env.MG_ONLY ?? '').split(',').filter(Boolean);
     for (const kind of MINIGAME_KINDS) {
       if (ONLY.length && !ONLY.includes(kind)) continue;
-      let r: Awaited<ReturnType<typeof run>> | null = null;
-      let attempts = 0;
-      // premier essai : avec captures (le temps perdu aux captures peut coûter la partie : un essai de plus sans capture au besoin)
-      r = await run(kind, 'jouer', kind, true); attempts++;
-      if (!r.ok) { console.log(`     ${kind} : essai ${attempts} perdu (${r.ms} ms), nouvel essai sans capture`); r = await run(kind, 'jouer', kind); attempts++; }
-      if (!r.ok) { r = await run(kind, 'jouer', kind); attempts++; }
-      check(r.started && r.ok, `${kind} : joué à la souris/clavier, le serveur valide (mg_end ok)`, `${attempts} essai(s), ${r.ms} ms`);
-      const r2 = await run(kind, 'jouer', kind); // enchaîné immédiatement
+      const t0 = Date.now();
+      await ev(`localStorage.removeItem('gta-mg-vu:${kind}')`); // « première fois » garantie
+      let r = await run(kind, 'jouer', kind, { shots: true });
+      const firstSeen = r.first;
+      let attempts = 1;
+      while (!r.ok && attempts < 3) { console.log(`     ${kind} : essai ${attempts} perdu (${r.ms} ms), nouvel essai`); r = await run(kind, 'jouer', kind); attempts++; }
+      check(r.started && r.ok, `${kind} : consigne lue puis joué à la souris/clavier, le serveur valide (mg_end ok)`, `${attempts} essai(s), ${r.ms} ms`);
+      check(firstSeen && r.intro && r.frozen, `${kind} : première fois = consigne longue, jeu figé pendant la lecture, démarre ensuite`, `première=${firstSeen} consigne=${r.intro} figé=${r.frozen}`);
+      const r2 = await run(kind, 'jouer', kind + '_2', { shots: false, touche: true }); // démarrage à une touche, consigne courte (déjà vu)
       let ok2 = r2.ok;
-      if (!ok2) ok2 = (await run(kind, 'jouer', kind)).ok;
-      check(ok2, `${kind} : deuxième partie d'affilée réussie`);
-      const rp = await run(kind, 'passif', kind, true);
-      check(rp.started && !rp.ok && rp.ended === true, `${kind} : joueur passif -> échec`, `${rp.ms} ms (max ${RULES[kind].maxMs})`);
-      check(rp.ms <= RULES[kind].maxMs + 2500, `${kind} : échec passif dans les temps (< 4 s + sortie)`, `${rp.ms} ms`);
+      if (!ok2) ok2 = (await run(kind, 'jouer', kind + '_2', { touche: true })).ok;
+      check(ok2 && r2.first === false, `${kind} : 2e partie : consigne courte (déjà vu), démarrage à une touche, réussie`, `déjà vu=${!r2.first}`);
+      if (errAction[kind]) {
+        let re = await run(kind, 'erreur', kind, { shots: true });
+        if (!re.ok) re = await run(kind, 'erreur', kind + '_b');
+        check(re.started && re.still && re.ok, `${kind} : erreur volontaire -> le jeu reste ouvert (recommence), puis réussite`, `reste ouvert=${re.still} réussi=${re.ok}`);
+      }
+      const rp = await run(kind, 'passif', kind, { shots: true });
+      check(rp.started && rp.still, `${kind} : passif plus de 5,5 s : toujours ouvert, aucune expiration`, `${rp.ms} ms`);
+      check(rp.hint, `${kind} : indice affiché quand le joueur bloque`);
+      check(rp.closedOk, `${kind} : clic sur « Abandonner (Échap) » : mg_end ok=false, superposition retirée`);
       check(!(await ev<boolean>(`!!document.getElementById('mg-overlay')`)), `${kind} : superposition retirée`);
+      console.log(`     ${kind} : scénario ${Math.round((Date.now() - t0) / 1000)} s`);
     }
-    check((await ev<number>('window.__lis()')) === baseLis, 'aucune fuite d\'écouteurs window/document après 24 parties', `${baseLis} -> ${await ev<number>('window.__lis()')}`);
+    check((await ev<number>('window.__lis()')) === baseLis, 'aucune fuite d\'écouteurs window/document après toutes les parties', `${baseLis} -> ${await ev<number>('window.__lis()')}`);
 
     // ---------- 1b. capture de contexte : le mini-jeu par-dessus la ville réelle (rendu 3D réactivé) ----------
     if (!ONLY.length || ONLY.includes('contexte')) {
@@ -320,29 +414,37 @@ async function main() {
       await ev('window.__noGL = true');
     }
 
-    // ---------- 2. annulation par Échap ----------
+    // ---------- 2. abandon par Échap (consigne, puis partie) ----------
     if (!ONLY.length) {
-      await clearEv();
-      await sendChat('/debug mg digicode');
-      for (let i = 0; i < 30 && !(await ev<boolean>('!!window.__mg')); i++) await sleep(100);
-      await sleep(400);
-      await key('Escape', 27, 'Escape');
-      let end: Ev | undefined;
-      for (let i = 0; i < 30 && !end; i++) { await sleep(100); end = (await events()).find((e) => e.k === 'mg_end'); }
-      check(!!end && end.ok === false, 'Échap annule : échec envoyé, mg_end ok=false');
-      check(!(await ev<boolean>(`!!document.getElementById('mg-overlay')`)), 'Échap : superposition retirée immédiatement');
+      for (const [quand, kind] of [['pendant la consigne', 'digicode'], ['en pleine partie', 'brise_glace']] as const) {
+        await sleep(3000); // anti-spam du chat
+        await clearEv();
+        await ev('window.__esc = 0');
+        await sendChat(`/debug mg ${kind}`);
+        for (let i = 0; i < 30 && !(await ev<boolean>('!!window.__mg')); i++) await sleep(100);
+        await sleep(600);
+        if (quand === 'en pleine partie') { await click(); await sleep(300); await click(); await sleep(200); }
+        await key('Escape', 27, 'Escape');
+        let end: Ev | undefined;
+        for (let i = 0; i < 30 && !end; i++) { await sleep(100); end = (await events()).find((e) => e.k === 'mg_end'); }
+        check(!!end && end.ok === false, `Échap ${quand} : abandon envoyé, mg_end ok=false`);
+        check(!(await ev<boolean>(`!!document.getElementById('mg-overlay')`)), `Échap ${quand} : superposition retirée immédiatement (le joueur reprend la main)`);
+      }
       const rr = await run('brise_glace', 'jouer', 'apres_echap');
-      check(rr.ok, 'nouvelle partie possible juste après Échap');
+      check(rr.ok, 'nouvelle partie possible juste après un abandon');
     }
-    // perte du pointer lock = annulation
+    // perte du pointer lock (Échap sous Chromium) = abandon, sans ouvrir la pause du jeu
     if (!ONLY.length) {
+      await sleep(3000);
       await clearEv();
+      await ev('window.__esc = 0');
       await sendChat('/debug mg dosage');
       for (let i = 0; i < 30 && !(await ev<boolean>('!!window.__mg')); i++) await sleep(100);
       await ev(`document.dispatchEvent(new Event('pointerlockchange'))`);
       let end: Ev | undefined;
       for (let i = 0; i < 30 && !end; i++) { await sleep(100); end = (await events()).find((e) => e.k === 'mg_end'); }
-      check(!!end && end.ok === false && !(await ev<boolean>(`!!document.getElementById('mg-overlay')`)), 'perte du pointer lock : annulation propre');
+      check(!!end && end.ok === false && !(await ev<boolean>(`!!document.getElementById('mg-overlay')`)), 'perte du pointer lock : abandon propre');
+      check((await ev<number>('window.__esc')) >= 1, 'perte du pointer lock : un Échap synthétique est émis (main.ts n\'ouvre pas la pause)');
     }
 
     // ---------- 3. robustesse côté jeu ----------

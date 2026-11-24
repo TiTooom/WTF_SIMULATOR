@@ -175,29 +175,49 @@ export function makeOccludable<T extends THREE.Material>(m: T, ownVertex = false
 }
 
 /**
- * Silhouette « rayons X » : redessine les cibles (joueur local, coéquipiers) en aplat translucide, UNIQUEMENT là où elles sont cachées par le décor
+ * Silhouette « rayons X » du PERSONNAGE À PIED uniquement : redessine la cible en aplat très translucide, là où le décor la cache
  * (test de profondeur inversé). Usage : `xray.clear(); xray.add(groupe, couleur, opacité)...; renderer.render(scene, camera); xray.render();`.
+ *
+ * Règles (retours de test « tout reste violet ») :
+ *  - les VÉHICULES n'ont plus de silhouette (`userData.noXray`, posé par `viewFor().build`) : l'estompage des bâtiments suffit ;
+ *  - l'opacité est plafonnée (XRay.MAX_ALPHA) : un liseré discret, jamais un aplat envahissant ; couleur neutre par défaut (XRay.NEUTRAL) ;
+ *  - aucune fuite d'état : seuls les maillages marqués par `add` portent une couche ≥ 1, et `clear()` les nettoie ; en plus, un balayage
+ *    périodique (et `reset()`) remet à zéro les couches de TOUTE la scène (objet retiré/recréé en cours d'image, véhicule détruit...) ;
+ *  - ce module ne modifie jamais un matériau de la scène (matériau de dessin propre, appliqué par `overrideMaterial`).
  * Coût : un second rendu des seuls maillages cibles (contours et sprites exclus), ≈ 10-25 appels de dessin ; aucun asset.
  */
 export class XRay {
   static readonly MAX = 6;
+  static readonly MAX_ALPHA = 0.32;
+  static readonly NEUTRAL = 0xffffff;
   private items: { g: THREE.Object3D; color: number; alpha: number }[] = [];
   private tagged: { o: THREE.Object3D; layer: number }[] = [];
+  private sweep = 0;
   private readonly mat = new THREE.MeshBasicMaterial({
     transparent: true, depthWrite: false, depthFunc: THREE.GreaterDepth, fog: false,
     polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
   });
   constructor(private renderer: THREE.WebGLRenderer, private scene: THREE.Scene, private camera: THREE.Camera) {}
 
+  /** Nombre de silhouettes enregistrées pour cette image (tests). */
+  get count(): number { return this.items.length; }
+
   clear(): void {
     for (const t of this.tagged) t.o.layers.disable(t.layer);
     this.tagged.length = 0;
     this.items.length = 0;
+    if (++this.sweep % 90 === 0) this.reset();
   }
-  add(g: THREE.Object3D, color: number, alpha = 0.55): void {
-    if (this.items.length >= XRay.MAX || !g.visible) return;
+  /** Remet à zéro les couches 1..MAX de tous les objets de la scène (seule la couche 0 reste). */
+  reset(): void {
+    this.scene.traverse((o) => { if (o.layers.mask !== 1) o.layers.mask &= 1; });
+    this.tagged.length = 0;
+    this.items.length = 0;
+  }
+  add(g: THREE.Object3D, color: number = XRay.NEUTRAL, alpha = 0.3): void {
+    if (this.items.length >= XRay.MAX || !g.visible || g.userData.noXray) return;
     const layer = 1 + this.items.length;
-    this.items.push({ g, color, alpha });
+    this.items.push({ g, color, alpha: Math.min(XRay.MAX_ALPHA, Math.max(0, alpha)) });
     g.traverse((o) => {
       if (!(o as THREE.Mesh).isMesh || (o as THREE.Mesh).material === outlineMat || !o.visible) return;
       o.layers.enable(layer);
@@ -209,13 +229,16 @@ export class XRay {
     const r = this.renderer, s = this.scene, cam = this.camera;
     const bg = s.background, fog = s.fog, ac = r.autoClear, ar = r.info.autoReset, mask = cam.layers.mask;
     s.background = null; s.fog = null; r.autoClear = false; r.info.autoReset = false; s.overrideMaterial = this.mat;
-    this.items.forEach((it, i) => {
-      this.mat.color.setHex(it.color);
-      this.mat.opacity = it.alpha;
-      cam.layers.set(1 + i);
-      r.render(s, cam);
-    });
-    s.overrideMaterial = null; s.background = bg; s.fog = fog; r.autoClear = ac; r.info.autoReset = ar; cam.layers.mask = mask;
+    try {
+      this.items.forEach((it, i) => {
+        this.mat.color.setHex(it.color);
+        this.mat.opacity = it.alpha;
+        cam.layers.set(1 + i);
+        r.render(s, cam);
+      });
+    } finally {
+      s.overrideMaterial = null; s.background = bg; s.fog = fog; r.autoClear = ac; r.info.autoReset = ar; cam.layers.mask = mask;
+    }
   }
   dispose(): void { this.clear(); this.mat.dispose(); }
 }

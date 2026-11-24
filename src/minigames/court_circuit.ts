@@ -2,6 +2,7 @@
 // Court-circuit sous le volant : glisser les deux bouts de câble dénudés dans la zone cuivrée et les maintenir en contact 1 s.
 // Données envoyées : [ms de contact cumulés]. Règle : shared/minigames/rules.ts (courtCircuitSpec, HOTWIRE_HOLD_MS).
 import { HOTWIRE_HOLD_MS, courtCircuitSpec } from '../../shared/minigames/rules';
+import { HINTS } from './help';
 import { H, INK, PAL, W, box, burst, clamp, disc, googly, line, type MgFactory } from './kit';
 
 const GRAB = 46; // rayon de saisie d'un bout de câble
@@ -31,9 +32,16 @@ export const createCourtCircuit: MgFactory = (env) => {
       let bd = GRAB;
       ends.forEach((e, i) => { const d = Math.hypot(e.x - env.cursor.x, e.y - env.cursor.y); if (d < bd) { bd = d; best = i; } });
       held = best;
-      if (best >= 0) env.sfx('mg_push');
+      if (best >= 0) { env.sfx('mg_push'); env.progress(); }
     },
     onUp() { held = -1; },
+    hint() {
+      const a = inZone(ends[0]);
+      const b = inZone(ends[1]);
+      if (!a && !b) return { x: zone.x, y: zone.y, r: ZONE_R + 8, text: HINTS.court_zone };
+      if (a !== b) { const o = ends[a ? 1 : 0]; return { x: o.x, y: o.y, r: 40, text: HINTS.court_autre }; }
+      return { x: zone.x, y: zone.y, r: ZONE_R + 8, text: HINTS.court_toucher };
+    },
     probe: () => ({ zx: zone.x, zy: zone.y, e0x: ends[0].x, e0y: ends[0].y, e1x: ends[1].x, e1y: ends[1].y, hold }),
     // le bout suit la souris à chaque mouvement (pas à chaque image : robuste aux machines lentes)
     onMove(x, y) {
@@ -48,7 +56,9 @@ export const createCourtCircuit: MgFactory = (env) => {
         ends[held].y = clamp(env.cursor.y, 30, H - 30);
       } else held = -1;
       const touching = Math.hypot(ends[0].x - ends[1].x, ends[0].y - ends[1].y) < CONTACT && inZone(ends[0]) && inZone(ends[1]);
+      if (wasTouching && !touching && hold > 250) env.say('Contact perdu !');
       if (touching) {
+        env.progress();
         if (!wasTouching) env.sfx('mg_spark');
         hold += dt * 1000;
         flash = (flash + dt * 30) % 2;

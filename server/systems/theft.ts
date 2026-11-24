@@ -17,8 +17,9 @@ export const THEFT_PROFILE: Record<string, { kind: MinigameKind; difficulty: num
 };
 export const profileOf = (type: string) => THEFT_PROFILE[type] ?? { kind: 'court_circuit' as MinigameKind, difficulty: 0.5 };
 
-/** Motifs de fin qui déclenchent l'alarme (le joueur a échoué ou abandonné ; s'éloigner, être touché, mourir ne la déclenche pas). */
-const ALARM_REASONS = new Set(['echec', 'invalide', 'trop_rapide', 'trop_long', 'expire']);
+/** Motifs de fin qui déclenchent l'alarme : échec réel ou résultat refusé. DÉCISION : un abandon volontaire (Échap / bouton) ne déclenche PAS l'alarme,
+ *  pas plus que s'éloigner, être touché, mourir, ou une session expirée (garde-fou). Le client rejoue tout seul après une erreur de jeu : l'échec réel est rare. */
+const ALARM_REASONS = new Set(['echec', 'invalide', 'trop_rapide']);
 const ALARM_MS = 2400;
 const ALARM_BEEP_MS = 600;
 const MAX_ALARMS = 8;

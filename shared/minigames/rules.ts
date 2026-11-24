@@ -1,5 +1,6 @@
 // PROPRIÉTAIRE : game-minigames
-// Règles de chaque mini-jeu, partagées serveur/client : durées plausibles, distance d'annulation, « spec » déterministe tirée de la
+// Règles de chaque mini-jeu, partagées serveur/client : durée minimale plausible (AUCUNE durée maximale : temps illimité, seul un garde-fou
+// serveur très large évite les sessions fantômes), distance d'annulation, « spec » déterministe tirée de la
 // graine (le client anime exactement ce que le serveur sait recalculer) et validation du résultat. Le serveur ne fait jamais confiance
 // au client : `validate` est appelé APRÈS les contrôles de durée (server/systems/minigames.ts) et ne lit que `seed`, `difficulty`, `result`.
 import type { MinigameKind } from '../ids';
@@ -7,10 +8,18 @@ import type { MinigameResult } from '../protocol';
 
 export interface MinigameRule {
   minMs: number; // durée minimale plausible (un résultat plus rapide est refusé)
-  maxMs: number; // durée maximale (au-delà : échec) ; reste sous 4,5 s (consigne : micro-interaction < 4 s)
   cancelDist: number; // m : annulé si le joueur s'éloigne de plus que ça
   validate(seed: number, difficulty: number, result: MinigameResult): boolean;
 }
+
+/** Garde-fou serveur contre les sessions fantômes (client planté, onglet oublié) : 10 min, très au-delà d'une partie normale. Ce n'est PAS une limite de jeu. */
+export const SESSION_GUARD_MS = 10 * 60 * 1000;
+/** Abandon volontaire : le client envoie `ok:false` avec `data = [ABANDON_MARK]`. Le serveur n'y voit aucune punition (pas d'alarme de vol). */
+export const ABANDON_MARK = -1;
+export const isAbandon = (r: MinigameResult): boolean => !r.ok && Array.isArray(r.data) && r.data.length === 1 && r.data[0] === ABANDON_MARK;
+
+/** Plafond de `ms` accepté par parseGameMsg (shared/game.ts : 60 000) ; le client envoie min(ms, MS_CAP) puisque le temps est illimité. */
+export const MS_CAP = 59_000;
 
 // ---------- Outils déterministes ----------
 export const clamp01 = (n: number) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
@@ -99,19 +108,19 @@ export const liassesSpec = (seed: number, d = 0) => ({
 });
 
 // ---------- Règles ----------
-const mk = (minMs: number, maxMs: number, validate: MinigameRule['validate'], cancelDist = 4): MinigameRule => ({ minMs, maxMs, cancelDist, validate });
+const mk = (minMs: number, validate: MinigameRule['validate'], cancelDist = 4): MinigameRule => ({ minMs, cancelDist, validate });
 
 export const RULES: Record<MinigameKind, MinigameRule> = {
-  tournevis: mk(1300, 4200, (seed, d, r) => {
+  tournevis: mk(1300, (seed, d, r) => {
     const s = tournevisSpec(seed, d);
     const [turns, pressMs] = data(r);
     return r.ok && finite(turns) && finite(pressMs) && turns >= s.turns && pressMs >= s.minPressMs && r.ms >= 350 * s.turns * 0.6;
   }),
-  court_circuit: mk(1300, 4200, (_seed, _d, r) => { // la zone et le contact sont jugés par le client ; le serveur ne vérifie que la tenue et la durée
+  court_circuit: mk(1300, (_seed, _d, r) => { // la zone et le contact sont jugés par le client ; le serveur ne vérifie que la tenue et la durée
     const [holdMs] = data(r);
     return r.ok && finite(holdMs) && holdMs >= HOTWIRE_HOLD_MS && r.ms >= holdMs + 150;
   }),
-  digicode: mk(1000, 4200, (seed, d, r) => {
+  digicode: mk(1000, (seed, d, r) => {
     const s = digicodeSpec(seed, d);
     const t = data(r);
     if (!r.ok || t.length !== DIGI_COLS || !t.every((x) => finite(x) && x >= 0)) return false;
@@ -119,9 +128,9 @@ export const RULES: Record<MinigameKind, MinigameRule> = {
       if (i > 0 && t[i] - t[i - 1] < s.minGapMs) return false;
       if (Math.abs(digicodePos(s.cols[i], t[i]) - s.cols[i].center) > s.cols[i].half) return false;
     }
-    return t[DIGI_COLS - 1] <= r.ms + 50;
+    return t[DIGI_COLS - 1] <= r.ms + 50 || r.ms >= MS_CAP; // le client plafonne `ms` à MS_CAP (le protocole refuse > 60 s) : une longue partie reste valide
   }),
-  dosage: mk(1700, 4000, (seed, d, r) => {
+  dosage: mk(1700, (seed, d, r) => {
     const s = dosageSpec(seed, d);
     const lv = data(r);
     if (!r.ok || lv.length !== DOSAGE_BOTTLES || !lv.every(finite)) return false;
@@ -132,22 +141,22 @@ export const RULES: Record<MinigameKind, MinigameRule> = {
     }
     return r.ms >= (sum / DOSAGE_FILL_RATE) * 900;
   }),
-  fouille: mk(900, 4000, (seed, d, r) => {
+  fouille: mk(900, (seed, d, r) => {
     const s = fouilleSpec(seed, d);
     const [slot, swipes] = data(r);
     return r.ok && slot === s.slot && finite(swipes) && swipes >= s.swipes && r.ms >= swipes * 120;
   }),
-  brise_glace: mk(700, 4000, (seed, d, r) => {
+  brise_glace: mk(700, (seed, d, r) => {
     const s = briseGlaceSpec(seed, d);
     const [hits] = data(r);
     return r.ok && finite(hits) && hits >= s.hits && r.ms >= (hits / s.maxCps) * 1000;
   }),
-  desamorcage: mk(800, 4000, (seed, d, r) => {
+  desamorcage: mk(800, (seed, d, r) => {
     const s = desamorcageSpec(seed, d);
     const [cut] = data(r);
     return r.ok && cut === s.wire && r.ms >= s.flashMs + 150;
   }),
-  liasses: mk(900, 4200, (seed, d, r) => {
+  liasses: mk(900, (seed, d, r) => {
     const s = liassesSpec(seed, d);
     const [placed] = data(r);
     return r.ok && finite(placed) && Number.isInteger(placed) && placed >= s.target && placed <= s.target + s.maxOver && r.ms >= placed * s.perMs;

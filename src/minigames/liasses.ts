@@ -4,6 +4,7 @@
 // Données envoyées : [liasses posées]. Règle : shared/minigames/rules.ts (liassesSpec : cible 3..5, tolérance 1 ou 0 selon la difficulté).
 // Détail drôle : le contact à lunettes noires fait office de jauge de satisfaction (grimace, sourire, rage).
 import { liassesSpec } from '../../shared/minigames/rules';
+import { HINTS } from './help';
 import { INK, PAL, box, burst, disc, sweat, type MgFactory } from './kit';
 
 const STACK = { x: 55, y: 240, w: 120, h: 70 };
@@ -19,6 +20,7 @@ export const createLiasses: MgFactory = (env) => {
   let done = false;
   let over = false;
   let at = 0;
+  let retryAt = 0; // trop de liasses : les billets s'envolent, puis on recommence
   let nod = 0; // hochement de tête du contact quand une liasse tombe
   const flying: { x: number; y: number; vx: number; vy: number; rot: number }[] = [];
 
@@ -34,14 +36,16 @@ export const createLiasses: MgFactory = (env) => {
   const place = () => {
     placed++;
     nod = 1;
+    env.progress();
     env.sfx('mg_coin', placed);
     if (placed > spec.target + spec.maxOver) {
       done = true;
       over = true;
       at = env.now();
+      retryAt = at + 1300;
+      env.say('Trop de liasses !');
       for (let i = 0; i < 14; i++) flying.push({ x: GAUGE.x + GAUGE.w / 2, y: GAUGE.y + 40, vx: (Math.random() - 0.5) * 700, vy: -200 - Math.random() * 400, rot: Math.random() * 6 });
       env.sfx('mg_flutter');
-      env.finish(false, [placed]);
     }
   };
 
@@ -51,17 +55,27 @@ export const createLiasses: MgFactory = (env) => {
       if (btn !== 0 || done) return;
       const c = env.cursor;
       if (placed >= spec.target && c.x > STAMP.x - 10 && c.x < STAMP.x + STAMP.w + 10 && c.y > STAMP.y - 10 && c.y < STAMP.y + STAMP.h + 10) { validate(); return; }
-      if (c.x > STACK.x - 30 && c.x < STACK.x + STACK.w + 30 && c.y > STACK.y - 50 && c.y < STACK.y + STACK.h + 30) { carrying = true; env.sfx('mg_rustle'); }
+      if (c.x > STACK.x - 30 && c.x < STACK.x + STACK.w + 30 && c.y > STACK.y - 50 && c.y < STACK.y + STACK.h + 30) { carrying = true; env.sfx('mg_rustle'); env.progress(); }
+      else if (placed >= spec.target && c.x > STAMP.x - 10) env.say('Clique sur le tampon vert !');
+      else env.say('Clique sur la pile de billets, à gauche !');
     },
     onUp(btn) {
       if (btn !== 0 || done || !carrying) return;
       carrying = false;
       if (inGauge()) place();
+      else env.say('Lâche la liasse dans la jauge !');
     },
     onKey(code) {
       if (code === 'Enter') validate();
     },
+    hint() {
+      if (placed >= spec.target) return { x: STAMP.x + STAMP.w / 2, y: STAMP.y + STAMP.h / 2, r: 80, text: HINTS.liasses_valider };
+      return carrying
+        ? { x: GAUGE.x + GAUGE.w / 2, y: GAUGE.y + GAUGE.h / 2, r: 130, text: HINTS.liasses_poser }
+        : { x: STACK.x + STACK.w / 2, y: STACK.y + STACK.h / 2 - 10, r: 80, text: HINTS.liasses_prendre };
+    },
     update(dt) {
+      if (retryAt && env.now() >= retryAt) { retryAt = 0; done = false; over = false; placed = 0; carrying = false; flying.length = 0; env.progress(); }
       nod = Math.max(0, nod - dt * 5);
       for (const f of flying) { f.x += f.vx * dt; f.y += f.vy * dt; f.vy += 1200 * dt; f.rot += dt * 9; }
     },

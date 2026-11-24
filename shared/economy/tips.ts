@@ -10,19 +10,19 @@ export type TipKind = 'penurie' | 'surplus';
 /** Tuyau structuré : ce que le client peut lire pour marquer la carte / le marché. */
 export interface Tip { good: GoodId; district: DistrictId; kind: TipKind }
 
-export const TIP_SENDERS = ['Cousin Kevin', 'Numéro inconnu', 'Tata Josette', 'Le Fantôme de la BU', 'Michel (ne pas répondre)', 'Bureau des Élèves', 'Un pigeon voyageur', 'Le Livreur du Matin'];
+export const TIP_SENDERS = ['Cousin Kevin', 'Numéro inconnu', 'Tata Josette', 'Le Fantôme de la BU', 'Michel (ne pas répondre)', 'Bureau des Élèves', 'Un pigeon de la cathédrale', 'Le Livreur du Matin', 'Un ch\'ti anonyme', 'La Mouette de Saint-Leu'];
 
 const PENURIE = [
   (g: string, d: string) => `Grosse pénurie de ${g} à ${d}. Ça se vendra à prix d'or, dépêche-toi.`,
   (g: string, d: string) => `Y a plus un seul ${g} à ${d}. Les gens se battent. Amène-en.`,
   (g: string, d: string) => `Psst. ${d} crève de faim de ${g}. Moi je dis ça, je dis rien.`,
-  (g: string, d: string) => `Rupture de ${g} à ${d} : même le doyen a appelé. Fonce.`,
+  (g: string, d: string) => `Rupture de ${g} à ${d} : même le directeur de l'école a appelé. Fonce.`,
 ];
 const SURPLUS = [
   (g: string, d: string) => `Camion de ${g} renversé à ${d}. Tout est bradé, rachète avant que ça remonte.`,
   (g: string, d: string) => `${d} déborde de ${g}. Plus personne n'en veut, c'est le moment d'en prendre.`,
   (g: string, d: string) => `Soldes sur ${g} à ${d} : on en donne presque. Ne revends pas là-bas.`,
-  (g: string, d: string) => `Trop de ${g} à ${d}, le stock fond au soleil. Les prix aussi.`,
+  (g: string, d: string) => `Trop de ${g} à ${d}, le stock fond comme un macaron sous la pluie d'Amiens. Les prix aussi.`,
 ];
 
 /** Texte d'un tuyau. `surplus` : prix cassé ; sinon pénurie (prix qui explose). `rnd` choisit la variante. */

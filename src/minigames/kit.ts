@@ -1,5 +1,5 @@
 // PROPRIÉTAIRE : game-minigames
-// Contrat commun des mini-jeux client + petits outils de dessin « BD » (aplats, gros contours noirs). Aucun texte à l'écran.
+// Contrat commun des mini-jeux client + petits outils de dessin « BD » (aplats, gros contours noirs). Le texte (consignes, erreurs, indices) est dessiné par index.ts / help.ts ; env.say() affiche un retour explicite (« Trop tôt ! »).
 import type { MinigameStart } from '../../shared/protocol';
 
 export const W = 640;
@@ -15,6 +15,10 @@ export interface MgEnv {
   now(): number;
   /** Son de mini-jeu (voir sounds.ts). */
   sfx(name: string, size?: number): void;
+  /** Bandeau de retour explicite au-dessus du jeu (« Mauvais fil ! », « Bien joué ! »), ~1,2 s. */
+  say(text: string, good?: boolean): void;
+  /** À appeler à chaque vrai progrès : repousse l'indice « tu bloques ? ». */
+  progress(): void;
   /** Termine le jeu ; `data` est envoyé au serveur (voir shared/minigames/rules.ts pour le format par jeu). */
   finish(ok: boolean, data?: number[]): void;
 }
@@ -27,9 +31,13 @@ export interface MgGame {
   onKey?(code: string): void;
   /** Après chaque déplacement de souris (indépendant du nombre d'images par seconde) : coordonnées du curseur virtuel. */
   onMove?(x: number, y: number): void;
+  /** Indice affiché quand le joueur ne progresse plus : zone à entourer + courte phrase. Null = rien à montrer. */
+  hint?(): Hint | null;
   /** État observable (tests de bout en bout : positions à viser). Jamais utilisé par le jeu. */
   probe?(): Record<string, number>;
 }
+
+export interface Hint { x: number; y: number; r: number; text: string }
 
 export type MgFactory = (env: MgEnv) => MgGame;
 
