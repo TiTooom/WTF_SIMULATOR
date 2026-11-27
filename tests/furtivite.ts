@@ -6,6 +6,8 @@ import { GameBus, type GameCtx, type GameSystem } from '../shared/game';
 import { buildCityUncached, getCity } from '../shared/city/layout';
 import { DISTRICT_IDS } from '../shared/ids';
 import { packMe, unpackMe } from '../shared/me';
+import { clearDrive, roadRoute } from '../shared/ai/route';
+import { installGame } from '../server/game';
 import { makePed, PED_ST } from '../shared/peds';
 import { NO_INPUT, type GameServerEvent, type PrivateState } from '../shared/protocol';
 import { Sim } from '../shared/sim';
@@ -104,6 +106,52 @@ const yawTo = (fx: number, fz: number, tx: number, tz: number) => Math.atan2(-(t
   ok(blocksMulti.every((b) => spots.some((s) => s.kind === 'ruelle' && s.x === Math.round(b.x * 10) / 10 && s.z === Math.round(b.z * 10) / 10)), 'cachettes : une ruelle dans chaque îlot à plusieurs bâtiments');
   const s0 = spots[0];
   ok(nearestHidingSpot(spots, s0.x, s0.z) !== null && nearestHidingSpot(spots, 1e6, 0) === null && nearestHidingSpot(spots, NaN, 0) === null, 'nearestHidingSpot : trouvée / loin / NaN');
+}
+
+// ---------- 4b. Itinéraires par les rues ----------
+{
+  let bad = 0, masked = 0;
+  const P = city.poisOf('parking');
+  for (let k = 0; k < 300; k++) {
+    const a = P[(k * 7) % P.length], b = P[(k * 13 + 5) % P.length];
+    if (!clearDrive(city, a.x, a.z, b.x, b.z)) masked++;
+    const r = roadRoute(city, a, b);
+    if (r.length !== 4 || r[3].x !== b.x || r[3].z !== b.z) bad++;
+    // les tronçons entre intersections suivent les rues : aucun bâtiment sur le passage
+    for (let i = 0; i < 2; i++) if (!clearDrive(city, r[i].x, r[i].z, r[i + 1].x, r[i + 1].z)) bad++;
+  }
+  ok(masked > 100 && bad === 0, `itinéraire : ${masked}/300 cibles masquées par des bâtiments, toutes rejointes par les rues (${bad} défauts)`);
+}
+
+/** Jeu complet (tous les systèmes) : un joueur à pied immobile à 3 étoiles doit être rejoint et arrêté (la police ne se bloque pas contre les immeubles). */
+async function immobileSuite() {
+  const P = city.poisOf('parking');
+  let busted = 0;
+  const times: string[] = [];
+  for (let i = 2; i < 7; i++) { // places qui échouaient quand la police fonçait en ligne droite
+    const q = P[(i * 11 + 3) % P.length];
+    const sim = await Sim.create();
+    sim.log = () => {};
+    sim.onAnnounce = () => {};
+    const game = installGame(sim, { mode: 'solo' });
+    sim.addPlayer('p', 'p');
+    const p = sim.players.get('p')!;
+    game.onJoin(p);
+    const tick = () => { game.preStep(); sim.step(); game.postStep(); };
+    sim.teleportPlayer(p, q.x + 1.8, 1.3, q.z);
+    for (let t = 0; t < 120; t++) tick();
+    game.system<PoliceSystem>('police')!.setStars('p', 3);
+    let at = -1;
+    for (let t = 0; t < 60 * 60 && at < 0; t++) {
+      sim.setInput('p', { ...NO_INPUT });
+      tick();
+      if (game.drainOutbox().some((o) => o.ev.k === 'arrete')) at = t / 60;
+    }
+    if (at >= 0) busted++;
+    times.push(at < 0 ? '-' : at.toFixed(0) + ' s');
+    sim.dispose();
+  }
+  ok(busted >= 4, `3★, joueur à pied immobile : arrêté ${busted}/5 fois en moins de 60 s (${times.join(', ')})`);
 }
 
 // ---------- 5. Systèmes ----------
@@ -470,7 +518,7 @@ async function main() {
   }
 }
 
-main().then(() => {
+main().then(immobileSuite).then(() => {
   console.log(fails ? `\n${fails} échec(s)` : '\nfurtivité : tout est vert');
   process.exit(fails ? 1 : 0);
 }).catch((e) => { console.error(e); process.exit(1); });

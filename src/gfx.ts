@@ -197,7 +197,16 @@ export class XRay {
     transparent: true, depthWrite: false, depthFunc: THREE.GreaterDepth, fog: false,
     polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
   });
-  constructor(private renderer: THREE.WebGLRenderer, private scene: THREE.Scene, private camera: THREE.Camera) {}
+  constructor(private renderer: THREE.WebGLRenderer, private scene: THREE.Scene, private camera: THREE.Camera) {
+    // La silhouette est testée en profondeur SELF_DEPTH m plus près de la caméra (même position à l'écran) : les membres du personnage ne se
+    // « cachent » plus entre eux (sinon il paraît délavé à découvert), seul un obstacle plus avancé que cette marge la fait apparaître.
+    this.mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
+  mvPosition.xyz *= max(0.0, 1.0 - ${XRay.SELF_DEPTH.toFixed(2)} / length(mvPosition.xyz));
+  gl_Position = projectionMatrix * mvPosition;`);
+    };
+  }
+  static readonly SELF_DEPTH = 1.2;
 
   /** Nombre de silhouettes enregistrées pour cette image (tests). */
   get count(): number { return this.items.length; }

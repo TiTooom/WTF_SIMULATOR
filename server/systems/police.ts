@@ -23,6 +23,7 @@ import type { GameSystem, SystemFactory } from '../../shared/game';
 import type { CrimeKind } from '../../shared/ids';
 import type { Mark, PrivateState } from '../../shared/protocol';
 import { newDriveMem, steerTo, type DriveMem, type Pose } from '../../shared/ai/drive';
+import { clearDrive, roadRoute, type Pt } from '../../shared/ai/route';
 import { canSee, copCameraCones, lineOfSight as canSeeLine, hidingSpots, nearestHidingSpot, VISION, type CopEye, type HidingSpot, type VisionCone } from '../../shared/hiding';
 import { PED_ST } from '../../shared/peds';
 import type { EconomySystem } from './economy';
@@ -40,6 +41,7 @@ const SPAWN_EVERY = 30; // ticks (0,5 s) : au plus une voiture de police créée
 const SPAWN_MIN = 100, SPAWN_MAX = 150; // m : loin, toujours hors du champ de vue
 const FIRST_SPAWN_MS = 3000; // délai entre le premier crime et l'arrivée de la première voiture
 const REINFORCE_MS = 6000; // délai entre deux voitures (pas de renfort instantané)
+const REROUTE_MS = 4000, REROUTE_DIST = 20; // itinéraire recalculé périodiquement ou si la cible s'est déplacée
 const QUADRILLE_PART = 0.45; // part de la vitesse de poursuite pendant le quadrillage
 const GOTO_PART = 0.85; // part de la vitesse pour rejoindre la dernière position connue
 const GOTO_DONE = 25; // m : la voiture est « arrivée » à la dernière position connue
@@ -87,6 +89,7 @@ interface PState {
 interface Car {
   ref: VRef; mem: DriveMem; lastHp: number; siren: boolean; x: number; z: number; speed: number; yaw: number;
   wp: { x: number; z: number } | null; wpAt: number; fouille: HidingSpot | null; onSite: boolean;
+  route: { pts: Pt[]; i: number; at: number; tx: number; tz: number } | null; // itinéraire par les rues quand la cible est masquée
 }
 
 /**
@@ -394,6 +397,21 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
     c.wpAt = sim.time;
   };
 
+  /** Prochain point à viser : la cible si le passage est dégagé, sinon le point le plus avancé d'un itinéraire par les rues. */
+  const navigate = (c: Car, target: Pt): Pt => {
+    if (clearDrive(city, c.x, c.z, target.x, target.z)) { c.route = null; return target; }
+    let r = c.route;
+    if (!r || sim.time - r.at > REROUTE_MS || Math.hypot(target.x - r.tx, target.z - r.tz) > REROUTE_DIST) {
+      r = c.route = { pts: roadRoute(city, c, target), i: 0, at: sim.time, tx: target.x, tz: target.z };
+    }
+    while (r.i < r.pts.length - 1) {
+      const q = r.pts[r.i];
+      if (Math.hypot(q.x - c.x, q.z - c.z) < 7 + Math.abs(c.speed) * 0.35 || clearDrive(city, c.x, c.z, r.pts[r.i + 1].x, r.pts[r.i + 1].z)) r.i++;
+      else break;
+    }
+    return r.pts[r.i];
+  };
+
   const driveCars = (wantedPlayers: Wanted[]) => {
     for (const [id, c] of [...cars]) {
       const v = liveCar(id, c);
@@ -418,7 +436,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
         c.wp = null; c.fouille = null; c.onSite = false;
       } else {
         const lk = lkRoadOf(tgt.s) ?? tgt.s.lk; // on rejoint la chaussée la plus proche de la dernière position connue
-        if (!c.onSite && Math.hypot(lk.x - c.x, lk.z - c.z) <= GOTO_DONE) c.onSite = true;
+        if (!c.onSite && Math.hypot(lk.x - c.x, lk.z - c.z) <= GOTO_DONE && clearDrive(city, c.x, c.z, lk.x, lk.z)) c.onSite = true;
         if (!c.onSite) { // rejoindre la dernière position connue
           target = lk; scale = GOTO_PART; arrive = 6;
         } else { // quadrillage lent autour de la dernière position connue
@@ -438,7 +456,9 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
           }
         }
       }
-      const out = copInput({ x: c.x, z: c.z, yaw: c.yaw, speed: c.speed }, target, stars, c.mem, { dt: AI_DT, speedScale: scale, arrive });
+      const aim = navigate(c, target);
+      if (aim !== target) arrive = 1.5; // point de passage : on ne s'y arrête pas
+      const out = copInput({ x: c.x, z: c.z, yaw: c.yaw, speed: c.speed }, aim, stars, c.mem, { dt: AI_DT, speedScale: scale, arrive });
       inp.f = out.f; inp.s = out.s; inp.jump = out.jump;
       inp.hn = !c.siren ? 1 : 0; // front montant unique : allume la sirène
       c.siren = true;
@@ -467,7 +487,7 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       if (all.some(([px, pz]) => Math.hypot(px - x, pz - z) < SPAWN_MIN - 5)) continue; // jamais en vue d'un joueur
       const v = sim.acquireVehicle('police', x, z, lane.yaw, { ai: true });
       if (!v) return; // pool vide : on réessaiera plus tard
-      cars.set(v.id, { ref: sim.refOf(v), mem: newDriveMem(), lastHp: v.hp, siren: false, x, z, speed: 0, yaw: lane.yaw, wp: null, wpAt: 0, fouille: null, onSite: false });
+      cars.set(v.id, { ref: sim.refOf(v), mem: newDriveMem(), lastHp: v.hp, siren: false, x, z, speed: 0, yaw: lane.yaw, wp: null, wpAt: 0, fouille: null, onSite: false, route: null });
       nextSpawnAt = sim.time + REINFORCE_MS;
       return;
     }

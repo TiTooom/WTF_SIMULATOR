@@ -229,18 +229,20 @@ Object.assign(IMAGES, {
   },
   cathedrale(g: G, t: number) {
     bands(g, ['#ffe27a', '#ffeb99', '#fff3b8', '#fff8d0'], 0, 400);
-    cloud(g, 120 + ((t * 6) % 30), 80, 1.0, '#fffdf0'); cloud(g, 700, 60, 0.7, '#fffdf0');
-    rect(g, 360, 90, 70, 310, '#d8b86a'); rect(g, 530, 130, 70, 270, '#d8b86a');
-    poly(g, [[352, 92], [395, 24], [438, 92]], '#8d8a9a'); poly(g, [[522, 132], [565, 70], [608, 132]], '#8d8a9a');
-    rect(g, 430, 190, 100, 210, '#e6cc85'); poly(g, [[420, 192], [480, 108], [540, 192]], '#e6cc85');
-    circle(g, 480, 220, 30, '#6ec6ff'); for (let i = 0; i < 8; i++) { g.beginPath(); g.moveTo(480, 220); g.lineTo(480 + Math.cos(i * 0.785) * 30, 220 + Math.sin(i * 0.785) * 30); ink(g, 3); g.stroke(); }
-    for (const [x, y] of [[380, 130], [550, 170], [380, 210], [550, 250]]) rect(g, x, y, 30, 44, '#5a3a22', 4);
-    house(g, 20, 400, 170, 160, '#f6e08a', '#e67e22', 0); house(g, 215, 400, 170, 200, '#fff0b0', '#c0392b', 1);
-    house(g, 540, 400, 170, 190, '#f0d070', '#8e44ad', 2); house(g, 735, 400, 200, 150, '#fff0b0', '#e67e22', 3);
+    cloud(g, 90 + ((t * 6) % 30), 80, 1.0, '#fffdf0'); cloud(g, 830, 60, 0.7, '#fffdf0');
+    // maisons basses sur les côtés : la cathédrale domine la planche
+    house(g, 10, 400, 130, 110, '#f6e08a', '#e67e22', 0); house(g, 165, 400, 130, 130, '#fff0b0', '#c0392b', 1);
+    house(g, 690, 400, 120, 125, '#f0d070', '#8e44ad', 2); house(g, 835, 400, 120, 100, '#fff0b0', '#e67e22', 3);
+    // deux tours inégales, flèches, façade à rosace et portail
+    rect(g, 330, 150, 100, 250, '#d8b86a'); rect(g, 530, 190, 100, 210, '#d8b86a');
+    poly(g, [[320, 152], [380, 44], [440, 152]], '#8d8a9a'); poly(g, [[520, 192], [580, 104], [640, 192]], '#8d8a9a');
+    rect(g, 430, 230, 100, 170, '#e6cc85'); poly(g, [[418, 232], [480, 150], [542, 232]], '#e6cc85');
+    circle(g, 480, 262, 34, '#6ec6ff'); for (let i = 0; i < 8; i++) { g.beginPath(); g.moveTo(480, 262); g.lineTo(480 + Math.cos(i * 0.785) * 34, 262 + Math.sin(i * 0.785) * 34); ink(g, 3); g.stroke(); }
+    for (const [x, y] of [[345, 185], [395, 185], [345, 265], [395, 265], [545, 220], [595, 220], [545, 300], [595, 300]]) rect(g, x, y, 20, 52, '#5a3a22', 4);
+    rect(g, 452, 345, 56, 55, '#6b3f1f'); circle(g, 480, 345, 28, '#6b3f1f');
     rect(g, 0, 400, W, 140, '#9a8f7a');
     for (let y = 404; y < 540; y += 26) for (let x = (y / 26) % 2 ? 0 : -30; x < W; x += 60) rect(g, x, y, 60, 26, '#b0a48c', 3);
-    g.beginPath(); g.moveTo(255, 300); g.lineTo(255, 322); g.moveTo(345, 300); g.lineTo(345, 322); ink(g, 3); g.stroke();
-    rect(g, 215, 322, 170, 40, '#ff9ec4'); text(g, 'MACARONS', 300, 352, 26, '#6b1f3a', 5);
+    rect(g, 145, 322, 170, 40, '#ff9ec4'); text(g, 'MACARONS', 230, 352, 26, '#6b1f3a', 5);
     g.save(); g.translate(600, 470); g.beginPath(); g.ellipse(0, 0, 120, 44, 0, 0, 7); fillStroke(g, '#f4f4f8', 7); g.restore();
     for (const [x, y] of [[-62, -4], [-16, 14], [30, -10], [68, 10], [-22, -18]]) { rect(g, 600 + x - 20, 470 + y - 12, 40, 24, '#d99a3a', 4); rect(g, 600 + x - 18, 470 + y - 3, 36, 6, '#8a4b00', 0); }
   },

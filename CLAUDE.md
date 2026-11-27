@@ -2,15 +2,16 @@
 
 Vrai jeu à télécharger (application Windows Electron, installateur NSIS publié dans les Releases GitHub, dépôt `TiTooom/WTF_SIMULATOR` conservé volontairement : l'auto-update remplace l'ancien jeu WTF SIMULATOR). Jouable aussi dans un navigateur **sur ordinateur** : **pas de mobile ni de tactile** (décision du projet). Three.js (rendu) + Rapier (physique, côté serveur) + Node (serveur intégré) + Vite + TypeScript strict.
 
-Inspiré de GTA: Chinatown Wars (voir `DA.md`) : vue de dessus inclinée, cel-shading BD à contours noirs, conduite arcade, économie de rue à marchandises **fictives**, étoiles de recherche, missions courtes à médailles, mini-jeux < 4 s, PDA. Violence « fidèle à Chinatown Wars » mais **sans sang explicite**. Clins d'œil légers à l'école, aucune personne réelle, aucune drogue réelle. Argent et sac **individuels** (`/donner`). Coop LAN : l'hôte est le serveur (même Wi-Fi, UDP 41234, pas de NAT traversal). Sauvegarde chez l'hôte dans `%APPDATA%/GTA Edition UniLaSalle/saves/` (`solo.json`, `multi.json`, copie `.bak`).
+Inspiré de GTA: Chinatown Wars (voir `DA.md`) : vue de dessus inclinée, cel-shading BD à contours noirs, conduite arcade, économie de rue à marchandises **fictives**, étoiles de recherche, missions courtes à médailles, mini-jeux courts, PDA. Violence « fidèle à Chinatown Wars » mais **sans sang explicite**. Clins d'œil légers à l'école, aucune personne réelle, aucune drogue réelle. Argent et sac **individuels** (`/donner`). Coop LAN : l'hôte est le serveur (même Wi-Fi, UDP 41234, pas de NAT traversal). Sauvegarde chez l'hôte dans `%APPDATA%/GTA Edition UniLaSalle/saves/` (`solo.json`, `multi.json`, copie `.bak`).
 
-**Plan, contrats et propriétaires de fichiers : `docs/ARCHITECTURE-GTA.md` (source de vérité).** Vagues 0 à 5 faites ; reste la release (voir plus bas).
+**Plan, contrats et propriétaires de fichiers : `docs/ARCHITECTURE-GTA.md` (source de vérité).** Vagues 0 à 6 faites (la 6 : retours de test) ; reste la release (voir plus bas).
 
 Thème **amiénois** (retour de test) : rien en rapport avec l'agro. Quartiers `campus, saint_leu, cathedrale, amiens_nord, citadelle` ; gangs `inges, mouettes, macarons, cles_de_12, club_citadelle`. L'interface reste **légère** (une ligne d'aide contextuelle, touches dans le panneau F1, tutoriel et conseils dans `src/ui/guide.ts`). Mini-jeux **sans limite de temps**, abandonnables.
 
 ## Police et furtivité
 - `shared/hiding.ts` (pur) : cônes de vision, ligne de vue bloquée par les bâtiments, caméras balayantes, cachettes. Le serveur (`police.ts`) décide ; le client ne fait que **dessiner** les cônes (recalculés depuis le snapshot) et l'état reçu (`me.ws`, `me.wl`). `PlayerSnap.an = 5` : caché.
 - Une étoile tombe quand le joueur n'est vu de personne pendant `LOSE_DELAY_S` (`shared/wanted.ts`) ; détruire des voitures de police fait aussi baisser. La police est plus lente que le joueur jusqu'à 4★.
+- Quand un bâtiment masque leur cible, les voitures de police suivent les rues (`shared/ai/route.ts`) ; en ligne droite elles se bloquaient contre les immeubles.
 - Les voitures ont un groupe de dominance Rapier 1 : un piéton joueur ne peut pas les pousser.
 
 ## Architecture

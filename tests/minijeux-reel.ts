@@ -302,7 +302,10 @@ async function main() {
     async function run(kind: MinigameKind, mode: Mode, tag: string, opt: { shots?: boolean; touche?: boolean } = {}) {
       const shots = !!opt.shots;
       home();
-      mx = 640; my = 360; await mouse('mouseMoved'); // la souris repart du centre à chaque partie (le curseur du jeu aussi) : pas de dérive hors fenêtre
+      // une partie restée ouverte (essai précédent perdu) est abandonnée : sinon le serveur refuse d'en lancer une autre
+      if (await ev<boolean>('!!document.getElementById("mg-overlay")')) { await key('Escape', 27, 'Escape'); await sleep(900); }
+      // le curseur du jeu démarre en bas, sur le bouton « Compris » : la souris part assez bas pour que les cercles restent dans la fenêtre
+      mx = 760; my = 560; await mouse('mouseMoved');
       await clearEv();
       await ev('delete window.__mgHintMs');
       await sendChat(`/debug mg ${kind}`);
@@ -470,8 +473,11 @@ async function main() {
       check((await events()).length === 0, 'résultat tardif (sid clos) ignoré par le serveur');
       // éloignement (pause : l'anti-spam du chat a pu voir passer 6 commandes d'affilée)
       await sleep(3000);
-      await sendChat('/debug mg tournevis');
-      for (let i = 0; i < 30 && !(await ev<boolean>('!!window.__mg')); i++) await sleep(100);
+      for (let n = 0; n < 6 && !(await ev<boolean>('!!window.__mg')); n++) { // l'anti-spam peut avaler la commande : on la renvoie
+        await sendChat('/debug mg tournevis');
+        for (let i = 0; i < 25 && !(await ev<boolean>('!!window.__mg')); i++) await sleep(100);
+      }
+      check(!!(await ev<boolean>('!!window.__mg')), 'éloignement : mini-jeu lancé');
       await clearEv();
       sim().teleportPlayer(player(), 60, 1.3, 60);
       end = undefined;
