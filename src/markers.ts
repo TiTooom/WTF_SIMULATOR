@@ -209,7 +209,7 @@ export class MarkersView {
 
 // ---------- Cachettes et champs de vision (vague « furtivité ») ----------
 /** Une cachette (liste fournie par `shared/hiding.ts`) : centre (x, z), rayon de la zone (m) et type d'abri. */
-export interface HidingSpotView { x: number; z: number; r: number; kind: 'haie' | 'buisson' | 'benne' | 'abri' | string }
+export interface HidingSpotView { x: number; z: number; r: number; kind: 'haie' | 'buisson' | 'benne' | 'abri' | 'ruelle' | string }
 /** Cône de vision d'un flic ou d'une caméra : sommet (x, z), cap (même convention que le yaw des joueurs : avant = (−sin, −cos)), portée (m) et ouverture TOTALE (rad). */
 export interface VisionCone { x: number; z: number; yaw: number; range: number; fov: number; kind?: 'cop' | 'camera' | string }
 
@@ -281,7 +281,7 @@ export class HidingView {
         put(this.boxes, nb++, s.x, 2.35, s.z, ry, s.r * 1.8, 0.3, s.r * 1.6, 0xb5433a);
       } else if (s.kind === 'haie') {
         put(this.boxes, nb++, s.x, 0.6, s.z, ry, s.r * 1.9, 1.2, Math.max(0.8, s.r * 0.6), green);
-      } else {
+      } else if (s.kind !== 'ruelle') { // ruelle : le passage entre les murs suffit, seul l'anneau la signale
         put(this.balls, nl++, s.x, s.r * 0.35, s.z, ry, s.r * 0.85, s.r * 0.6 + 0.3, s.r * 0.85, green);
       }
     }
@@ -293,6 +293,8 @@ export class HidingView {
   }
 
   setVisible(v: boolean): void { this.group.visible = v; }
+  /** Anneaux au sol (zone où l'on peut se cacher) : utiles seulement quand on est recherché. */
+  setRings(v: boolean): void { this.rings.visible = v; }
   dispose(): void {
     this.group.removeFromParent();
     for (const o of [this.boxes, this.balls, this.rings]) { o.dispose(); (o.material as THREE.Material).dispose(); }

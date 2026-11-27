@@ -6,6 +6,7 @@
 import { Sim } from '../shared/sim';
 import { GameBus, parseGameMsg, type GameCtx, type GameSystem, type SystemFactory } from '../shared/game';
 import { getCity } from '../shared/city/layout';
+import { hidingSpots } from '../shared/hiding';
 import { DISTRICT_IDS, MEDAL_TIERS, type MedalTier } from '../shared/ids';
 import { MISSIONS, missionById } from '../shared/missions';
 import type { MissionDef } from '../shared/missions/types';
@@ -201,7 +202,17 @@ function playMission(w: World, p: SimPlayer, def: MissionDef, o: PlayOpts = {}):
         } else { w.bus.emit('cameraDestroyed', { by: p, id: 'cam_test' }); w.tick(10); }
         break;
       }
-      case 'semer': killPolice(w, p); w.tick(30); if (process.env.DBG) console.log('semer', def.id, w.police.phaseOf(p.id), w.police.starsOf(p.id), w.police.carCount, JSON.stringify(w.police.lastKnownOf(p.id)), w.sim.playerPos(p).map(Math.round)); break;
+      case 'semer': { // semer la police : se cacher, hors de vue, jusqu'à ce que l'indice tombe
+        if (!w.police.hiddenIn(p.id)) {
+          const spots = hidingSpots(city);
+          const sp = spots[(guard * 37) % spots.length];
+          w.sim.teleportPlayer(p, sp.x, 1.3, sp.z);
+          w.tick(3);
+          w.sim.interact(p.id);
+        }
+        w.tick(120);
+        break;
+      }
       case 'attendre': w.tick(60); break;
     }
   }

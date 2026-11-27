@@ -5,10 +5,10 @@
 export const VEHICLE_TYPES = ['citadine', 'berline', 'camionnette', 'police'] as const;
 export type VehicleType = (typeof VEHICLE_TYPES)[number];
 
-export const DISTRICT_IDS = ['campus', 'docks', 'vieux_bourg', 'zone_indus', 'les_hauts'] as const;
+export const DISTRICT_IDS = ['campus', 'saint_leu', 'cathedrale', 'amiens_nord', 'citadelle'] as const;
 export type DistrictId = (typeof DISTRICT_IDS)[number];
 
-export const GANG_IDS = ['agros', 'mouettes', 'fromagers', 'cles_de_12', 'golfeurs'] as const;
+export const GANG_IDS = ['inges', 'mouettes', 'macarons', 'cles_de_12', 'club_citadelle'] as const;
 export type GangId = (typeof GANG_IDS)[number];
 
 /**
@@ -21,10 +21,10 @@ export const GOOD_IDS = [
   'croissant_pirate', // croissants de contrebande du matin
   'poudre_de_craie', // craie de tableau en sachet
   'cables_hdmi', // câbles HDMI d'origine douteuse
-  'fromage_clandestin', // meule non déclarée
+  'macarons_contrebande', // macarons sortis par la porte de derrière
   'balles_dorees', // balles de golf plaquées or
   'ecrous_de_12', // écrous de 12, évidemment
-  'sardines_de_quai', // arrivage de sardines non homologué
+  'ficelles_picardes', // ficelles picardes périmées
   'copies_blanches', // copies d'examen vierges, très recherchées
 ] as const;
 export type GoodId = (typeof GOOD_IDS)[number];

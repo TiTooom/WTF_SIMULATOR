@@ -27,8 +27,8 @@ const info = { ready: false, calls: 0, tris: 0, cityDraw: 0, chunks: 0, ms: 0, s
 (window as unknown as { __shot: typeof info }).__shot = info;
 
 const ME: PrivateState = {
-  money: 12480, bag: {}, bagCap: 30, stars: 3, starProgress: 0.45, district: 'docks', unread: 2,
-  mission: { id: 'm1', step: 2, steps: 4, text: 'Livre la caisse de café au Vieux Bourg', ms: 83000, timeLimitMs: 240000 },
+  money: 12480, bag: {}, bagCap: 30, stars: 3, starProgress: 0.45, district: 'saint_leu', unread: 2,
+  mission: { id: 'm1', step: 2, steps: 4, text: 'Livre la caisse de café à la Cathédrale', ms: 83000, timeLimitMs: 240000 },
   marks: [
     { x: -40, z: -60, k: 'mission', label: 'Livraison' }, { x: 120, z: 90, k: 'dealer', label: 'Dealer' }, { x: -200, z: 140, k: 'planque' },
     { x: 20, z: 220, k: 'camera' }, { x: 260, z: -120, k: 'donneur', label: 'Contact' }, { x: -90, z: -250, k: 'cible', label: 'Cible' },
@@ -216,7 +216,7 @@ async function run3d() {
   mk.update(markList, 0.016, [0, 0, 0]);
   if (shot.startsWith('pda')) {
     pda = new Pda(document.body, { send: () => {}, now: () => 100000, player: () => ({ x: -30, z: 50, yaw: 0.8 }), mates: () => [{ name: 'Sam', x: 90, z: -40 }] });
-    pushSms({ id: 1, from: 'Contact anonyme', text: 'Descente de police aux Docks demain matin. Les sardines vont devenir rares...', at: 40000, tip: { good: 'sardines_de_quai', district: 'docks', mult: 2.8, until: 190000 } });
+    pushSms({ id: 1, from: 'Contact anonyme', text: 'Descente de police à Saint-Leu demain matin. Les ficelles picardes vont devenir rares...', at: 40000, tip: { good: 'ficelles_picardes', district: 'saint_leu', mult: 2.8, until: 190000 } });
     pushSms({ id: 2, from: 'Maman', text: "N'oublie pas de manger quelque chose de chaud ce soir !", at: 90000 });
     pda.setState(ME);
     pda.open(shot === 'pda_sms' ? 'sms' : 'carte');

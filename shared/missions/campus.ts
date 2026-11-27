@@ -1,5 +1,5 @@
 // PROPRIÉTAIRE : game-missions
-// Le Campus (Les Agros) : mission d'initiation. Fouiller, crocheter, livrer.
+// Le Campus (Les Ingés) : mission d'initiation. Fouiller, crocheter, livrer.
 import type { MissionDef } from './types';
 import { giverPoi, nodeXZ } from './helpers';
 
@@ -9,7 +9,7 @@ const biblio = nodeXZ(1, 2); // la bibliothèque
 export const ANNALES: MissionDef = {
   id: 'annales',
   name: 'Les annales du jeudi',
-  blurb: 'Le Délégué des Agros jure que les annales de la semaine prochaine dorment dans une benne. Fouille, crochète, livre.',
+  blurb: 'Le Délégué des Ingés jure que les annales de la semaine prochaine dorment dans une benne. Fouille, crochète, livre.',
   district: 'campus',
   giver: giverPoi('campus').id,
   steps: [

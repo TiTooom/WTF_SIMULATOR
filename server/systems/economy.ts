@@ -166,7 +166,7 @@ export const createEconomy: SystemFactory = (ctx: GameCtx): EconomySystem => {
     if (camDown.has(c.id)) return;
     camDown.add(c.id);
     syncCameras();
-    ctx.broadcast({ k: 'monde', camsDown: camDown.size });
+    ctx.broadcast({ k: 'monde', camsDown: camDown.size, down: [...camDown] });
     bus.emit('cameraDestroyed', { by, id: c.id });
     if (by) bus.emit('crime', { kind: 'camera_detruite', by, x: c.x, z: c.z });
   };
@@ -323,7 +323,7 @@ export const createEconomy: SystemFactory = (ctx: GameCtx): EconomySystem => {
       accountOf(p);
       frozenUntil.delete(p.id);
       lastTrade.delete(p.id);
-      ctx.sendTo(p.id, { k: 'monde', camsDown: camDown.size });
+      ctx.sendTo(p.id, { k: 'monde', camsDown: camDown.size, down: [...camDown] });
     },
 
     onLeave(p) { lastTrade.delete(p.id); frozenUntil.delete(p.id); }, // le compte (argent, sac, planque) reste, clé = pseudo

@@ -83,6 +83,22 @@ async function main() {
     check('roulade : an revient à 0 ensuite', (sim.snapshotFull().players[0].an ?? 0) === 0);
   }
 
+  // ---------- 1c. Un joueur à pied ne pousse pas une voiture ----------
+  {
+    const sim = await fresh();
+    sim.addPlayer('p1', 'Pousseur');
+    const pl = sim.players.get('p1')!;
+    const car = sim.vehicles.find((v) => v.def.type === 'citadine' && !v.pooled)!;
+    run(sim, 2);
+    const a = car.behavior.body.translation();
+    sim.teleportPlayer(pl, a.x, 1.2, a.z + 4);
+    run(sim, 3, () => sim.setInput('p1', { ...NO_INPUT, f: 1, run: 1, yaw: 0 }));
+    const b = car.behavior.body.translation();
+    const moved = Math.hypot(b.x - a.x, b.z - a.z);
+    const gap = pl.body.translation().z - b.z;
+    check('piéton contre voiture garée : la voiture ne bouge pas, le joueur est arrêté', moved < 0.05 && gap > 0.5 && gap < 3, `déplacement=${moved.toFixed(3)} m, écart=${gap.toFixed(2)} m`);
+  }
+
   // ---------- 2. Explosion de véhicule + réapparition ----------
   {
     const sim = await fresh();

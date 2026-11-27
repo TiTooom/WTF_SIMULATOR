@@ -68,7 +68,7 @@ function partClient() {
   try { for (const b of bad) outs.push(unpackMe(b)); } catch { threw = true; }
   check('unpackMe sur 8 `me` malformés : aucune exception', !threw);
   check('unpackMe : non-objets rejetés (null), objets nettoyés (bornes, types)', outs[0] === null && outs[1] === null && outs[3] === null && outs.slice(4).every((o) => o !== null && Number.isFinite(o.money) && o.money >= 0 && o.stars >= 0 && o.stars <= 5 && o.marks.length <= 16 && typeof o.bag === 'object'));
-  check('unpackMe : aller-retour exact avec packMe', JSON.stringify(unpackMe(JSON.parse(JSON.stringify(packMe({ money: 12, bag: { cafe_machine: 2 }, bagCap: 14, stars: 2, starProgress: 0.5, district: 'docks', marks: [{ x: 1, z: 2, k: 'dealer' }], medals: { annales: 'or' }, unread: 3 }))))?.bag) === '{"cafe_machine":2}');
+  check('unpackMe : aller-retour exact avec packMe', JSON.stringify(unpackMe(JSON.parse(JSON.stringify(packMe({ money: 12, bag: { cafe_machine: 2 }, bagCap: 14, stars: 2, starProgress: 0.5, district: 'saint_leu', marks: [{ x: 1, z: 2, k: 'dealer' }], medals: { annales: 'or' }, unread: 3 }))))?.bag) === '{"cafe_machine":2}');
 }
 
 // ---------- B. Serveur réel ----------

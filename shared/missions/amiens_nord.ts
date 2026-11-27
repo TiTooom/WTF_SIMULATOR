@@ -1,5 +1,5 @@
 // PROPRIÉTAIRE : game-missions
-// La Zone Indus (Les Clés de 12) : infiltration. Digicode, caméra, camionnette, livraison d'écrous.
+// Amiens Nord (Les Clés de 12) : infiltration. Digicode, caméra, camionnette, livraison d'écrous.
 import type { MissionDef } from './types';
 import { cameraNear, giverPoi, nodeXZ } from './helpers';
 
@@ -11,8 +11,8 @@ export const ECROUS: MissionDef = {
   id: 'ecrous',
   name: 'Écrous de 12, évidemment',
   blurb: 'Ginette des Clés a besoin de cinq cents écrous de 12 et d\'un portail qui ne voit rien. Le digicode est têtu, la caméra aussi.',
-  district: 'zone_indus',
-  giver: giverPoi('zone_indus').id,
+  district: 'amiens_nord',
+  giver: giverPoi('amiens_nord').id,
   requires: 'fromage',
   steps: [
     { t: 'aller', x: portail.x, z: portail.z, r: 10, text: 'Rejoins le portail de l\'usine' },

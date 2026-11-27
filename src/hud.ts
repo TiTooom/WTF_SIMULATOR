@@ -36,6 +36,8 @@ export interface HudState {
   cops?: number;
   /** État de recherche (optionnel). 'repere' : « Repéré ! » ; 'recherche' : « Recherché » ; 'cache' : « Caché » ; 'libre' avec des étoiles : « Semé ». Absent : déduit de `cops`. */
   search?: 'libre' | 'repere' | 'recherche' | 'cache';
+  /** Secondes avant la prochaine étoile perdue (tant qu'on n'est pas vu). */
+  loseIn?: number;
 }
 
 export type SearchKind = 'repere' | 'recherche' | 'cache' | 'seme';
@@ -193,6 +195,7 @@ export function createHud() {
   let visible = true;
   let copsSeen: number | undefined;
   let searchState: HudState['search'];
+  let loseIn: number | undefined;
   let alertT = 0;
   let alertText = '';
   let playersT = 0;
@@ -206,12 +209,6 @@ export function createHud() {
     hint.textContent = txt;
     hint.style.display = txt && visible ? 'block' : 'none';
   };
-  // L'ancien <div id="hud"> (aide permanente) est masqué : les textes contextuels passent par setHint, les touches par l'aide F1.
-  const oldHud = $('hud');
-  if (oldHud) oldHud.style.display = 'none';
-  const oldPlayers = $('players');
-  if (oldPlayers) oldPlayers.style.display = 'none';
-
   function drawMap(s: HudState, me: PrivateState | null) {
     const now = performance.now();
     if (now - lastMapDraw < 50) return;
@@ -266,7 +263,11 @@ export function createHud() {
     const lab = showSeme ? { text: 'Semé', kind: 'seme' as SearchKind } : searchLabel(stars, searchState, copsSeen);
     starsEl.classList.toggle('on', stars > 0 || showSeme);
     sLabel.style.display = lab ? '' : 'none';
-    if (lab) { sLabel.textContent = lab.text; sLabel.className = 'gh-slabel ' + lab.kind; }
+    if (lab) {
+      const wait = (lab.kind === 'recherche' || lab.kind === 'cache') && loseIn ? ` · ${Math.ceil(loseIn)} s` : '';
+      sLabel.textContent = lab.text + wait;
+      sLabel.className = 'gh-slabel ' + lab.kind;
+    }
     const seen = lab?.kind === 'repere';
     const hidden = lab?.kind === 'cache';
     starNodes.forEach((s, i) => {
@@ -359,6 +360,7 @@ export function createHud() {
       if (!visible) return;
       copsSeen = s.cops;
       searchState = s.search;
+      loseIn = s.loseIn;
       if (me) applyMe(me);
       const hasPos = Number.isFinite(s.x) && Number.isFinite(s.z);
       mapBox.style.display = hasPos ? '' : 'none';

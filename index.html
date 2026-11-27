@@ -7,9 +7,6 @@
 <link rel="icon" href="data:," />
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3ff; font-family: "Segoe UI", sans-serif; }
-  #hud, #players { position: fixed; color: #fff; text-shadow: 0 1px 3px #000; pointer-events: none; white-space: pre; }
-  #hud { top: 12px; left: 12px; white-space: pre-wrap; max-width: calc(100vw - 190px); }
-  #players { top: 12px; right: 12px; text-align: right; max-height: 40vh; overflow: hidden; }
   #pause { z-index: 300; position: fixed; inset: 0; align-items: center; justify-content: center; background: rgba(20, 40, 70, 0.55); cursor: pointer; }
   #pause #card { cursor: default; width: 440px; max-width: 94vw; }
   #pauseInfo { font-size: 14px; color: #2c3e50; margin: 0 0 14px; }
@@ -62,8 +59,6 @@
 </style>
 </head>
 <body>
-<div id="hud"></div>
-<div id="players"></div>
 <div id="crosshair"></div>
 <div id="vitals">
   <div id="vehBox" style="display:none"><span id="vehLabel" style="font-size:12px"></span><div class="bar"><div id="vehFill"></div></div></div>
@@ -83,7 +78,7 @@
 <div id="pause" style="display:none">
   <div id="card">
     <h1>Pause</h1>
-    <p>Clique pour reprendre la partie</p>
+    <p>Clique pour reprendre la partie · F1 : les commandes</p>
     <div id="pauseInfo"></div>
     <button id="options">Options</button>
     <button id="back">Menu principal</button>

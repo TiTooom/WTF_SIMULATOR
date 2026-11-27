@@ -8,16 +8,16 @@
 //   Clic / Espace / Entrée : suite (d'abord termine le texte) · Échap ou « Passer » : fin.
 //   showMissionResult({ title, medal, stats, reward, par? }).then(...)                    // écran de fin de mission (médaille animée, temps, dégâts, précision, gain)
 // Images génériques disponibles (`COMIC_IMAGES`) : ville_aube, rue_nuit, voiture, poursuite, ruelle, amphi, liasses, explosion,
-//   ambiances de quartier : campus, docks, vieux_bourg, zone_indus, les_hauts ; scènes : amphi_nuit, dealer, flic, medaille, argent.
+//   ambiances de quartier : campus, saint_leu, cathedrale, amiens_nord, citadelle ; scènes : amphi_nuit, dealer, flic, medaille, argent.
 // `quartierImage(districtId)` donne l'ambiance d'un quartier ; `Panel.img` inconnu : fond neutre à trame (jamais d'erreur).
 
 export const COMIC_IMAGES = [
   'ville_aube', 'rue_nuit', 'voiture', 'poursuite', 'ruelle', 'amphi', 'liasses', 'explosion',
-  'campus', 'docks', 'vieux_bourg', 'zone_indus', 'les_hauts', 'amphi_nuit', 'dealer', 'flic', 'medaille', 'argent',
+  'campus', 'saint_leu', 'cathedrale', 'amiens_nord', 'citadelle', 'amphi_nuit', 'dealer', 'flic', 'medaille', 'argent',
 ] as const;
 export type ComicImage = (typeof COMIC_IMAGES)[number];
 /** Image d'ambiance d'un quartier (id de `DISTRICT_IDS`) ; inconnu : 'ville_aube'. */
-export const quartierImage = (district: string): ComicImage => (['campus', 'docks', 'vieux_bourg', 'zone_indus', 'les_hauts'].includes(district) ? (district as ComicImage) : 'ville_aube');
+export const quartierImage = (district: string): ComicImage => (['campus', 'saint_leu', 'cathedrale', 'amiens_nord', 'citadelle'].includes(district) ? (district as ComicImage) : 'ville_aube');
 /** Une case : image (un des `COMIC_IMAGES`), texte, qui parle (bulle) ; sans `who` : récitatif jaune. */
 export interface Panel {
   img: ComicImage | string; text: string; who?: string;
@@ -25,7 +25,7 @@ export interface Panel {
   pos?: 'haut' | 'bas';
 }
 /** Images dont l'action se passe dans le tiers inférieur : leur bulle de dialogue passe en haut pour ne rien cacher. */
-const BUBBLE_TOP = new Set(['campus', 'docks', 'vieux_bourg', 'zone_indus', 'les_hauts', 'dealer']);
+const BUBBLE_TOP = new Set(['campus', 'saint_leu', 'cathedrale', 'amiens_nord', 'citadelle', 'dealer']);
 
 const W = 960, H = 540;
 const INK = '#14141f';
@@ -217,38 +217,34 @@ Object.assign(IMAGES, {
     tree(g, 90, 440, 1.5); tree(g, 880, 440, 1.4, '#6fdc5a');
     figure(g, 250, 520, 0.8, '#e8590c'); figure(g, 700, 525, 0.85, '#7048e8'); figure(g, 560, 515, 0.7, '#c2255c', true);
   },
-  docks(g: G, t: number) {
+  saint_leu(g: G, t: number) {
     bands(g, ['#ff9a4d', '#ffb36b', '#ffcf8a', '#ffe3a8'], 0, 330);
     burst(g, 760, 250, 40, 70, 12, '#fff3b0', t * 0.1, 0); circle(g, 760, 260, 52, '#fff0b0');
     rect(g, 0, 320, W, 220, '#2a8fe0');
     for (let i = 0; i < 14; i++) { g.beginPath(); const x = (i * 83 + t * 18) % W, y = 350 + (i % 5) * 36; g.moveTo(x, y); g.quadraticCurveTo(x + 16, y - 9, x + 32, y); ink(g, 4); g.strokeStyle = '#8fd0ff'; g.stroke(); }
-    rect(g, 90, 120, 18, 250, '#e63946'); rect(g, 150, 120, 18, 250, '#e63946'); rect(g, 60, 110, 300, 22, '#ffd23f'); poly(g, [[90, 120], [60, 110], [128, 40], [150, 120]], '#e63946');
-    g.beginPath(); g.moveTo(330, 132); g.lineTo(330, 210); ink(g, 4); g.stroke(); rect(g, 306, 210, 48, 34, '#2f80ed');
-    rect(g, 0, 370, W, 60, '#b9b4a6'); dots(g, 0, 370, W, 60, 'rgba(20,20,31,.2)', 10);
-    ['#e63946', '#2f80ed', '#ffd23f', '#2ec4b6', '#ff7a1a'].forEach((c, i) => {
-      const x = 420 + i * 100, y = 330 - (i % 2) * 62;
-      rect(g, x, y, 96, 52, c);
-      for (let k = 1; k < 5; k++) { g.beginPath(); g.moveTo(x + k * 19, y + 4); g.lineTo(x + k * 19, y + 48); ink(g, 3); g.stroke(); }
-    });
-    rect(g, 420, 392, 96, 52, '#2ec4b6'); rect(g, 520, 392, 96, 52, '#ff7a1a');
+    ([['#e63946', 150], ['#ffd23f', 200], ['#2ec4b6', 130], ['#ff9ec4', 180], ['#74d3ff', 150], ['#ff7a1a', 210], ['#b8e07a', 140]] as const).forEach(([c, h], i) => house(g, 55 + i * 126, 380, 96, h, c, '#7a3b2e', i));
+    rect(g, 0, 380, W, 34, '#b9b4a6'); dots(g, 0, 380, W, 34, 'rgba(20,20,31,.2)', 10);
     for (let i = 0; i < 3; i++) { const x = 200 + i * 150 + Math.sin(t * 2 + i) * 14, y = 90 + i * 24; g.beginPath(); g.moveTo(x - 22, y); g.quadraticCurveTo(x - 8, y - 16, x, y); g.quadraticCurveTo(x + 8, y - 16, x + 22, y); ink(g, 5); g.strokeStyle = '#fff'; g.stroke(); }
     poly(g, [[20, 480], [340, 480], [300, 524], [60, 524]], '#14141f', 6); rect(g, 100, 440, 140, 40, '#f4f4f8'); rect(g, 130, 410, 40, 30, '#f4f4f8');
   },
-  vieux_bourg(g: G, t: number) {
+  cathedrale(g: G, t: number) {
     bands(g, ['#ffe27a', '#ffeb99', '#fff3b8', '#fff8d0'], 0, 400);
     cloud(g, 120 + ((t * 6) % 30), 80, 1.0, '#fffdf0'); cloud(g, 700, 60, 0.7, '#fffdf0');
-    rect(g, 420, 90, 90, 280, '#d8b86a'); poly(g, [[408, 92], [465, 0], [522, 92]], '#c0392b'); circle(g, 465, 150, 28, '#fff');
-    g.beginPath(); g.moveTo(465, 150); g.lineTo(465, 130); g.moveTo(465, 150); g.lineTo(480, 156); ink(g, 4); g.stroke();
+    rect(g, 360, 90, 70, 310, '#d8b86a'); rect(g, 530, 130, 70, 270, '#d8b86a');
+    poly(g, [[352, 92], [395, 24], [438, 92]], '#8d8a9a'); poly(g, [[522, 132], [565, 70], [608, 132]], '#8d8a9a');
+    rect(g, 430, 190, 100, 210, '#e6cc85'); poly(g, [[420, 192], [480, 108], [540, 192]], '#e6cc85');
+    circle(g, 480, 220, 30, '#6ec6ff'); for (let i = 0; i < 8; i++) { g.beginPath(); g.moveTo(480, 220); g.lineTo(480 + Math.cos(i * 0.785) * 30, 220 + Math.sin(i * 0.785) * 30); ink(g, 3); g.stroke(); }
+    for (const [x, y] of [[380, 130], [550, 170], [380, 210], [550, 250]]) rect(g, x, y, 30, 44, '#5a3a22', 4);
     house(g, 20, 400, 170, 160, '#f6e08a', '#e67e22', 0); house(g, 215, 400, 170, 200, '#fff0b0', '#c0392b', 1);
     house(g, 540, 400, 170, 190, '#f0d070', '#8e44ad', 2); house(g, 735, 400, 200, 150, '#fff0b0', '#e67e22', 3);
     rect(g, 0, 400, W, 140, '#9a8f7a');
     for (let y = 404; y < 540; y += 26) for (let x = (y / 26) % 2 ? 0 : -30; x < W; x += 60) rect(g, x, y, 60, 26, '#b0a48c', 3);
-    g.beginPath(); g.moveTo(300, 300); g.lineTo(300, 322); g.moveTo(370, 300); g.lineTo(370, 322); ink(g, 3); g.stroke();
-    rect(g, 270, 322, 130, 40, '#ffd23f'); text(g, 'FROMAGE', 335, 352, 26, '#8a4b00', 5);
-    g.save(); g.translate(600, 470); g.beginPath(); g.ellipse(0, 0, 120, 52, 0, 0, 7); fillStroke(g, '#ffc933', 7); g.restore();
-    for (const [x, y, r] of [[-60, -6, 14], [20, 10, 18], [60, -14, 10], [-10, 18, 8]]) circle(g, 600 + x, 470 + y, r, '#d99a00', 4);
+    g.beginPath(); g.moveTo(255, 300); g.lineTo(255, 322); g.moveTo(345, 300); g.lineTo(345, 322); ink(g, 3); g.stroke();
+    rect(g, 215, 322, 170, 40, '#ff9ec4'); text(g, 'MACARONS', 300, 352, 26, '#6b1f3a', 5);
+    g.save(); g.translate(600, 470); g.beginPath(); g.ellipse(0, 0, 120, 44, 0, 0, 7); fillStroke(g, '#f4f4f8', 7); g.restore();
+    for (const [x, y] of [[-62, -4], [-16, 14], [30, -10], [68, 10], [-22, -18]]) { rect(g, 600 + x - 20, 470 + y - 12, 40, 24, '#d99a3a', 4); rect(g, 600 + x - 18, 470 + y - 3, 36, 6, '#8a4b00', 0); }
   },
-  zone_indus(g: G, t: number) {
+  amiens_nord(g: G, t: number) {
     bands(g, ['#f7a35c', '#f9b56e', '#fbc784', '#fdd99a']);
     for (let i = 0; i < 5; i++) { const k = (t * 0.4 + i * 0.2) % 1; circle(g, 190 + k * 80 + i * 8, 130 - k * 110, 22 + k * 40, `rgba(90,86,100,${0.85 - k * 0.7})`, 0); }
     for (const [x, h] of [[150, 110], [270, 150]]) { rect(g, x, h + 40, 46, 330 - h, '#e8e8ee'); for (let k = 0; k < 4; k++) rect(g, x, h + 40 + k * 70, 46, 30, '#e63946', 0); rect(g, x, h + 40, 46, 330 - h, 'rgba(0,0,0,0)', 7); }
@@ -260,7 +256,7 @@ Object.assign(IMAGES, {
     g.save(); g.translate(200, 480); g.rotate(t * 0.5); burst(g, 0, 0, 40, 56, 9, '#c9ced8', 0, 6); circle(g, 0, 0, 16, '#4a3a30', 5); g.restore();
     rect(g, 600, 450, 220, 40, '#ff7a1a'); rect(g, 620, 420, 80, 30, '#ff7a1a'); circle(g, 640, 495, 18, '#2a2a35'); circle(g, 780, 495, 18, '#2a2a35');
   },
-  les_hauts(g: G, t: number) {
+  citadelle(g: G, t: number) {
     bands(g, ['#2a145a', '#3d1f78', '#552f99', '#7a45c2', '#a46fe0'], 0, 400);
     for (let i = 0; i < 24; i++) circle(g, (i * 137) % W, (i * 71) % 220, 2.4 + (i % 3), '#fff', 0);
     circle(g, 770, 100, 44, '#fff6c8'); circle(g, 756, 90, 8, '#e9e0a8', 3);
@@ -268,9 +264,10 @@ Object.assign(IMAGES, {
     tw.forEach(([x, y, w, h, c], i) => skyscraper(g, x, y, w, h, c, i));
     g.beginPath(); g.moveTo(-20, 540); g.quadraticCurveTo(300, 330, 620, 400); g.quadraticCurveTo(820, 440, 980, 380); g.lineTo(980, 540); g.closePath(); fillStroke(g, '#5fd069', 7);
     dots(g, 0, 380, W, 160, 'rgba(20,20,31,.2)', 12);
-    rect(g, 718, 300, 8, 130, '#fff', 4); poly(g, [[726, 300], [790, 320], [726, 342]], '#e63946', 5);
-    g.beginPath(); g.ellipse(740, 438, 30, 8, 0, 0, 7); fillStroke(g, '#2a8a3a', 5);
-    circle(g, 520 + Math.sin(t * 3) * 6, 470, 10, '#fff', 4);
+    poly(g, [[560, 540], [600, 400], [980, 360], [980, 540]], '#b5533c');
+    for (let y = 420; y < 540; y += 24) { g.beginPath(); g.moveTo(600 - (y - 400) * 0.3, y); g.lineTo(W, y - 14); ink(g, 3); g.stroke(); }
+    for (let x = 620; x < 940; x += 60) rect(g, x, 376 - (x - 620) * 0.1, 30, 28, '#b5533c', 4);
+    rect(g, 818, 250, 8, 120, '#fff', 4); poly(g, [[826, 250], [890, 270], [826, 292]], '#e63946', 5);
   },
   amphi_nuit(g: G) {
     rect(g, 0, 0, W, H, '#10122e', 0); dots(g, 0, 0, W, 200, 'rgba(255,255,255,.08)', 14, 2);

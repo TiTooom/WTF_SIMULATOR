@@ -23,6 +23,7 @@ export interface WireMe {
   mk: (number | string)[][]; // repères : [x, z, index de type, libellé?]
   md: Record<string, number>; // médailles : id de mission -> index de médaille
   u: number; // SMS non lus
+  w?: number[]; // recherche : [état, secondes avant l'étoile perdue ?] (absent = libre)
   sh?: { id: string; d: number; g: number; l: number[] }; // boutique : id, quartier, gang, [index, achat, vente, …]
   st?: number[]; // planque : comme `b`
   ms?: [string, number, number, string, number, number?]; // mission : id, étape, étapes, texte, ms, limite
@@ -48,6 +49,7 @@ export function packMe(s: PrivateState): WireMe {
     for (const g of s.shop.goods) l.push(GOOD_IDS.indexOf(g.good), g.buy, g.sell);
     w.sh = { id: s.shop.dealer, d: Math.max(0, DISTRICT_IDS.indexOf(s.shop.district)), g: Math.max(0, GANG_IDS.indexOf(s.shop.gang)), l };
   }
+  if (s.ws) w.w = s.wl !== undefined ? [s.ws, s.wl] : [s.ws];
   if (s.stash) w.st = flatBag(s.stash);
   if (s.mission) {
     const m = s.mission;
@@ -99,6 +101,9 @@ export function unpackMe(raw: unknown): PrivateState | null {
     money: int(w.m, 0, 1e9), bag: unflatBag(w.b), bagCap: int(w.c, 1, 999, 14), stars: int(w.s, 0, 5), starProgress: num(w.p, 0, 1),
     district: DISTRICT_IDS[w.d as number] ?? DISTRICT_IDS[0], marks, medals, unread: int(w.u, 0, 9999),
   };
+  const search = arr(w.w, 2);
+  out.ws = int(search[0], 0, 3);
+  if (search.length > 1) out.wl = int(search[1], 0, 999);
   const sh = w.sh;
   if (sh && typeof sh === 'object' && !Array.isArray(sh)) {
     const o = sh as Record<string, unknown>;

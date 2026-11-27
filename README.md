@@ -57,16 +57,16 @@ La partie est stockée **chez l'hôte**, dans `%APPDATA%\GTA Edition UniLaSalle\
 Un ami peut aussi rejoindre sans l'application, **sur ordinateur**, en ouvrant dans son navigateur l'adresse de l'hôte (saisis l'adresse IP, pas un nom) (par exemple `http://192.168.0.101:3000`, affichée dans l'écran de pause de l'hôte). Ses réglages sont alors enregistrés dans ce navigateur.
 
 ## La ville
-Une ville de 640 m avec **5 quartiers**, chacun contrôlé par un gang (clins d'œil à la vie étudiante, personne de réel) : **Le Campus** (Les Agros), **Les Docks** (La Bande des Mouettes), **Le Vieux-Bourg** (La Confrérie du Fromage), **La Zone Industrielle** (Les Clés de 12), **Les Hauts** (Le Club des Golfeurs). Piétons, circulation, voitures garées à voler, police.
+Une ville de 640 m avec **5 quartiers**, chacun contrôlé par un gang (clins d'œil à la vie étudiante, personne de réel) : **Le Campus** (Les Ingés), **Saint-Leu** (Les Mouettes de Saint-Leu), **La Cathédrale** (La Confrérie du Macaron), **Amiens Nord** (Les Clés de 12), **La Citadelle** (Le Club de la Citadelle). Piétons, circulation, voitures garées à voler, police.
 
 ## Ce qu'on y fait
 - **Conduire** : 4 véhicules (citadine, berline, camionnette, voiture de police) avec une conduite arcade : forte adhérence, frein à main pour déraper. La caméra anticipe, pivote dans les virages et suit tes commandes.
-- **Voler une voiture garée** : un mini-jeu de moins de 4 secondes (tournevis dans le contact, court-circuit…).
-- **Le commerce de rue** : achète des marchandises **fictives** (café de la machine, annales secrètes, croissants pirates, sardines de quai…) chez les dealers et revends-les là où elles sont demandées. Les prix varient selon le quartier, le gang et les **tuyaux reçus par SMS** sur ton **PDA**. Gare aux caméras et à la police : un échange vu fait monter la recherche.
-- **La police** : des étoiles de recherche (0 à 5). Pour les faire baisser, **détruis les voitures de police**, fuir ne suffit pas. Arrêté, tu perds ton sac et une partie de ton argent. Taper dans le vide ne dérange personne.
+- **Voler une voiture garée** : un petit mini-jeu (tournevis dans le contact, court-circuit…).
+- **Le commerce de rue** : achète des marchandises **fictives** (café de la machine, annales secrètes, croissants pirates, ficelles picardes…) chez les dealers et revends-les là où elles sont demandées. Les prix varient selon le quartier, le gang et les **tuyaux reçus par SMS** sur ton **PDA**. Gare aux caméras et à la police : un échange vu fait monter la recherche.
+- **La police** : des étoiles de recherche (0 à 5). Les policiers et les caméras ont un **champ de vision** dessiné au sol, bloqué par les bâtiments : **disparais de leur vue** assez longtemps et les étoiles tombent. Près d'une **cachette** (anneau vert), **E** te cache, à condition qu'aucun policier ne t'ait vu entrer. Détruire des voitures de police fait aussi baisser la recherche. Arrêté, tu perds ton sac et une partie de ton argent. Taper dans le vide ne dérange personne.
 - **5 missions** (une par quartier) avec checkpoints, retour immédiat au dernier checkpoint en cas d'échec et **médailles bronze, argent, or**. En multi, la mission est partagée avec les joueurs à moins de 30 m.
 - **Activités annexes** : taxi (dans une berline jaune garée) et justicier (dans une voiture de police), avec la touche d'activité.
-- **8 mini-jeux** : tournevis, court-circuit, digicode, dosage, fouille, brise-glace, désamorçage, liasses. Souris et clavier.
+- **8 mini-jeux** : tournevis, court-circuit, digicode, dosage, fouille, brise-glace, désamorçage, liasses. Souris et clavier, **sans limite de temps**, consignes affichées avant de commencer, abandon libre avec Échap.
 - **Argent individuel** : chacun son argent et son sac, et `/donner <pseudo> <montant>` pour s'entraider.
 
 ## Commandes par défaut (modifiables dans Options)
@@ -76,12 +76,14 @@ Une ville de 640 m avec **5 quartiers**, chacun contrôlé par un gang (clins d'
 | Se déplacer | Z Q S D (selon ton clavier) : haut, gauche, bas, droite de l'écran |
 | Viser | Souris (le curseur est un viseur ; Échap pour le libérer) |
 | Courir / roulade (à pied) | Maj gauche / Espace |
-| Monter / descendre, parler au dealer | E |
+| Monter / descendre, parler au dealer, se cacher | E |
 | Conduire | Z/S accélérer et freiner, Q/D tourner, Espace frein à main, H klaxon ou sirène |
 | Activité (taxi, justicier) | Q (position physique, voir Options) |
 | PDA (carte, SMS, marché, missions, stats) | Tab |
 | Chat | Entrée |
 | Zoom de la caméra | Molette |
+| Aide des commandes | F1 (ou le bouton « ? ») |
+| Passer le tutoriel | F2 |
 | Pause / options / menu principal | Échap |
 | Plein écran | F11 (Windows) · Ctrl+Cmd+F (macOS) |
 

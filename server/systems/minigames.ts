@@ -35,7 +35,7 @@ interface Session {
 export interface MinigamesSystem extends GameSystem {
   /**
    * Démarre un mini-jeu pour `p` (mg_start envoyé). Retourne le `sid`, ou null si le joueur en a déjà un, est mort, ou si `kind` est inconnu.
-   * `tag` identifie l'appelant (« vol:12 », « mission:agros:2 »…). `onDone` est appelé une seule fois, que ce soit réussite, échec ou annulation.
+   * `tag` identifie l'appelant (« vol:12 », « mission:inges:2 »…). `onDone` est appelé une seule fois, que ce soit réussite, échec ou annulation.
    * `seed` (facultatif) fixe la graine (tests, missions rejouables).
    */
   startMinigame(p: SimPlayer, kind: MinigameKind, tag: string, difficulty: number, onDone?: (e: MinigameDone) => void, seed?: number): number | null;

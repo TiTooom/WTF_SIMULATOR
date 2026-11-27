@@ -63,7 +63,8 @@ export function makeArcadeCar(spec: CarSpec): VehicleDef {
     create(api, x, y, z, yaw) {
       const body = api.world.createRigidBody(
         RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) })
-          .setLinearDamping(0.02).setAngularDamping(2.5).enabledRotations(false, true, false),
+          .setLinearDamping(0.02).setAngularDamping(2.5).enabledRotations(false, true, false)
+          .setDominanceGroup(1), // masse « infinie » face aux piétons joueurs (groupe 0) : on ne pousse pas une voiture à pied
       );
       api.world.createCollider(api.sliding(RAPIER.ColliderDesc.cuboid(...spec.half).setMass(spec.mass)).setCollisionGroups(grp(G.VEHICLE)), body);
       let steer = 0; // volant lissé

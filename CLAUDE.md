@@ -6,11 +6,18 @@ Inspiré de GTA: Chinatown Wars (voir `DA.md`) : vue de dessus inclinée, cel-sh
 
 **Plan, contrats et propriétaires de fichiers : `docs/ARCHITECTURE-GTA.md` (source de vérité).** Vagues 0 à 5 faites ; reste la release (voir plus bas).
 
+Thème **amiénois** (retour de test) : rien en rapport avec l'agro. Quartiers `campus, saint_leu, cathedrale, amiens_nord, citadelle` ; gangs `inges, mouettes, macarons, cles_de_12, club_citadelle`. L'interface reste **légère** (une ligne d'aide contextuelle, touches dans le panneau F1, tutoriel et conseils dans `src/ui/guide.ts`). Mini-jeux **sans limite de temps**, abandonnables.
+
+## Police et furtivité
+- `shared/hiding.ts` (pur) : cônes de vision, ligne de vue bloquée par les bâtiments, caméras balayantes, cachettes. Le serveur (`police.ts`) décide ; le client ne fait que **dessiner** les cônes (recalculés depuis le snapshot) et l'état reçu (`me.ws`, `me.wl`). `PlayerSnap.an = 5` : caché.
+- Une étoile tombe quand le joueur n'est vu de personne pendant `LOSE_DELAY_S` (`shared/wanted.ts`) ; détruire des voitures de police fait aussi baisser. La police est plus lente que le joueur jusqu'à 4★.
+- Les voitures ont un groupe de dominance Rapier 1 : un piéton joueur ne peut pas les pousser.
+
 ## Architecture
-- `shared/` : constantes, protocole (`protocol.ts`), contrats (`ids.ts`, `api.ts`, `game.ts`), **simulation Rapier** (`sim.ts`), ville déterministe (`city/layout.ts`, `districts.ts`, `lanes.ts`), véhicules (`vehicles/arcade.ts` + 4 types), `economy/` (prix, gangs, marchandises, commerce : logique pure), `wanted.ts`, `peds.ts`, `missions/`, `activities.ts`, `minigames/rules.ts`, `onfoot.ts`, `ai/drive.ts`, `me.ts` (état privé compact).
+- `shared/` : constantes, protocole (`protocol.ts`), contrats (`ids.ts`, `api.ts`, `game.ts`), **simulation Rapier** (`sim.ts`), ville déterministe (`city/layout.ts`, `districts.ts`, `lanes.ts`), véhicules (`vehicles/arcade.ts` + 4 types), `economy/` (prix, gangs, marchandises, commerce : logique pure), `wanted.ts`, `hiding.ts`, `peds.ts`, `missions/`, `activities.ts`, `minigames/rules.ts`, `onfoot.ts`, `ai/drive.ts`, `me.ts` (état privé compact).
 - `server/server.ts` : HTTP statique + `/info` + WebSocket + boucle 60 Hz + snapshots delta 30 Hz compacts + sauvegarde atomique + disjoncteur. `server/game.ts` : `installGame` (bus d'événements typé, `SYSTEMS`). **Systèmes de jeu** dans `server/systems/` : `traffic, peds, police, economy, minigames, theft, missions, activities` (interface `GameSystem`, ordre = ordre d'appel).
 - `electron/` : fenêtre, menu (`menu.html`, `menu.ts`), IPC, `discovery.ts` (UDP), `updater.ts`. Sécurité : `contextIsolation`, sandbox, pas de nodeIntegration ; le menu (file:) a l'API complète, une page distante n'a que `backToMenu` et les réglages ; handlers sensibles vérifient `senderFrame.url`.
-- `src/` : client. **Aucune physique ni logique de jeu** : il dessine l'état interpolé (~100 ms de retard) et envoie des `Input`. `main.ts` (intégration), `camera.ts` (CameraRig : ressort, anticipation, pivot en virage, réagit aux commandes), `aim.ts` (verrouillage), `gfx.ts` (toon + contours coque inversée + estompage des bâtiments + silhouettes XRay), `city/cityView.ts` (25 chunks instanciés), `peds.ts`, `markers.ts`, `hud.ts`, `models.ts`, `fx.ts`, `vehicles/`, `minigames/`, `ui/` (PDA, boutique, vignettes BD, panneau de réglages).
+- `src/` : client. **Aucune physique ni logique de jeu** : il dessine l'état interpolé (~100 ms de retard) et envoie des `Input`. `main.ts` (intégration), `camera.ts` (CameraRig : ressort, anticipation, pivot en virage, réagit aux commandes), `aim.ts` (verrouillage), `gfx.ts` (toon + contours coque inversée + estompage des bâtiments + silhouettes XRay), `city/cityView.ts` (25 chunks instanciés), `peds.ts`, `markers.ts` (repères, cachettes, cônes), `hud.ts`, `models.ts`, `fx.ts`, `vehicles/`, `minigames/`, `ui/` (PDA, boutique, vignettes BD, réglages, guide, aide F1).
 - Serveur **autoritaire** : toute logique (économie, prix, missions, étoiles, résultats de mini-jeux) côté serveur, jamais dans le client. Tout message client (`GameClientMsg`, `Input`) est revalidé (`parseGameMsg`, `sim.setInput`).
 - Ajouter un système : créer `server/systems/<id>.ts` (`SystemFactory`), ajouter l'id à `SYSTEM_IDS` (`shared/ids.ts`) et à `SYSTEMS` (`server/game.ts`).
 
@@ -25,7 +32,7 @@ Inspiré de GTA: Chinatown Wars (voir `DA.md`) : vue de dessus inclinée, cel-sh
 - **L'éditeur** (VS Code/Claude Code) définit `ELECTRON_RUN_AS_NODE=1` : pour lancer Electron depuis son terminal, `env -u ELECTRON_RUN_AS_NODE npm run app` (en tâche de fond, sinon l'app se ferme avec la commande).
 
 ## Tests
-`npx tsx tests/<suite>.ts` : `smoke, robustesse, vehicules1, conduite, economie, economie-sim, pietons, minijeux, minijeux-reel, trafic, police, missions, disjoncteur, sauvegarde, reseau, charge, captures, reel`. Les suites « réel » et `captures` lancent Chrome headless en CDP (rendu logiciel) et sont sensibles à la charge machine : à lancer sur machine calme. Test automatisé de l'app : Electron avec `--remote-debugging-port=9333`.
+`npx tsx tests/<suite>.ts` : `smoke, robustesse, vehicules1, conduite, economie, economie-sim, pietons, minijeux, minijeux-reel, trafic, police, furtivite, missions, disjoncteur, sauvegarde, reseau, charge, captures, reel`. Les suites « réel » et `captures` lancent Chrome headless en CDP (rendu logiciel) et sont sensibles à la charge machine : à lancer sur machine calme. Test automatisé de l'app : Electron avec `--remote-debugging-port=9333`.
 - URL de test client : `?name= &cmd=/drive%20<type> &aim= &nopause`. `/debug stars|money|mg <kind>` (hôte seulement). `window.__wtf` expose audio et mesures (drawCalls) pour les tests.
 
 ## Commandes

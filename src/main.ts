@@ -1,5 +1,9 @@
 import * as THREE from 'three';
+import { TAXI_LIVERY } from '../shared/activities';
+import { getCity } from '../shared/city/layout';
+import { copCameraCones, hidingSpots, nearestHidingSpot, type CopEye, type VisionCone } from '../shared/hiding';
 import { PED_KINDS } from '../shared/ids';
+import { PED_ST } from '../shared/peds';
 import { PED_STRIDE, type Input, type PlayerSnap, type PrivateState } from '../shared/protocol';
 import { defaultSettings, type ActionId, type Settings } from '../shared/settings';
 import { AutoLock, computeAim, type AimTarget } from './aim';
@@ -7,10 +11,10 @@ import { GameAudio, SOUNDS, registerSound } from './audio';
 import { CameraRig } from './camera';
 import { createChat } from './chat';
 import { Fx } from './fx';
-import { copsInSight, createHud } from './hud';
-import { buildAvatar, disposeAvatar, playerColor, setAvatarState } from './models';
+import { copsInSight, createHud, type HudState } from './hud';
+import { AN, buildAvatar, disposeAvatar, playerColor, setAvatarState } from './models';
 import { XRay } from './gfx';
-import { MarkersView } from './markers';
+import { HidingView, MarkersView, VisionConesView } from './markers';
 import { createMinigames } from './minigames';
 import { Net } from './net';
 import { PedsView } from './peds';
@@ -18,6 +22,8 @@ import { ProjectilesView } from './projectiles';
 import { PropsView } from './props';
 import { buildEnvironment } from './scene';
 import { launcher, loadSettings, saveSettings } from './settings';
+import { createControls } from './ui/controls';
+import { Guide } from './ui/guide';
 import { Pda } from './ui/pda';
 import { installMarcheTab, notePrices, resetMarket } from './ui/pda/marche';
 import { ShopUi } from './ui/shop';
@@ -38,7 +44,7 @@ const scene = new THREE.Scene();
 const city = buildEnvironment(scene);
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 1, 600);
 const rig = new CameraRig(camera);
-const xray = new XRay(renderer, scene, camera); // silhouettes du joueur et des coéquipiers à travers le décor
+const xray = new XRay(renderer, scene, camera); // silhouettes des personnages à pied à travers le décor (jamais les véhicules)
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -75,6 +81,22 @@ void Promise.all([loadSettings(), getLayout()]).then(([s, l]) => {
 });
 /** Nom de la touche affiché dans l'aide (ex : « Z » en AZERTY). */
 const L = (a: ActionId) => keyLabel(settings.keys[a], layout);
+
+// ---------- Guidage, furtivité ----------
+const guide = new Guide({ keyLabel: L });
+const layoutCity = getCity();
+const spots = hidingSpots(layoutCity);
+const spotViews = spots.map((s) => ({ x: s.x, z: s.z, r: s.r, kind: s.kind === 'cabane' || s.kind === 'garage' ? 'abri' : s.kind }));
+const hidingView = new HidingView(scene);
+const conesView = new VisionConesView(scene);
+const cameraPois = layoutCity.poisOf('camera');
+let camsDown = new Set<string>(); // caméras détruites (événement `monde`)
+const camIsDown = (id: string) => camsDown.has(id);
+const eyes: CopEye[] = [];
+const cones: VisionCone[] = [];
+const SEARCH: NonNullable<HudState['search']>[] = ['libre', 'repere', 'recherche', 'cache'];
+/** La touche d'interaction sert à se cacher / sortir de cachette (elle passe alors avant la boutique). */
+let hideAction = false;
 
 const URLP = new URLSearchParams(location.search);
 
@@ -146,7 +168,7 @@ addEventListener('keydown', (e) => {
   if ((e.target as HTMLElement).tagName === 'INPUT' || settingsOpen || !playing || pda.isOpen() || shop.isOpen() || mg.active()) return;
   keys.add(e.code);
   if (!e.repeat) {
-    if (e.code === settings.keys.interact && !shop.interact()) net.send({ type: 'interact' });
+    if (e.code === settings.keys.interact && (hideAction || !shop.interact())) net.send({ type: 'interact' });
     if (e.code === settings.keys.chat) {
       e.preventDefault();
       chat.open();
@@ -193,18 +215,34 @@ net.onMe = (s) => { me_ = s; noteMe(s); pda.setState(s); shop.setState(s); noteP
 const mg = createMinigames({ send: (r) => net.send({ type: 'game', m: { k: 'mg', r } }) });
 // Échap pendant un mini-jeu ou le PDA : le navigateur libère la souris ; on ne veut pas l'écran de pause pour autant
 let quietUntil = 0;
-addEventListener('keydown', (e) => { if (e.code === 'Escape' && (mg.active() || pda.isOpen() || shop.isOpen())) quietUntil = performance.now() + 600; }, true);
+addEventListener('keydown', (e) => { if (e.code === 'Escape' && (mg.active() || pda.isOpen() || shop.isOpen() || controls.isOpen())) quietUntil = performance.now() + 600; }, true);
+// Aide des touches (F1 ou bouton « ? ») : créée APRÈS l'écouteur Échap ci-dessus, qui doit voir le panneau encore ouvert
+const controls = createControls({
+  keyLabel: L,
+  tips: { get: () => guide.isEnabled(), set: (on) => guide.setEnabled(on), replay: () => guide.reset() },
+  canOpen: () => playing && !chat.isOpen() && !settingsOpen && !pda.isOpen() && !shop.isOpen() && !mg.active(),
+  onToggle: (open) => {
+    m1 = m2 = 0;
+    if (open) document.exitPointerLock();
+    else { quietUntil = Math.max(quietUntil, performance.now() + 300); grab(); }
+    updatePause();
+  },
+});
+controls.setVisible(false);
 net.onGame = (e) => {
   noteGameEvent(e);
   if (e.k === 'toast') { hud.toast(e.text); chat.add({ from: '', text: e.text, sys: true }); }
-  else if (e.k === 'sms') { hud.toast(`SMS · ${e.sms.from} : ${e.sms.text}`, 5000); audio.play('chat'); }
+  else if (e.k === 'sms') { hud.toast(`Nouveau SMS de ${e.sms.from}`, 4000); guide.notify('sms'); audio.play('chat'); }
   else if (e.k === 'vignettes') { keys.clear(); m1 = m2 = 0; void showVignettes(e.id); }
-  else if (e.k === 'mg_start') { keys.clear(); m1 = m2 = 0; mg.start(e.s); }
+  else if (e.k === 'mg_start') { keys.clear(); m1 = m2 = 0; controls.close(); guide.notify('minigame'); mg.start(e.s); }
   else if (e.k === 'mg_end') mg.end(e.sid);
-  else if (e.k === 'mort') hud.alert('ko');
-  else if (e.k === 'arrete') hud.alert('arrete');
+  else if (e.k === 'mort') { hud.alert('ko'); guide.notify('mort'); }
+  else if (e.k === 'arrete') { hud.alert('arrete'); guide.notify('arrete'); }
+  else if (e.k === 'monde') camsDown = new Set(e.down ?? []);
   else if (e.k === 'mission') {
+    if (e.ev === 'start') guide.notify('mission');
     if (e.ev === 'done') {
+      guide.notify('mission_fin');
       keys.clear(); m1 = m2 = 0;
       const def = missionById(e.id);
       // « done » précède l'événement « vignettes » (planches de fin) envoyé dans le même tick : on laisse arriver les planches, qui passent d'abord
@@ -218,8 +256,6 @@ net.onGame = (e) => {
   }
 };
 const $ = (id: string) => document.getElementById(id)!;
-const hudText = $('hud');
-const playersEl = $('players');
 const menu = $('menu');
 const nameInput = $('name') as HTMLInputElement;
 const status = $('status');
@@ -279,8 +315,8 @@ const updatePause = () => {
   // ?nopause : cache l'écran de pause (captures et tests automatisés en navigateur sans capture de souris)
   const noPause = new URLSearchParams(location.search).has('nopause');
   const quiet = performance.now() < quietUntil;
-  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !pda.isOpen() && !shop.isOpen() && !mg.active() && !quiet ? 'flex' : 'none';
-  if (quiet && playing && !locked() && !pda.isOpen() && !shop.isOpen() && !mg.active()) { grab(); setTimeout(updatePause, quietUntil - performance.now() + 20); }
+  pauseEl.style.display = !noPause && playing && !locked() && !chat.isOpen() && !settingsOpen && !pda.isOpen() && !shop.isOpen() && !mg.active() && !controls.isOpen() && !quiet ? 'flex' : 'none';
+  if (quiet && playing && !locked() && !pda.isOpen() && !shop.isOpen() && !mg.active() && !controls.isOpen()) { grab(); setTimeout(updatePause, quietUntil - performance.now() + 20); }
 };
 document.addEventListener('pointerlockchange', updatePause);
 pauseEl.addEventListener('click', () => {
@@ -341,6 +377,7 @@ function join() {
     menu.style.display = 'none';
     playing = true;
     hud.setVisible(true);
+    controls.setVisible(true);
     chat.setEnabled(net.mode === 'multi');
     grab();
     updatePause();
@@ -377,6 +414,7 @@ function join() {
     setInterval(() => net.sendInput(readInput()), 33); // Input v2 à 30 Hz
   };
   const fail = (message: string) => {
+    controls.setVisible(false);
     playing = false;
     updatePause();
     const l = launcher();
@@ -414,6 +452,10 @@ const stats = {
   get cityDrawCalls() { return city.drawCalls; },
   get lock() { return lockPos; },
   get pda() { return pda; },
+  get cones() { return conesView.count; },
+  get hidingSpots() { return hidingView.count; },
+  get xray() { return xray.count; },
+  guide, controls,
   mg,
 };
 Object.assign(window, { __wtf: stats });
@@ -531,28 +573,35 @@ function frame(now: number) {
   prevVeh = veh ? me.veh : -1;
 
   const multi = net.mode === 'multi';
-  // Caméra de dessus inclinée (src/camera.ts) ; texte d'aide selon ce que fait le joueur
-  let focus: [number, number, number];
-  if (veh && vdef) {
-    focus = veh.p;
-    hudText.textContent = vdef.hud(veh, L);
-  } else {
-    focus = me.p;
-    let hint = '';
-    s.vehicles.forEach((v) => {
-      if (v.dead || v.drv) return;
+  // Caméra de dessus inclinée (src/camera.ts) ; UNE ligne d'aide, seulement quand une action est possible
+  const focus: [number, number, number] = veh && vdef ? veh.p : me.p;
+  const stars = me_?.stars ?? 0;
+  const hidden = me.an === AN.HIDDEN;
+  const spotNear = !veh && !!nearestHidingSpot(spots, me.p[0], me.p[2]);
+  hideAction = hidden || (spotNear && stars > 0);
+  let vehicleNear = '';
+  if (!veh) {
+    for (const v of s.vehicles) {
+      if (v.dead || v.drv) continue;
       const d = viewFor(v.type);
-      if (Math.hypot(me!.p[0] - v.p[0], me!.p[2] - v.p[2]) < (d.enterRadius ?? 6)) hint = `
-${L('interact')} : monter dans ${d.name ?? v.type}`;
-    });
-    hudText.textContent = `${L('forward')}${L('left')}${L('back')}${L('right')} : marcher · ${L('jump')} : roulade · ${L('sprint')} : courir · ${L('pda')} : PDA`
-      + (multi ? ` · ${L('chat')} : chat` : '') + hint + (shop.canInteract() ? `
-${L('interact')} : parler au dealer` : '');
+      if (Math.hypot(me.p[0] - v.p[0], me.p[2] - v.p[2]) < (d.enterRadius ?? 6)) vehicleNear = d.name ?? v.type;
+    }
   }
+  let hint = '';
+  if (hidden) hint = `${L('interact')} : sortir de la cachette`;
+  else if (hideAction) hint = `${L('interact')} : se cacher`;
+  else if (!veh && shop.canInteract()) hint = `${L('interact')} : parler au dealer`;
+  else if (vehicleNear) hint = `${L('interact')} : monter dans ${vehicleNear}`;
+  else if (veh && me.seat === 0 && me_ && !me_.activity && !me_.mission) { // activités annexes : au volant du bon véhicule
+    const job = veh.type === 'police' ? 'justicier' : veh.type === 'berline' && veh.lv === TAXI_LIVERY ? 'taxi' : '';
+    if (job) hint = `${L('activity')} : lancer l'activité ${job}`;
+  }
+  hud.setHint(hint);
   const frozen = mg.active(); // mini-jeu ouvert : caméra et visée figées, entrées nulles, scène non rendue
   if (frozen !== wasFrozen) {
     wasFrozen = frozen;
     hud.setVisible(!frozen);
+    controls.setVisible(!frozen && playing);
     if (!frozen) { keys.clear(); for (const k of held) keys.add(k); } // les touches encore maintenues repartent
   }
   // Téléportation (réapparition, hôpital, commissariat) : la caméra saute au lieu de traverser la ville
@@ -574,13 +623,27 @@ ${L('interact')} : parler au dealer` : '');
   city.update(focus);
   city.occludeRadius = veh ? 6.5 : 5.5;
   xray.clear();
-  if (veh) { const vv = vehicleViews[me.veh]; if (vv) xray.add(vv.view.group, playerColor(me.name), 0.6); }
-  else { const a = avatars.get(net.id); if (a) xray.add(a, playerColor(me.name), 0.6); }
-  for (const p of s.players) {
-    if (p.id === net.id || p.veh >= 0) continue;
+  for (const p of s.players) { // silhouettes : personnages à pied seulement, jamais un joueur caché
+    if (p.veh >= 0 || p.an === AN.HIDDEN) continue;
     const a = avatars.get(p.id);
-    if (a) xray.add(a, playerColor(p.name), 0.35);
+    if (a) xray.add(a, p.id === net.id ? XRay.NEUTRAL : playerColor(p.name), p.id === net.id ? 0.3 : 0.22);
   }
+  // Cachettes (anneaux seulement quand on est recherché) et champs de vision : caméras toujours, police si recherché
+  hidingView.update(spotViews, [focus[0], focus[2]]);
+  hidingView.setRings(stars > 0);
+  eyes.length = 0;
+  if (stars > 0) {
+    const pd = s.peds;
+    for (let o = 0; o + PED_STRIDE <= pd.length; o += PED_STRIDE) {
+      if (PED_KINDS[pd[o + 1]] === 'flic' && pd[o + 5] !== PED_ST.KNOCKED) eyes.push({ id: pd[o], x: pd[o + 2], z: pd[o + 3], yaw: pd[o + 4], car: false });
+    }
+    s.vehicles.forEach((v, i) => {
+      if (v.type !== 'police' || v.dead || !v.ai || v.drv) return;
+      const [x, y, z, w] = v.q;
+      eyes.push({ id: i, x: v.p[0], z: v.p[2], yaw: Math.atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y)), car: true });
+    });
+  }
+  conesView.update(copCameraCones(eyes, cameraPois, camIsDown, simT / 1000, cones), [focus[0], focus[2]]);
   markers.update(me_?.marks ?? [], dt, focus);
 
   // Visée : le curseur est projeté sur un plan horizontal à hauteur d'épaule
@@ -651,9 +714,24 @@ ${L('interact')} : parler au dealer` : '');
     hp: me.hp, vehHp: veh ? veh.hp : null, vehName: vdef?.name ?? '', inVehicle: !!veh,
     x: focus[0], z: focus[2], yaw: veh ? Math.atan2(2 * (veh.q[3] * veh.q[1] + veh.q[0] * veh.q[2]), 1 - 2 * (veh.q[1] * veh.q[1] + veh.q[2] * veh.q[2])) : me.yaw,
     mates, cops: copsInSight(focus[0], focus[2], s.peds, s.vehicles),
+    search: me_?.ws === undefined ? undefined : SEARCH[me_.ws], loseIn: me_?.wl,
   }, me_);
+  hud.setPlayers(multi ? s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)) : []);
 
-  playersEl.textContent = s.players.map((p) => (p.id === net.id ? `${p.name} (toi)` : p.name)).join('\n');
+  if (playing) {
+    guide.update({
+      x: focus[0], z: focus[2], onFoot: !veh, camYaw: rig.yaw, stars,
+      vehicleNear: !!vehicleNear, dealerNear: !!me_?.shop, hideSpotNear: spotNear, hidden,
+      cameraNear: cameraPois.some((c) => !camsDown.has(c.id) && Math.hypot(c.x - focus[0], c.z - focus[2]) < 25),
+      giverNear: !!me_?.marks.some((m) => m.k === 'donneur' && Math.hypot(m.x - focus[0], m.z - focus[2]) < 12),
+      search: me_?.ws === undefined ? undefined : SEARCH[me_.ws],
+      mission: !!(me_?.mission || me_?.activity), minigame: frozen, pdaOpen: pda.isOpen(),
+      money: me_?.money ?? 0, bagCount: me_ ? Object.values(me_.bag).reduce((n, q) => n + (q ?? 0), 0) : 0,
+      unread: me_?.unread, marks: me_?.marks,
+      blocked: !me_ || frozen || settingsOpen || pauseEl.style.display === 'flex',
+    }, dt);
+    hud.topOffset(guide.topHeight);
+  }
   if (!frozen) { renderer.render(scene, camera); xray.render(); } // sous un mini-jeu plein écran, la dernière image reste affichée
 }
 requestAnimationFrame(frame);

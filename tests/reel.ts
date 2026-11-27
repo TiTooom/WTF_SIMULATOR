@@ -198,7 +198,7 @@ async function main() {
       let mm = await priv() as unknown as { mission?: { id: string; step: number } };
       for (let i = 0; i < 20 && !mm.mission; i++) { await sleep(300); mm = await priv() as unknown as typeof mm; }
       check(mm.mission?.id === def.id, 'mission 1 : lancée près du donneur, visible dans le HUD (me.mission)', JSON.stringify(mm.mission));
-      const hudMission = await ev<string>(`document.querySelector('#gta-hud .gh-mission')?.textContent ?? ''`);
+      const hudMission = await ev<string>(`document.querySelector('#gta-hud .gh-obj')?.textContent ?? ''`);
       check(hudMission.includes('MISSION'), 'mission 1 : le HUD affiche la mission', hudMission.slice(0, 60));
       const answer = async (): Promise<boolean> => {
         let st: { s: { sid: number; kind: string; seed: number; difficulty: number } } | undefined;
@@ -270,7 +270,7 @@ async function main() {
         for (let i = 0; i < 20 && !act.activity; i++) { await sleep(300); act = await priv() as never; }
         check(act.activity?.kind === 'taxi', 'taxi : la touche d’activité démarre le taxi (me.activity)', JSON.stringify(act.activity));
         let hudAct = '';
-        for (let i = 0; i < 20 && !hudAct.includes('TAXI'); i++) { await sleep(300); hudAct = await ev<string>(`document.querySelector('#gta-hud .gh-mission')?.textContent ?? ''`); } // rendu logiciel lent : le HUD suit avec retard
+        for (let i = 0; i < 20 && !hudAct.includes('TAXI'); i++) { await sleep(300); hudAct = await ev<string>(`document.querySelector('#gta-hud .gh-obj')?.textContent ?? ''`); } // rendu logiciel lent : le HUD suit avec retard
         check(hudAct.includes('TAXI'), 'taxi : le HUD affiche l’activité', hudAct.slice(0, 60));
         await shot('8_taxi');
       }

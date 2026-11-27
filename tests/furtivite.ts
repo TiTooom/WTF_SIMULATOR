@@ -5,6 +5,7 @@
 import { GameBus, type GameCtx, type GameSystem } from '../shared/game';
 import { buildCityUncached, getCity } from '../shared/city/layout';
 import { DISTRICT_IDS } from '../shared/ids';
+import { packMe, unpackMe } from '../shared/me';
 import { makePed, PED_ST } from '../shared/peds';
 import { NO_INPUT, type GameServerEvent, type PrivateState } from '../shared/protocol';
 import { Sim } from '../shared/sim';
@@ -176,6 +177,7 @@ async function main() {
     tick(30);
     ok(police.phaseOf('a') === WS.RECHERCHE && priv(a).ws === WS.RECHERCHE, 'flic tourné de dos : plus vu, état « recherche » (ws = 2)');
     ok(typeof priv(a).wl === 'number' && priv(a).wl! > 0 && priv(a).wl! <= LOSE_DELAY_S[1], `HUD : secondes avant l'étoile perdue (wl = ${priv(a).wl})`);
+    { const w = unpackMe(JSON.parse(JSON.stringify(packMe({ money: 0, bag: {}, bagCap: 14, stars: 2, starProgress: 0, district: 'campus', marks: [], medals: {}, unread: 0, ...priv(a) }))))!; ok(w.ws === priv(a).ws && w.wl === priv(a).wl, 'état de recherche transmis au client (message me compact)'); }
     tick(60 * 6);
     f.yaw = 0; // revu à mi-chemin du délai : le compteur repart
     tick(30);
@@ -365,6 +367,7 @@ async function main() {
       for (let i = 0; i < 60 * 70; i++) {
         tick(1);
         if (i % 120 === 0) stars(c, n); // la furtivité ferait sinon baisser l'indice : on le maintient pour mesurer l'effectif
+        c.invulnUntil = sim.time + 10_000; // joueur immobile : sans cela il serait arrêté (voitures dispersées au commissariat)
         max = Math.max(max, police.carCount);
         if (first < 0 && police.carCount > 0) first = i / 60;
       }

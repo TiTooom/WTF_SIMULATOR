@@ -11,7 +11,7 @@
 //
 // ===== ÉQUILIBRAGE (tests/economie-sim.ts : bots sur ~20 min et 60 min, trajets réels entre les 10 dealers de getCity(), caméras, flics, arrestations) =====
 // Réglages retenus : MARGIN 0,15 de chaque côté, FLOW_IMPACT 0,06 par unité (demi-vie 420 s), sac BAG_CAP 14 (trade.ts), poids des marchandises précieuses 3-5 (goods.ts),
-// bourse de départ 200 €. Avant réglage (sac 30, impact écrasé toutes les 25 s par le bruit) : ~190 000 €/h pour le bot optimal (boucle annales vieux_bourg -> zone_indus) = argent infini.
+// bourse de départ 200 €. Avant réglage (sac 30, impact écrasé toutes les 25 s par le bruit) : ~190 000 €/h pour le bot optimal (boucle annales cathedrale -> amiens_nord) = argent infini.
 // Résultats (60 graines ; « gain » = patrimoine = argent + sac au prix payé) :
 //   bot naïf (hasard)                        : médiane -363 €/h (p10 -594, p90 +1 480) ; il perd souvent sa mise : marge + arrestations (1,5 / 20 min)
 //   bot moyen (mémoire des prix, sans SMS)   : médiane -156 €/h (p10 -591, p90 +2 430) ; 500 € atteints en 9 min pour 17 bots sur 60

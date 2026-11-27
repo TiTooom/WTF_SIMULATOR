@@ -664,9 +664,8 @@ export const createPolice: SystemFactory = (ctx): PoliceSystem => {
       out.stars = starsOf(s?.w.heat ?? 0);
       out.starProgress = s ? Math.round(starProgress(s.w.heat) * 100) / 100 : 0;
       // Détail de recherche pour le HUD : `ws` 0 libre, 1 repéré, 2 recherche, 3 caché ; `wl` = secondes avant la prochaine étoile perdue (si non vu)
-      const o = out as PrivateState & { ws?: number; wl?: number };
-      o.ws = s ? s.phase : 0;
-      if (s && s.w.heat > 0 && !s.seenBy) o.wl = Math.ceil(unseenLeft(s.w));
+      out.ws = s ? s.phase : 0;
+      if (s && s.w.heat > 0 && !s.seenBy) out.wl = Math.ceil(unseenLeft(s.w));
       if (!cars.size) return;
       const pos = sim.playerPos(p);
       const list: { d: number; m: Mark }[] = [];

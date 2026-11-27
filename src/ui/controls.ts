@@ -14,6 +14,10 @@ export interface ControlsOptions {
   tips?: { get(): boolean; set(on: boolean): void; replay(): void };
   /** Code de la touche d'ouverture (défaut F1). */
   code?: string;
+  /** Faux : l'ouverture est refusée (menu, PDA, mini-jeu...). */
+  canOpen?: () => boolean;
+  /** Appelé à chaque ouverture / fermeture (libérer / reprendre la souris). */
+  onToggle?: (open: boolean) => void;
 }
 
 const CSS = `
@@ -93,8 +97,8 @@ export function createControls(opts: ControlsOptions) {
 
   const api = {
     isOpen: () => open,
-    open() { build(); open = true; panel.classList.add('on'); },
-    close() { open = false; panel.classList.remove('on'); },
+    open() { if (open || opts.canOpen?.() === false) return; build(); open = true; panel.classList.add('on'); opts.onToggle?.(true); },
+    close() { if (!open) return; open = false; panel.classList.remove('on'); opts.onToggle?.(false); },
     toggle() { if (open) api.close(); else api.open(); },
     setVisible(v: boolean) { btn.style.display = v ? '' : 'none'; if (!v) api.close(); },
     /** Contenu actuel (tests) : « libellé=touche ». */

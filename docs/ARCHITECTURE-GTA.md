@@ -26,7 +26,7 @@ Sortie : une voiture sur un sol plat, à pied et en voiture, chat/réglages/sauv
 export const CITY = { SEED: 20260601, N: 10, CELL: 64, HALF: 320, ROAD: 8, SIDEWALK: 3, LOT: 50, CHUNK: 128, BORDER: 330 } as const;
 ```
 - Grille 10×10, rues sur toutes les lignes (11×11 = 121 intersections, 220 tronçons), circulation à droite. Trottoirs et marquages **visuels uniquement** (pas de bordure physique).
-- 5 quartiers par Voronoï (Manhattan) sur les centres de cellules : `campus` (Les Agros, vert), `docks` (La Bande des Mouettes, bleu), `vieux_bourg` (La Confrérie du Fromage, jaune), `zone_indus` (Les Clés de 12, orange), `les_hauts` (Le Club des Golfeurs, violet).
+- 5 quartiers par Voronoï (Manhattan) sur les centres de cellules : `campus` (Les Ingés, vert), `saint_leu` (Les Mouettes de Saint-Leu, bleu), `cathedrale` (La Confrérie du Macaron, jaune), `amiens_nord` (Les Clés de 12, orange), `citadelle` (Le Club de la Citadelle, violet).
 - `getCity(): CityLayout` mémoïsée : `blocks`, `buildings` (boîtes), `nodes`/`edges` (graphe routier), `pois` (dealer, planque, commissariat, hôpital, camera, parking, donneur, spawn), `districtAt`, `blockAt`, `chunkOf`, `nearestNode`. POI garantis : 2 dealers + 1 planque + 3 caméras + 1 donneur par quartier, 1 commissariat, 1 hôpital, ~40 parkings (8 par quartier, déterministes, à `ROAD/2 + 0.3` = 4,3 m de l'axe). ~8 % d'îlots parc/place.
 - Rapier : sol + ~300 cuboïdes fixes (bâtiments) + 4 murs de bordure. Budget serveur < 4 ms/pas avec 4 joueurs.
 - Client `src/city/cityView.ts` : 25 chunks construits une fois, 3×3 visibles, `InstancedMesh` + coques de contour, ≤ ~150 appels de dessin, brouillard ~150 m.
@@ -34,7 +34,7 @@ export const CITY = { SEED: 20260601, N: 10, CELL: 64, HALF: 320, ROAD: 8, SIDEW
 ## 3. Contrats (extraits ; `protocol.ts`, `api.ts`, `ids.ts`, `game.ts` écrits par l'intégrateur en vague 1, ajouts seulement en fin de liste)
 ```ts
 // shared/ids.ts
-VEHICLE_TYPES = ['citadine','berline','camionnette','police']; DISTRICT_IDS; GANG_IDS = ['agros','mouettes','fromagers','cles_de_12','golfeurs'];
+VEHICLE_TYPES = ['citadine','berline','camionnette','police']; DISTRICT_IDS; GANG_IDS = ['inges','mouettes','macarons','cles_de_12','club_citadelle'];
 GOOD_IDS (marchandises fictives, réglables par economy); MINIGAME_KINDS = ['tournevis','court_circuit','digicode','dosage','fouille','brise_glace','desamorcage','liasses'];
 CrimeKind = 'vol_vehicule'|'pieton_renverse'|'agression_flic'|'flic_detruit'|'deal_vu'|'camera_detruite'|'tir'|'explosion'; MedalTier = 'bronze'|'argent'|'or';
 SystemId = 'traffic'|'peds'|'police'|'economy'|'missions'|'minigames'|'activities'; PedKind = 'passant'|'etudiant'|'dealer'|'flic'|'gang';
@@ -86,7 +86,7 @@ Un besoin dans le fichier d'un autre agent passe par une demande à l'intégrate
 | `missions` | 5 missions, checkpoints, médailles, coop (joueurs à `JOIN_R`), reprise après échec | `inMission`, `inspect`, `medalsOf`, `retryOf` |
 | `activities` | taxi (berline livrée `TAXI_LIVERY`) et justicier (voiture de police), touche `activity` (`Input.act`) | `inspect`, `stop` |
 
-Les 5 missions (une par quartier, chaînées par `requires`) : `annales` (campus, 300 €), `sardines` (docks, 450 €), `fromage` (vieux bourg, 600 €), `ecrous` (zone indus, 750 €), `golf` (les hauts, 1000 €). Étapes : `aller`, `livrer`, `voler`, `detruire`, `semer`, `minijeu`, `attendre`. Récompense × 1 / 1,25 / 1,5 (bronze / argent / or), 40 % seulement si la médaille n'est pas améliorée.
+Les 5 missions (une par quartier, chaînées par `requires`) : `annales` (campus, 300 €), `sardines` (saint_leu, 450 €), `fromage` (cathédrale, 600 €), `ecrous` (Amiens Nord, 750 €), `golf` (Citadelle, 1000 €). Étapes : `aller`, `livrer`, `voler`, `detruire`, `semer`, `minijeu`, `attendre`. Récompense × 1 / 1,25 / 1,5 (bronze / argent / or), 40 % seulement si la médaille n'est pas améliorée.
 
 Événement de fin : `{ k:'mission', ev:'done', id, medal, ms, text, damage?, accuracy?, reward?, par? }` (`par` = seuils de la médaille suivante) ; le client appelle `showMissionResult` (`src/ui/comic.ts`) et `noteGameEvent` (`src/ui/pda/stats.ts`).
 

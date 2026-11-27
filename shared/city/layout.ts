@@ -216,7 +216,7 @@ function build(): CityLayout {
     for (let k = 0; k < 3; k++) sidewalkPoi('camera', pickBlock(id, k), k);
     sidewalkPoi('donneur', pickBlock(id, 1), 0);
   }
-  sidewalkPoi('commissariat', blocks.find((b) => b.i === 5 && b.j === 5 && b.kind === 'batiments') ?? pickBlock('vieux_bourg', 0), 0);
+  sidewalkPoi('commissariat', blocks.find((b) => b.i === 5 && b.j === 5 && b.kind === 'batiments') ?? pickBlock('cathedrale', 0), 0);
   sidewalkPoi('hopital', pickBlock('campus', 0), 0);
 
   // Points d'apparition : milieux de tronçons autour du centre (rues forcément dégagées), voitures dans la voie de droite

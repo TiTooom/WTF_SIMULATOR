@@ -17,13 +17,13 @@ export const FOG_COLOR = 0x9fd3ff;
 export const FOG_NEAR = 45;
 export const FOG_FAR = 150;
 
-/** Enseignes de toit : 3 par quartier, dans l'ordre de DISTRICT_IDS (campus, docks, vieux_bourg, zone_indus, les_hauts). Textes inventés, aucun commerce réel. */
+/** Enseignes de toit : 3 par quartier, dans l'ordre de DISTRICT_IDS (campus, saint_leu, cathedrale, amiens_nord, citadelle). Textes inventés, aucun commerce réel. */
 const SIGNS: { text: string; bg: string; fg: string }[] = [
   { text: 'CAFÉ MACHINE', bg: '#3a8f43', fg: '#fff3a0' }, { text: 'ANNALES', bg: '#d6f0a8', fg: '#1f6f2a' }, { text: 'BIBLIO 24H', bg: '#1f6f2a', fg: '#ffffff' },
-  { text: 'POISSONS', bg: '#2f80ed', fg: '#ffffff' }, { text: 'BAR DU PORT', bg: '#0e3c8c', fg: '#ffd23f' }, { text: 'ANCRE HÔTEL', bg: '#bfe0ff', fg: '#0e3c8c' },
-  { text: 'FROMAGE', bg: '#ffd23f', fg: '#7a3b00' }, { text: 'BOULANGER', bg: '#e8a23a', fg: '#ffffff' }, { text: 'AUBERGE', bg: '#8a2b16', fg: '#ffe9a0' },
+  { text: 'LA BARQUE', bg: '#2f80ed', fg: '#ffffff' }, { text: 'BAR DU CANAL', bg: '#0e3c8c', fg: '#ffd23f' }, { text: 'GAUFRES', bg: '#bfe0ff', fg: '#0e3c8c' },
+  { text: 'MACARONS', bg: '#ffd23f', fg: '#7a3b00' }, { text: 'BOULANGER', bg: '#e8a23a', fg: '#ffffff' }, { text: 'AUBERGE', bg: '#8a2b16', fg: '#ffe9a0' },
   { text: 'GARAGE', bg: '#f2994a', fg: '#14141f' }, { text: 'FERRAILLE', bg: '#4b4f5c', fg: '#ffb347' }, { text: 'PIÈCES AUTO', bg: '#14141f', fg: '#ff7a1a' },
-  { text: 'GOLF CLUB', bg: '#9b51e0', fg: '#ffffff' }, { text: 'CHAMPAGNE', bg: '#2a145a', fg: '#ffd23f' }, { text: 'SPA & CO', bg: '#e9d4ff', fg: '#5a1fa0' },
+  { text: 'CITADELLE', bg: '#9b51e0', fg: '#ffffff' }, { text: 'TOUR PERRET', bg: '#2a145a', fg: '#ffd23f' }, { text: 'SPA & CO', bg: '#e9d4ff', fg: '#5a1fa0' },
 ];
 
 const mix = (a: number, b: number, k: number) => new THREE.Color(a).lerp(new THREE.Color(b), k).getHex();

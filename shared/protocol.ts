@@ -161,6 +161,8 @@ export interface PrivateState {
   bagCap: number;
   stars: number; // 0..5
   starProgress: number; // 0..1 vers l'étoile suivante / précédente
+  ws?: number; // état de recherche (shared/wanted.ts WS) : 0 libre, 1 repéré, 2 recherche, 3 caché
+  wl?: number; // secondes avant la prochaine étoile perdue (absent : vu ou sans étoile)
   district: DistrictId;
   shop?: ShopView;
   stash?: Partial<Record<GoodId, number>>; // contenu de la planque proche
@@ -186,5 +188,5 @@ export type GameServerEvent =
   | { k: 'vignettes'; id: string } // planches BD (narration)
   | { k: 'arrete' } // arrêté par la police
   | { k: 'mort' }
-  | { k: 'monde'; camsDown: number } // nombre de caméras de surveillance détruites
+  | { k: 'monde'; camsDown: number; down?: string[] } // caméras de surveillance détruites : nombre et ids (POI)
   | { k: 'toast'; text: string };

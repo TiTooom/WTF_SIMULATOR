@@ -55,8 +55,8 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   }
   check('territoire : 0,5-0,7 produit / 1,4-1,8 demandé / 1,0 sinon', ok);
   const s = newMarketState();
-  const g = GANGS.golfeurs.produces[0], w = GANGS.golfeurs.wants[0];
-  check('prix : le producteur vend moins cher que le demandeur', unitPrice(g, 'les_hauts', s, 0) < GOODS[g].base && unitPrice(w, 'les_hauts', s, 0) > GOODS[w].base);
+  const g = GANGS.club_citadelle.produces[0], w = GANGS.club_citadelle.wants[0];
+  check('prix : le producteur vend moins cher que le demandeur', unitPrice(g, 'citadelle', s, 0) < GOODS[g].base && unitPrice(w, 'citadelle', s, 0) > GOODS[w].base);
 }
 
 // ---- 3. Bornes sur 10 000 tirages (états aléatoires) ----
@@ -84,27 +84,27 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   const w = newMarketState();
   for (const d of DISTRICT_IDS) w.police[d] = 1;
   const g: GoodId = 'copies_blanches';
-  w.events.push({ good: g, district: 'les_hauts', mult: 3.5, start: 0, until: 1e9 });
-  w.noise[`${g}:les_hauts`] = NOISE_MAX;
-  check('pire cas haut : plafonné', unitPrice(g, 'les_hauts', w, 10) <= GOODS[g].base * MAX_PRICE_FACTOR);
+  w.events.push({ good: g, district: 'citadelle', mult: 3.5, start: 0, until: 1e9 });
+  w.noise[`${g}:citadelle`] = NOISE_MAX;
+  check('pire cas haut : plafonné', unitPrice(g, 'citadelle', w, 10) <= GOODS[g].base * MAX_PRICE_FACTOR);
   const lo = newMarketState();
-  lo.police.zone_indus = 0;
-  lo.events.push({ good: 'ecrous_de_12', district: 'zone_indus', mult: 0.35, start: 0, until: 1e9 });
-  lo.noise['ecrous_de_12:zone_indus'] = NOISE_MIN;
-  check('pire cas bas : jamais négatif ni nul', unitPrice('ecrous_de_12', 'zone_indus', lo, 10) >= 1 && quote('ecrous_de_12', 'zone_indus', lo, 10).sell >= 1);
+  lo.police.amiens_nord = 0;
+  lo.events.push({ good: 'ecrous_de_12', district: 'amiens_nord', mult: 0.35, start: 0, until: 1e9 });
+  lo.noise['ecrous_de_12:amiens_nord'] = NOISE_MIN;
+  check('pire cas bas : jamais négatif ni nul', unitPrice('ecrous_de_12', 'amiens_nord', lo, 10) >= 1 && quote('ecrous_de_12', 'amiens_nord', lo, 10).sell >= 1);
 }
 
 // ---- 4. Formule exacte ----
 {
   const s = newMarketState();
-  s.police.docks = 0.5;
-  s.noise['sardines_de_quai:docks'] = 1.05;
-  s.events.push({ good: 'sardines_de_quai', district: 'docks', mult: 3, start: 100, until: 500 });
+  s.police.saint_leu = 0.5;
+  s.noise['ficelles_picardes:saint_leu'] = 1.05;
+  s.events.push({ good: 'ficelles_picardes', district: 'saint_leu', mult: 3, start: 100, until: 500 });
   const m = GANGS.mouettes.produceMult;
-  const exp = Math.round(GOODS.sardines_de_quai.base * m * 3 * (1 + 0.3 * 0.5) * 1.05);
-  check('formule : Pbase × Mterr × Mév × (1+0,3R) × ε', unitPrice('sardines_de_quai', 'docks', s, 200) === exp, `${unitPrice('sardines_de_quai', 'docks', s, 200)} vs ${exp}`);
-  const before = unitPrice('sardines_de_quai', 'docks', s, 50);
-  check('événement pas encore démarré : sans effet', eventMult(s, 'sardines_de_quai', 'docks', 50) === 1 && before < unitPrice('sardines_de_quai', 'docks', s, 200));
+  const exp = Math.round(GOODS.ficelles_picardes.base * m * 3 * (1 + 0.3 * 0.5) * 1.05);
+  check('formule : Pbase × Mterr × Mév × (1+0,3R) × ε', unitPrice('ficelles_picardes', 'saint_leu', s, 200) === exp, `${unitPrice('ficelles_picardes', 'saint_leu', s, 200)} vs ${exp}`);
+  const before = unitPrice('ficelles_picardes', 'saint_leu', s, 50);
+  check('événement pas encore démarré : sans effet', eventMult(s, 'ficelles_picardes', 'saint_leu', 50) === 1 && before < unitPrice('ficelles_picardes', 'saint_leu', s, 200));
 }
 
 // ---- 5. Expiration des événements ----
@@ -112,7 +112,7 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   const rnd = makeRng(7);
   const s = newMarketState();
   s.events.push({ good: 'cafe_machine', district: 'campus', mult: 3, start: 0, until: 1000 });
-  s.events.push({ good: 'cables_hdmi', district: 'docks', mult: 0.35, start: 0, until: 5000 });
+  s.events.push({ good: 'cables_hdmi', district: 'saint_leu', mult: 0.35, start: 0, until: 5000 });
   const during = unitPrice('cafe_machine', 'campus', s, 999);
   check('événement actif avant la fin', eventMult(s, 'cafe_machine', 'campus', 999) === 3);
   check('événement inactif à `until` exactement', eventMult(s, 'cafe_machine', 'campus', 1000) === 1);
@@ -233,8 +233,8 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   const k0 = quote('cafe_machine', 'campus', f, 0).buy;
   applyTrade(f, 'cafe_machine', 'campus', 'buy', 5);
   check('acheter 5 unités fait monter le prix de la suivante', quote('cafe_machine', 'campus', f, 0).buy > k0 && Math.abs(flowOf(f, 'cafe_machine', 'campus') - (1 + 5 * FLOW_IMPACT)) < 1e-9);
-  const m1 = tradeTotal('annales_secretes', 'les_hauts', f, 0, 'buy', 5);
-  check('tradeTotal : prix du lot = prix moyen × quantité, jamais moins que 5 × la 1re unité', m1 >= 5 * quote('annales_secretes', 'les_hauts', f, 0).buy);
+  const m1 = tradeTotal('annales_secretes', 'citadelle', f, 0, 'buy', 5);
+  check('tradeTotal : prix du lot = prix moyen × quantité, jamais moins que 5 × la 1re unité', m1 >= 5 * quote('annales_secretes', 'citadelle', f, 0).buy);
   const r2 = newMarketState();
   applyTrade(r2, 'cafe_machine', 'campus', 'buy', 10);
   const f0 = flowOf(r2, 'cafe_machine', 'campus') - 1;
@@ -255,7 +255,7 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
   const rnd = makeRng(8);
   const s = newMarketState();
   for (let t = 0; t < 300_000; t += 1000) { advanceMarket(s, t, rnd); rollTip(s, t, rnd); }
-  setCameras(s, 'docks', 1, 3);
+  setCameras(s, 'saint_leu', 1, 3);
   s.police.campus = 0.77;
   applyTrade(s, 'cafe_machine', 'campus', 'buy', 7);
   check('sérialisation : le flux Φ est sauvegardé', serializeMarket(s).flow!.length >= 1);
@@ -280,7 +280,7 @@ const pick = <T>(l: readonly T[], r: () => number): T => l[Math.min(l.length - 1
     } catch { ok = false; }
   }
   check('parseMarket résiste aux données hostiles', ok);
-  const hostile = parseMarket(JSON.parse('{"flow":[["cafe_machine","campus",1e99],["__proto__","campus",2],["cafe_machine","campus","x"]],"flowAt":"y","events":[["cafe_machine","campus",3,5,1],["cafe_machine","campus",3,0,1e15],["cafe_machine","docks",3,10,20]]}'));
+  const hostile = parseMarket(JSON.parse('{"flow":[["cafe_machine","campus",1e99],["__proto__","campus",2],["cafe_machine","campus","x"]],"flowAt":"y","events":[["cafe_machine","campus",3,5,1],["cafe_machine","campus",3,0,1e15],["cafe_machine","saint_leu",3,10,20]]}'));
   check('parseMarket : flux borné, événements sans durée positive ignorés, durée plafonnée', flowOf(hostile, 'cafe_machine', 'campus') <= FLOW_MAX && hostile.events.length === 2 && hostile.events.every((e) => e.until > e.start && e.until - e.start <= 2 * 180_000));
 }
 
@@ -373,21 +373,21 @@ async function serverSuite(): Promise<void> {
   check('l\'argent ne devient jamais négatif', eco.addMoney(p1, -1e12) === 0 && eco.moneyOf(p1) === 0);
 
   eco.addMoney(p1, 100000);
-  for (let i = 0; i < 6; i++) msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: 1, side: 'buy' });
+  for (let i = 0; i < 6; i++) msg(p1, { k: 'trade', dealer: D.id, good: 'macarons_contrebande', qty: 1, side: 'buy' });
   const vol = bagVolume(eco.bagOf(p1));
   check('sac plein : le volume ne dépasse jamais la capacité', vol <= BAG_CAP && vol >= BAG_CAP - 5, `volume ${vol}/${BAG_CAP}`);
   const money1 = eco.moneyOf(p1);
-  msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: 50, side: 'buy' });
+  msg(p1, { k: 'trade', dealer: D.id, good: 'macarons_contrebande', qty: 50, side: 'buy' });
   check('sac plein : achat refusé sans débit', eco.moneyOf(p1) === money1 && bagVolume(eco.bagOf(p1)) === vol);
 
-  const own = eco.bagOf(p1).get('fromage_clandestin')!;
-  msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: own + 1, side: 'sell' });
-  check('vente de plus que le stock : refusée', eco.moneyOf(p1) === money1 && eco.bagOf(p1).get('fromage_clandestin') === own);
+  const own = eco.bagOf(p1).get('macarons_contrebande')!;
+  msg(p1, { k: 'trade', dealer: D.id, good: 'macarons_contrebande', qty: own + 1, side: 'sell' });
+  check('vente de plus que le stock : refusée', eco.moneyOf(p1) === money1 && eco.bagOf(p1).get('macarons_contrebande') === own);
   msg(p1, { k: 'trade', dealer: D.id, good: 'copies_blanches', qty: 1, side: 'sell' });
   check('vente d\'une marchandise absente : refusée', eco.moneyOf(p1) === money1);
-  const qs = quoteLot('fromage_clandestin', D.district, eco.market, sim.time, 'sell', own);
-  msg(p1, { k: 'trade', dealer: D.id, good: 'fromage_clandestin', qty: own, side: 'sell' });
-  check('vente valide : crédit au prix moyen du lot', eco.moneyOf(p1) === money1 + qs * own && !eco.bagOf(p1).has('fromage_clandestin'));
+  const qs = quoteLot('macarons_contrebande', D.district, eco.market, sim.time, 'sell', own);
+  msg(p1, { k: 'trade', dealer: D.id, good: 'macarons_contrebande', qty: own, side: 'sell' });
+  check('vente valide : crédit au prix moyen du lot', eco.moneyOf(p1) === money1 + qs * own && !eco.bagOf(p1).has('macarons_contrebande'));
 
   // planque
   const PL = planques[0];
@@ -422,7 +422,7 @@ async function serverSuite(): Promise<void> {
   check('restauration : marché identique', JSON.stringify(serializeMarket(second.eco.market)) === JSON.stringify(serializeMarket(eco.market)));
   check('la sauvegarde est un JSON pur sans Rapier', !/body|world|Rapier/i.test(JSON.stringify(saved)));
   const evil: unknown[] = [null, 5, 'x', [], {}, { accounts: 'x' },
-    { accounts: [null, 5, ['__proto__', 1e99, [['cafe_machine', 5]], [], 1], ['constructor', 5], ['Eve', -50, [['cafe_machine', 1e9], ['zzz', 3], ['cafe_machine', -1], ['fromage_clandestin', 1.5]], 'x', 'y']], market: { events: [[1]] }, camsDown: ['x', 3, '__proto__'] },
+    { accounts: [null, 5, ['__proto__', 1e99, [['cafe_machine', 5]], [], 1], ['constructor', 5], ['Eve', -50, [['cafe_machine', 1e9], ['zzz', 3], ['cafe_machine', -1], ['macarons_contrebande', 1.5]], 'x', 'y']], market: { events: [[1]] }, camsDown: ['x', 3, '__proto__'] },
     JSON.parse('{"accounts":[["__proto__",5,[],[],1],["Zed",null,[["cafe_machine",null]],[["copies_blanches",4]],-3]],"market":"x"}')];
   let okEvil = true;
   for (const e of evil) {
@@ -510,7 +510,7 @@ async function serverSuite(): Promise<void> {
     const t = mk();
     const c2: string[] = [];
     t.bus.on('crime', (e) => c2.push(e.kind));
-    const DV = dealers.find((d) => d.id === 'dealer_vieux_bourg_1')!;
+    const DV = dealers.find((d) => d.id === 'dealer_cathedrale_1')!;
     const cam = cams.map((c) => ({ c, d: Math.hypot(c.x - DV.x, c.z - DV.z) })).sort((a, b) => a.d - b.d)[0];
     t.eco.addMoney(p1, 1000);
     at(p1, DV.x + 1, DV.z);

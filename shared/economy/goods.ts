@@ -21,10 +21,10 @@ export const GOODS: Record<GoodId, GoodDef> = {
   croissant_pirate: { id: 'croissant_pirate', name: 'Croissants de contrebande', emoji: '🥐', blurb: 'Livrés avant 7 h, sans ticket de caisse.', base: 22, weight: 2, rarity: 1 },
   poudre_de_craie: { id: 'poudre_de_craie', name: 'Craie de Picardie', emoji: '🖍️', blurb: 'De la vraie craie du coin, en sachet. Rien d\'autre, le prof insiste.', base: 45, weight: 2, rarity: 2 },
   cables_hdmi: { id: 'cables_hdmi', name: 'Câbles HDMI douteux', emoji: '🔌', blurb: 'Marchent un jour sur deux, juste avant la soutenance.', base: 85, weight: 3, rarity: 2 },
-  fromage_clandestin: { id: 'fromage_clandestin', name: 'Macarons de contrebande', emoji: '🍪', blurb: 'Les vrais, d\'Amiens, sortis par la porte de derrière. Jamais plus de deux par personne.', base: 160, weight: 5, rarity: 2 },
+  macarons_contrebande: { id: 'macarons_contrebande', name: 'Macarons de contrebande', emoji: '🍪', blurb: 'Les vrais, d\'Amiens, sortis par la porte de derrière. Jamais plus de deux par personne.', base: 160, weight: 5, rarity: 2 },
   balles_dorees: { id: 'balles_dorees', name: 'Balles dorées de la Citadelle', emoji: '🥎', blurb: 'Plaquées or, tombées des remparts. Plus chères que la vue.', base: 320, weight: 4, rarity: 3 },
   ecrous_de_12: { id: 'ecrous_de_12', name: 'Écrous de 12', emoji: '🔩', blurb: 'Évidemment. Il en manque toujours un.', base: 18, weight: 1, rarity: 1 },
-  sardines_de_quai: { id: 'sardines_de_quai', name: 'Ficelles picardes (périmées)', emoji: '🥞', blurb: 'Jambon, champignons, crème… et date dépassée depuis la dernière Saint-Leu. À manger à ses risques.', base: 30, weight: 3, rarity: 1 },
+  ficelles_picardes: { id: 'ficelles_picardes', name: 'Ficelles picardes (périmées)', emoji: '🥞', blurb: 'Jambon, champignons, crème… et date dépassée depuis la dernière Saint-Leu. À manger à ses risques.', base: 30, weight: 3, rarity: 1 },
   copies_blanches: { id: 'copies_blanches', name: 'Copies blanches', emoji: '📄', blurb: 'Vierges, signées d\'avance. Très recherchées en juin.', base: 240, weight: 4, rarity: 3 },
 };
 
